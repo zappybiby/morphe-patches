@@ -53,6 +53,10 @@ Second \"item\" text"</string>
     <string name="morphe_music_hide_music_premium_promotions_title">Hide Music Premium promotions</string>
     <string name="morphe_music_hide_video_ads_title">Hide video ads</string>
 
+    <!-- misc.androidauto.playlists.restoreAndroidAutoPlaylistsPatch -->
+    <string name="morphe_music_android_auto_playlist_list_view_title">Use vertical list for Android Auto playlists</string>
+    <string name="morphe_music_android_auto_playlist_list_view_summary">Show playlist songs and podcast episodes in a vertical list instead of a grid</string>
+
     <!-- layout.hide.general.hideLayoutComponentsPatch -->
     <string name="morphe_music_hide_audio_video_toggle_title">Hide Audio / Video toggle</string>
     <string name="morphe_music_hide_explore_shelf_title">Hide Explore shelf</string>
