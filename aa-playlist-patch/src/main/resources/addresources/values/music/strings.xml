@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="morphe_music_android_auto_playlist_list_view_title">Use vertical list for Android Auto playlists</string>
+    <string name="morphe_music_android_auto_playlist_list_view_summary">Show playlist songs and podcast episodes in a vertical list instead of a grid</string>
+</resources>
