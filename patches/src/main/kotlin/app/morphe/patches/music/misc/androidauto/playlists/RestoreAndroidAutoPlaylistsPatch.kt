@@ -48,9 +48,9 @@ private const val PLAYLIST_ENDPOINT_EXTENSION_FIELD_NUMBER = 52_666_186
 private const val HOME_BROWSE_ID_MARKER = "FEmusic_home"
 private const val FOUR_BIT_REGISTER_LIMIT = 16
 private const val EIGHT_BIT_REGISTER_LIMIT = 256
-private const val RESPONSIVE_RENDERER_PLAY_ENDPOINT_FIELD_NAME = "k"
-private val RESPONSIVE_RENDERER_BROWSE_ENDPOINT_FIELD_NAMES = setOf("i", "j")
-private val RESPONSIVE_RENDERER_IDENTIFYING_FIELD_NAMES = setOf("c", "g", "h")
+private const val RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME = "c"
+private const val RESPONSIVE_RENDERER_TITLE_FIELD_NAME = "g"
+private const val RESPONSIVE_RENDERER_SUBTITLE_FIELD_NAME = "h"
 
 private val Method.instructionList
     get() = implementation?.instructions?.toList().orEmpty()
@@ -93,6 +93,11 @@ private fun <T> Sequence<T>.singleOrError(message: String) =
 private fun String.toRuntimeClassName() = removePrefix("L").removeSuffix(";").replace('/', '.')
 
 private data class BrowseProvider(val field: FieldReference, val getter: MethodReference)
+
+private data class RendererEndpoints(
+    val fields: List<FieldReference>,
+    val mediaIdMethod: Method,
+)
 
 private fun Instruction.receiverRegister() = when (this) {
     is FiveRegisterInstruction -> registerC.takeIf { registerCount > 0 }
@@ -232,25 +237,21 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
         val playlistTitleResourceId =
             getResourceId(ResourceType.STRING, "library_playlists_shelf_title")
 
-        fun resolveExtensionMessageType(
-            extensionFieldNumber: Int,
-            requiredFieldNames: Set<String>,
-        ): String {
+        fun resolveExtensionMessageType(extensionFieldNumber: Int): String {
             return allMethods
                 .filter { method ->
+                    method.name == "<clinit>" &&
                     method.instructionList.any { instruction ->
                         (instruction as? NarrowLiteralInstruction)?.narrowLiteral ==
                             extensionFieldNumber
                     }
                 }
                 .flatMap { method ->
-                    method.references<TypeReference>().map { it.type }
-                }
-                .distinct()
-                .filter { type ->
-                    classesByType[type]?.fields
-                        ?.map { field -> field.name }
-                        ?.containsAll(requiredFieldNames) == true
+                    method.instructionList.asSequence()
+                        .filter { instruction -> instruction.opcode == Opcode.CONST_CLASS }
+                        .mapNotNull { instruction ->
+                            instruction.getReference<TypeReference>()?.type
+                        }
                 }
                 .singleOrError(
                     "Could not uniquely resolve protobuf extension $extensionFieldNumber",
@@ -259,35 +260,59 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
 
         val responsiveRendererType = resolveExtensionMessageType(
             MUSIC_RESPONSIVE_RENDERER_EXTENSION_FIELD_NUMBER,
-            RESPONSIVE_RENDERER_IDENTIFYING_FIELD_NAMES,
         )
         val playlistEndpointType = resolveExtensionMessageType(
             PLAYLIST_ENDPOINT_EXTENSION_FIELD_NUMBER,
-            emptySet(),
         )
         val responsiveRendererFields = classesByType[responsiveRendererType]!!.fields.toList()
-        val rendererPlayEndpointField = responsiveRendererFields.single { field ->
-            field.name == RESPONSIVE_RENDERER_PLAY_ENDPOINT_FIELD_NAME
+
+        fun responsiveRendererField(name: String) = responsiveRendererFields.asSequence()
+            .filter { field ->
+                !AccessFlags.STATIC.isSet(field.accessFlags) && field.name == name
+            }
+            .singleOrError("Could not resolve responsive renderer field $name")
+
+        val rendererArtworkField = responsiveRendererField(
+            RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME,
+        )
+        val rendererTitleField = responsiveRendererField(
+            RESPONSIVE_RENDERER_TITLE_FIELD_NAME,
+        )
+        val rendererSubtitleField = responsiveRendererField(
+            RESPONSIVE_RENDERER_SUBTITLE_FIELD_NAME,
+        )
+        check(rendererArtworkField.type != rendererTitleField.type &&
+            rendererTitleField.type == rendererSubtitleField.type
+        ) {
+            "Unexpected responsive renderer artwork, title, or subtitle fields"
         }
-        // YouTube Music 9.30 moved the Browse endpoint from i to j; playback still uses k.
-        val rendererBrowseEndpointField = responsiveRendererFields.single { field ->
-            field.name in RESPONSIVE_RENDERER_BROWSE_ENDPOINT_FIELD_NAMES &&
-                field.type == rendererPlayEndpointField.type
-        }
-        val endpointMediaIdMethod = allMethods
-            .filter { method ->
-                AccessFlags.STATIC.isSet(method.accessFlags) &&
-                    method.hasSignature("Ljava/lang/String;", rendererPlayEndpointField.type) &&
-                    method.instructionList.any { instruction ->
-                        instruction.opcode == Opcode.IPUT_OBJECT &&
-                            instruction.getReference<FieldReference>()?.type ==
-                            rendererPlayEndpointField.type
+
+        val rendererEndpoints = responsiveRendererFields.asSequence()
+            .filter { field -> !AccessFlags.STATIC.isSet(field.accessFlags) }
+            .groupBy { field -> field.type }
+            .values.asSequence()
+            .filter { fields -> fields.size == 2 }
+            .mapNotNull { fields ->
+                val endpointType = fields.first().type
+                val mediaIdMethods = allMethods
+                    .filter { method ->
+                        AccessFlags.STATIC.isSet(method.accessFlags) &&
+                            method.hasSignature("Ljava/lang/String;", endpointType) &&
+                            method.instructionList.any { instruction ->
+                                instruction.opcode == Opcode.IPUT_OBJECT &&
+                                    instruction.getReference<FieldReference>()?.type == endpointType
+                            }
                     }
+                    .distinct()
+                    .toList()
+                mediaIdMethods.singleOrNull()?.let { mediaIdMethod ->
+                    RendererEndpoints(fields.sortedBy { field -> field.name }, mediaIdMethod)
+                }
             }
             .singleOrError(
-                "Could not uniquely resolve endpoint media-ID helper for " +
-                    rendererPlayEndpointField.type,
+                "Could not uniquely resolve the responsive renderer endpoints",
             )
+        val endpointMediaIdMethod = rendererEndpoints.mediaIdMethod
 
         val browseRequestBuilderMethod = BrowseRequestBuilderFingerprint.method
         val browseRequestBuilderInstructions = browseRequestBuilderMethod.instructionList
@@ -407,8 +432,8 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
         val encodedRuntimeSchema = listOf(
             responsiveRendererType.toRuntimeClassName(),
             playlistEndpointType.toRuntimeClassName(),
-            rendererBrowseEndpointField.name,
-            rendererPlayEndpointField.name,
+            rendererEndpoints.fields[0].name,
+            rendererEndpoints.fields[1].name,
             endpointMediaIdMethod.definingClass.toRuntimeClassName(),
             endpointMediaIdMethod.name,
             browseEndpointIdField.definingClass.toRuntimeClassName(),
@@ -424,6 +449,9 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
             mediaDescriptionMediaIdField.name,
             mediaDescriptionTitleField.name,
             playlistTitleResourceId.toString(),
+            rendererArtworkField.name,
+            rendererTitleField.name,
+            rendererSubtitleField.name,
         ).joinToString("|")
 
         val mutableAndroidAutoProviderMethod =
