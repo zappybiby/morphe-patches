@@ -1,3 +1,9 @@
+## [0.2.3](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.2.3) (2026-08-15)
+
+### Changes
+
+* **YouTube Music:** Clarify that this source starts playlists directly instead of opening their songs
+
 ## [0.2.2](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.2.2) (2026-08-15)
 
 ### Bug Fixes

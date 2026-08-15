@@ -5,12 +5,12 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
 apply<app.morphe.patches.gradle.PatchesPlugin>()
 
 group = "app.morphe"
-version = "0.2.2"
+version = "0.2.3"
 
 extensions.configure<PatchesExtension>("patches") {
     about {
-        name = "Restore YouTube Music Android Auto playlists"
-        description = "Restores Android Auto playlist playback in YouTube Music"
+        name = "Play YouTube Music Android Auto playlists"
+        description = "Restores YouTube Music playlists as directly playable items in Android Auto"
         source = "https://github.com/zappybiby/morphe-patches"
         author = "zappybiby"
         contact = "na"
