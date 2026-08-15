@@ -26,9 +26,12 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutionException;
+import java.util.function.Predicate;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
@@ -38,35 +41,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final String LIBRARY_BROWSE_ID = "FEmusic_library_landing";
     private static final String YTM_COLLECTION_BROWSE_ID_PREFIX = "VL";
 
-    private static final int SCHEMA_RESPONSIVE_RENDERER_CLASS_INDEX = 0;
-    private static final int SCHEMA_PLAYLIST_ENDPOINT_CLASS_INDEX = 1;
-    private static final int SCHEMA_RESPONSIVE_RENDERER_BROWSE_ENDPOINT_FIELD_INDEX = 2;
-    private static final int SCHEMA_RESPONSIVE_RENDERER_PLAY_ENDPOINT_FIELD_INDEX = 3;
-    private static final int SCHEMA_MEDIA_ID_HELPER_CLASS_INDEX = 4;
-    private static final int SCHEMA_MEDIA_ID_HELPER_METHOD_INDEX = 5;
-    private static final int SCHEMA_BROWSE_ENDPOINT_CLASS_INDEX = 6;
-    private static final int SCHEMA_BROWSE_ID_FIELD_INDEX = 7;
-    private static final int SCHEMA_BROWSE_ID_SETTER_INDEX = 8;
-    private static final int SCHEMA_MEDIA_ID_FIELD_PATH_INDEX = 9;
-    private static final int SCHEMA_BROWSE_BUILDER_FACTORY_INDEX = 10;
-    private static final int SCHEMA_BROWSE_REQUEST_METHOD_INDEX = 11;
-    private static final int SCHEMA_CLIENT_DATA_SETTER_INDEX = 12;
-    private static final int SCHEMA_RESULT_DELIVERY_METHOD_INDEX = 13;
-    private static final int SCHEMA_RESULT_DELIVERY_PARAMETER_COUNT_INDEX = 14;
-    private static final int SCHEMA_MEDIA_ITEM_DESCRIPTION_FIELD_INDEX = 15;
-    private static final int SCHEMA_DESCRIPTION_MEDIA_ID_FIELD_INDEX = 16;
-    private static final int SCHEMA_DESCRIPTION_TITLE_FIELD_INDEX = 17;
-    private static final int SCHEMA_PLAYLIST_TITLE_RESOURCE_ID_INDEX = 18;
-    private static final int SCHEMA_SIZE = SCHEMA_PLAYLIST_TITLE_RESOURCE_ID_INDEX + 1;
-
-    private static final String RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME = "c";
-    private static final String RESPONSIVE_RENDERER_TITLE_FIELD_NAME = "g";
-    private static final String RESPONSIVE_RENDERER_SUBTITLE_FIELD_NAME = "h";
-    private static final String TEXT_RUNS_FIELD_NAME = "c";
-    private static final String TEXT_DIRECT_VALUE_FIELD_NAME = "d";
-    private static final String TEXT_RUN_VALUE_FIELD_NAME = "c";
-    private static final String EXTENSION_MAP_FIELD_NAME = "j";
-    private static final String EXTENSION_ITERATOR_METHOD_NAME = "e";
     // MediaItemInfo protobuf
     private static final int MEDIA_ITEM_CONTAINER_TYPE_FIELD_NUMBER = 4;
     private static final int MEDIA_ITEM_CLIENT_TYPE_FIELD_NUMBER = 5;
@@ -96,8 +70,10 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static CompletableFuture<List<Object>> inFlightLibraryLoad;
     private static volatile String responsiveRendererClassName;
     private static volatile String playlistEndpointClassName;
-    private static volatile String responsiveRendererBrowseEndpointFieldName;
-    private static volatile String responsiveRendererPlayEndpointFieldName;
+    private static volatile String[] responsiveRendererEndpointFieldNames;
+    private static volatile String responsiveRendererArtworkFieldName;
+    private static volatile String responsiveRendererTitleFieldName;
+    private static volatile String responsiveRendererSubtitleFieldName;
     private static volatile String mediaIdHelperClassName;
     private static volatile String mediaIdHelperMethodName;
     private static volatile String browseEndpointClassName;
@@ -114,66 +90,41 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static volatile String descriptionTitleFieldName;
     private static volatile int playlistTitleResourceId;
     private static volatile Method endpointMediaIdMethod;
+    private static volatile TextAccessors textAccessors;
+    private static volatile Field textRunValueField;
+    private static volatile ExtensionAccessors extensionAccessors;
 
     private RestoreAndroidAutoPlaylistsPatch() {
     }
 
     public static void configure(String encodedSchema) {
-        if (encodedSchema == null) return;
-        String[] schemaValues = encodedSchema.split("\\|", -1);
-        if (schemaValues.length != SCHEMA_SIZE) {
-            Logger.printException(() -> "Android Auto playlist schema has " +
-                    schemaValues.length + " values; expected " + SCHEMA_SIZE);
-            return;
-        }
-        try {
-            for (String schemaValue : schemaValues) {
-                if (schemaValue.isEmpty()) throw new IllegalArgumentException("Empty schema value");
-            }
-            int deliveryParameterCount = Integer.parseInt(
-                    schemaValues[SCHEMA_RESULT_DELIVERY_PARAMETER_COUNT_INDEX]);
-            int titleResourceId = Integer.parseInt(
-                    schemaValues[SCHEMA_PLAYLIST_TITLE_RESOURCE_ID_INDEX]);
-            if (deliveryParameterCount < 1) {
-                throw new IllegalArgumentException("Invalid delivery parameter count");
-            }
-            if (titleResourceId < 1) throw new IllegalArgumentException("Invalid title resource");
-
-            responsiveRendererClassName =
-                    schemaValues[SCHEMA_RESPONSIVE_RENDERER_CLASS_INDEX];
-            playlistEndpointClassName = schemaValues[SCHEMA_PLAYLIST_ENDPOINT_CLASS_INDEX];
-            responsiveRendererBrowseEndpointFieldName =
-                    schemaValues[SCHEMA_RESPONSIVE_RENDERER_BROWSE_ENDPOINT_FIELD_INDEX];
-            responsiveRendererPlayEndpointFieldName =
-                    schemaValues[SCHEMA_RESPONSIVE_RENDERER_PLAY_ENDPOINT_FIELD_INDEX];
-            mediaIdHelperClassName = schemaValues[SCHEMA_MEDIA_ID_HELPER_CLASS_INDEX];
-            mediaIdHelperMethodName = schemaValues[SCHEMA_MEDIA_ID_HELPER_METHOD_INDEX];
-            browseEndpointClassName = schemaValues[SCHEMA_BROWSE_ENDPOINT_CLASS_INDEX];
-            browseIdFieldName = schemaValues[SCHEMA_BROWSE_ID_FIELD_INDEX];
-            browseIdSetterMethodName = schemaValues[SCHEMA_BROWSE_ID_SETTER_INDEX];
-            loadResultMediaIdFieldPath =
-                    schemaValues[SCHEMA_MEDIA_ID_FIELD_PATH_INDEX].split(",");
-            browseBuilderFactoryMethodName =
-                    schemaValues[SCHEMA_BROWSE_BUILDER_FACTORY_INDEX];
-            browseRequestMethodName = schemaValues[SCHEMA_BROWSE_REQUEST_METHOD_INDEX];
-            clientDataSetterMethodName = schemaValues[SCHEMA_CLIENT_DATA_SETTER_INDEX];
-            resultDeliveryMethodName = schemaValues[SCHEMA_RESULT_DELIVERY_METHOD_INDEX];
-            resultDeliveryParameterCount = deliveryParameterCount;
-            mediaItemDescriptionFieldName =
-                    schemaValues[SCHEMA_MEDIA_ITEM_DESCRIPTION_FIELD_INDEX];
-            descriptionMediaIdFieldName =
-                    schemaValues[SCHEMA_DESCRIPTION_MEDIA_ID_FIELD_INDEX];
-            descriptionTitleFieldName =
-                    schemaValues[SCHEMA_DESCRIPTION_TITLE_FIELD_INDEX];
-            playlistTitleResourceId = titleResourceId;
-            endpointMediaIdMethod = null;
-        } catch (Throwable error) {
-            Logger.printException(() -> "Could not configure Android Auto playlists", error);
-        }
+        String[] schemaValues = encodedSchema.split("\\|");
+        int index = 0;
+        responsiveRendererClassName = schemaValues[index++];
+        playlistEndpointClassName = schemaValues[index++];
+        responsiveRendererEndpointFieldNames =
+                new String[]{schemaValues[index++], schemaValues[index++]};
+        mediaIdHelperClassName = schemaValues[index++];
+        mediaIdHelperMethodName = schemaValues[index++];
+        browseEndpointClassName = schemaValues[index++];
+        browseIdFieldName = schemaValues[index++];
+        browseIdSetterMethodName = schemaValues[index++];
+        loadResultMediaIdFieldPath = schemaValues[index++].split(",");
+        browseBuilderFactoryMethodName = schemaValues[index++];
+        browseRequestMethodName = schemaValues[index++];
+        clientDataSetterMethodName = schemaValues[index++];
+        resultDeliveryMethodName = schemaValues[index++];
+        resultDeliveryParameterCount = Integer.parseInt(schemaValues[index++]);
+        mediaItemDescriptionFieldName = schemaValues[index++];
+        descriptionMediaIdFieldName = schemaValues[index++];
+        descriptionTitleFieldName = schemaValues[index++];
+        playlistTitleResourceId = Integer.parseInt(schemaValues[index++]);
+        responsiveRendererArtworkFieldName = schemaValues[index++];
+        responsiveRendererTitleFieldName = schemaValues[index++];
+        responsiveRendererSubtitleFieldName = schemaValues[index];
     }
 
     public static void initialize(Object service) {
-        if (service == null) return;
         synchronized (RestoreAndroidAutoPlaylistsPatch.class) {
             if (authenticatedBrowseService != service) {
                 NATIVE_PLAYLIST_NODE_MEDIA_IDS.clear();
@@ -186,8 +137,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     }
 
     public static boolean handlePlaylistNode(Object loadResult) {
-        if (loadResult == null || authenticatedBrowseService == null ||
-                !isNativePlaylistNode(loadResult)) {
+        if (authenticatedBrowseService == null || !isNativePlaylistNode(loadResult)) {
             return false;
         }
         loadLibrary().thenAccept(items -> deliver(loadResult, items));
@@ -195,8 +145,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     }
 
     public static void rememberNativePlaylistNode(Object loadResult, List<?> items) {
-        if (loadResult == null || authenticatedBrowseService == null || items == null ||
-                items.isEmpty()) {
+        if (authenticatedBrowseService == null || items.isEmpty()) {
             return;
         }
         String libraryMediaId = mediaId(loadResult);
@@ -205,7 +154,13 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 decodeMediaId(libraryMediaId), CONTAINER_TYPE_LIBRARY);
         if (clientType == UNSUPPORTED_CAR_CLIENT_TYPE) return;
 
-        String playlistNodeMediaId = findNativePlaylistsMediaId(items, clientType);
+        String playlistNodeMediaId;
+        try {
+            playlistNodeMediaId = findNativePlaylistsMediaId(items, clientType);
+        } catch (ReflectiveOperationException error) {
+            Logger.printException(() -> "Could not read Android Auto Library", error);
+            return;
+        }
         if (playlistNodeMediaId == null) {
             NATIVE_PLAYLIST_NODE_MEDIA_IDS.remove(clientType);
         } else {
@@ -215,36 +170,25 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
-    private static String findNativePlaylistsMediaId(List<?> items, long clientType) {
-        String playlistTitle;
-        try {
-            playlistTitle = Utils.getContext().getString(playlistTitleResourceId);
-        } catch (Throwable error) {
-            return null;
-        }
-
+    private static String findNativePlaylistsMediaId(
+            List<?> items, long clientType) throws ReflectiveOperationException {
+        String playlistTitle = Utils.getContext().getString(playlistTitleResourceId);
         String uniquePlaylistMediaId = null;
         for (Object item : items) {
-            try {
-                Object description = readField(item, mediaItemDescriptionFieldName);
-                if (description == null) continue;
+            Object description = readField(item, mediaItemDescriptionFieldName);
+            CharSequence title = (CharSequence) readField(
+                    description, descriptionTitleFieldName);
+            if (!playlistTitle.contentEquals(title)) continue;
 
-                Object title = readField(description, descriptionTitleFieldName);
-                if (!(title instanceof CharSequence) ||
-                        !playlistTitle.contentEquals((CharSequence) title)) continue;
-
-                Object mediaId = readField(description, descriptionMediaIdFieldName);
-                if (!(mediaId instanceof String)) continue;
-                String candidateMediaId = (String) mediaId;
-                if (carClientTypeForContainer(
-                        decodeMediaId(candidateMediaId), CONTAINER_TYPE_DEFAULT) != clientType) {
-                    continue;
-                }
-                if (uniquePlaylistMediaId != null &&
-                        !uniquePlaylistMediaId.equals(candidateMediaId)) return null;
-                uniquePlaylistMediaId = candidateMediaId;
-            } catch (Exception ignored) {
+            String candidateMediaId = (String) readField(
+                    description, descriptionMediaIdFieldName);
+            if (carClientTypeForContainer(
+                    decodeMediaId(candidateMediaId), CONTAINER_TYPE_DEFAULT) != clientType) {
+                continue;
             }
+            if (uniquePlaylistMediaId != null &&
+                    !uniquePlaylistMediaId.equals(candidateMediaId)) return null;
+            uniquePlaylistMediaId = candidateMediaId;
         }
         return uniquePlaylistMediaId;
     }
@@ -277,8 +221,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         CompletableFuture<Object> responseFuture = new CompletableFuture<>();
         try {
             Object service = authenticatedBrowseService;
-            if (service == null) throw new IllegalStateException("Browse service is not initialized");
-
             Object builder = invoke(service, browseBuilderFactoryMethodName);
             invoke(builder, browseIdSetterMethodName, LIBRARY_BROWSE_ID);
             invoke(builder, clientDataSetterMethodName, new byte[0]);
@@ -291,11 +233,11 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 } catch (InterruptedException error) {
                     Thread.currentThread().interrupt();
                     responseFuture.completeExceptionally(error);
-                } catch (Throwable error) {
+                } catch (ExecutionException | CancellationException error) {
                     responseFuture.completeExceptionally(error);
                 }
             }, REQUEST_EXECUTOR);
-        } catch (Throwable error) {
+        } catch (ReflectiveOperationException error) {
             responseFuture.completeExceptionally(error);
         }
         return responseFuture;
@@ -309,44 +251,58 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 appendLibraryPlaylist(value, state);
                 return true;
             });
-        } catch (Throwable error) {
-            Logger.printException(() -> "Could not map Library response", error);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("Could not map Library response", error);
         }
         Logger.printDebug(() -> "Mapped playable Library playlists: " + state.items.size());
         return state.items;
     }
 
-    private static void appendLibraryPlaylist(Object renderer, LibraryState state) {
-        try {
-            Object browseEndpoint = readField(renderer, responsiveRendererBrowseEndpointFieldName);
-            if (browseEndpoint == null) return;
-            String browseId = findBrowseId(browseEndpoint);
-            if (browseId == null || !browseId.startsWith(YTM_COLLECTION_BROWSE_ID_PREFIX) ||
-                    state.browseIds.contains(browseId)) {
-                return;
-            }
-            String playlistId = browseId.substring(YTM_COLLECTION_BROWSE_ID_PREFIX.length());
-            Object playEndpoint = readField(renderer, responsiveRendererPlayEndpointFieldName);
-            if (playlistId.isEmpty() || playEndpoint == null ||
-                    !endpointContainsPlaylistId(playEndpoint, playlistId)) return;
-            String playlistMediaId = mediaIdForEndpoint(playEndpoint);
-            if (playlistMediaId == null || playlistMediaId.isEmpty()) return;
-
-            String title = responsiveRendererTitle(renderer);
-            if (title.isEmpty()) return;
-            Object item = createPlayableItem(
-                    playlistMediaId,
-                    title,
-                    responsiveRendererSubtitle(renderer),
-                    responsiveRendererArtwork(renderer));
-            state.browseIds.add(browseId);
-            state.items.add(item);
-        } catch (Throwable error) {
-            Logger.printException(() -> "Could not map Library playlist", error);
+    private static void appendLibraryPlaylist(
+            Object renderer, LibraryState state) throws ReflectiveOperationException {
+        String browseId = responsiveRendererBrowseId(renderer);
+        if (browseId == null || !browseId.startsWith(YTM_COLLECTION_BROWSE_ID_PREFIX) ||
+                state.browseIds.contains(browseId)) {
+            return;
         }
+        String playlistId = browseId.substring(YTM_COLLECTION_BROWSE_ID_PREFIX.length());
+        String playlistMediaId = responsiveRendererPlaylistMediaId(renderer, playlistId);
+        if (playlistMediaId == null) return;
+
+        String title = responsiveRendererTitle(renderer);
+        if (title.isEmpty()) return;
+        state.browseIds.add(browseId);
+        state.items.add(createPlayableItem(
+                playlistMediaId,
+                title,
+                responsiveRendererSubtitle(renderer),
+                responsiveRendererArtwork(renderer)));
     }
 
-    private static boolean endpointContainsPlaylistId(Object endpoint, String playlistId) {
+    private static String responsiveRendererBrowseId(
+            Object renderer) throws ReflectiveOperationException {
+        for (String fieldName : responsiveRendererEndpointFieldNames) {
+            Object endpoint = readField(renderer, fieldName);
+            if (endpoint == null) continue;
+            String browseId = findBrowseId(endpoint);
+            if (browseId != null) return browseId;
+        }
+        return null;
+    }
+
+    private static String responsiveRendererPlaylistMediaId(
+            Object renderer, String playlistId) throws ReflectiveOperationException {
+        for (String fieldName : responsiveRendererEndpointFieldNames) {
+            Object endpoint = readField(renderer, fieldName);
+            if (endpoint == null || !endpointContainsPlaylistId(endpoint, playlistId)) continue;
+            String mediaId = mediaIdForEndpoint(endpoint);
+            if (mediaId != null && !mediaId.isEmpty()) return mediaId;
+        }
+        return null;
+    }
+
+    private static boolean endpointContainsPlaylistId(
+            Object endpoint, String playlistId) throws ReflectiveOperationException {
         Object extension = findExtension(endpoint, playlistEndpointClassName);
         if (extension == null) return false;
         for (Class<?> owner = extension.getClass(); owner != null && owner != Object.class;
@@ -355,17 +311,15 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 if (Modifier.isStatic(field.getModifiers()) || field.getType() != String.class) {
                     continue;
                 }
-                try {
-                    field.setAccessible(true);
-                    if (playlistId.equals(field.get(extension))) return true;
-                } catch (Throwable ignored) {
-                }
+                field.setAccessible(true);
+                if (playlistId.equals(field.get(extension))) return true;
             }
         }
         return false;
     }
 
-    private static String mediaIdForEndpoint(Object endpoint) throws Exception {
+    private static String mediaIdForEndpoint(
+            Object endpoint) throws ReflectiveOperationException {
         Method getMediaId = endpointMediaIdMethod;
         if (getMediaId == null) {
             Class<?> mediaIdHelper = Class.forName(
@@ -377,36 +331,34 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             endpointMediaIdMethod = getMediaId;
         }
         Object value = getMediaId.invoke(null, endpoint);
-        return value instanceof String ? (String) value : null;
+        return (String) value;
     }
 
     private static boolean isResponsiveRenderer(Object value) {
-        return value != null && value.getClass().getName().equals(responsiveRendererClassName);
+        return value.getClass().getName().equals(responsiveRendererClassName);
     }
 
-    private static String responsiveRendererTitle(Object renderer) throws Exception {
-        return renderText(readField(renderer, RESPONSIVE_RENDERER_TITLE_FIELD_NAME));
+    private static String responsiveRendererTitle(
+            Object renderer) throws ReflectiveOperationException {
+        return renderText(readField(renderer, responsiveRendererTitleFieldName));
     }
 
-    private static String responsiveRendererSubtitle(Object renderer) throws Exception {
-        return renderText(readField(renderer, RESPONSIVE_RENDERER_SUBTITLE_FIELD_NAME));
+    private static String responsiveRendererSubtitle(
+            Object renderer) throws ReflectiveOperationException {
+        return renderText(readField(renderer, responsiveRendererSubtitleFieldName));
     }
 
-    private static Uri responsiveRendererArtwork(Object renderer) throws Exception {
-        return findArtworkUri(readField(renderer, RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME));
+    private static Uri responsiveRendererArtwork(
+            Object renderer) throws ReflectiveOperationException {
+        return findArtworkUri(readField(renderer, responsiveRendererArtworkFieldName));
     }
 
-    private static String findBrowseId(Object endpoint) {
+    private static String findBrowseId(
+            Object endpoint) throws ReflectiveOperationException {
         Object browseEndpoint = findExtension(endpoint, browseEndpointClassName);
         if (browseEndpoint == null) return null;
-        try {
-            Object browseId = readField(browseEndpoint, browseIdFieldName);
-            return browseId instanceof String && !((String) browseId).isEmpty()
-                    ? (String) browseId
-                    : null;
-        } catch (Throwable ignored) {
-            return null;
-        }
+        String browseId = (String) readField(browseEndpoint, browseIdFieldName);
+        return browseId.isEmpty() ? null : browseId;
     }
 
     private static Object createPlayableItem(
@@ -417,43 +369,74 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 description, MediaBrowserCompat.MediaItem.FLAG_PLAYABLE);
     }
 
-    private static Uri findArtworkUri(Object value) {
+    private static Uri findArtworkUri(
+            Object value) throws ReflectiveOperationException {
         if (value == null) return null;
         String[] artworkUrl = new String[1];
         ObjectGraphState state = new ObjectGraphState();
-        try {
-            walkObjectGraph(value, state, candidate -> {
-                if (candidate instanceof CharSequence &&
-                        candidate.toString().startsWith("https://")) {
-                    artworkUrl[0] = candidate.toString();
-                    state.stopped = true;
-                }
-                return false;
-            });
-        } catch (Throwable ignored) {
-        }
+        walkObjectGraph(value, state, candidate -> {
+            if (candidate instanceof CharSequence &&
+                    candidate.toString().startsWith("https://")) {
+                artworkUrl[0] = candidate.toString();
+                state.stopped = true;
+            }
+            return false;
+        });
         return artworkUrl[0] == null ? null : Uri.parse(artworkUrl[0]);
     }
 
-    private static String renderText(Object text) {
+    private static String renderText(Object text) throws IllegalAccessException {
         if (text == null) return "";
-        try {
-            Object direct = readField(text, TEXT_DIRECT_VALUE_FIELD_NAME);
-            if (direct instanceof String && !((String) direct).isEmpty()) return (String) direct;
-            Object runs = readField(text, TEXT_RUNS_FIELD_NAME);
-            if (!(runs instanceof Iterable<?>)) return "";
-            StringBuilder combinedText = new StringBuilder();
-            for (Object run : (Iterable<?>) runs) {
-                Object value = readField(run, TEXT_RUN_VALUE_FIELD_NAME);
-                if (value instanceof String) combinedText.append((String) value);
-            }
-            return combinedText.toString();
-        } catch (Throwable ignored) {
-            return "";
+
+        TextAccessors accessors = textAccessors;
+        if (accessors == null) {
+            accessors = resolveTextAccessors(text.getClass());
+            textAccessors = accessors;
         }
+        String direct = (String) accessors.directValue.get(text);
+        if (!direct.isEmpty()) return direct;
+
+        StringBuilder combinedText = new StringBuilder();
+        for (Object run : (Iterable<?>) accessors.runs.get(text)) {
+            Field valueField = textRunValueField;
+            if (valueField == null) {
+                valueField = resolveTextRunValueField(run.getClass());
+                textRunValueField = valueField;
+            }
+            combinedText.append((String) valueField.get(run));
+        }
+        return combinedText.toString();
     }
 
-    private static Object readField(Object instance, String name) throws Exception {
+    private static TextAccessors resolveTextAccessors(Class<?> textClass) {
+        return new TextAccessors(
+                singleInstanceField(textClass, field -> field.getType() == String.class),
+                singleInstanceField(textClass,
+                        field -> Iterable.class.isAssignableFrom(field.getType())));
+    }
+
+    private static Field resolveTextRunValueField(Class<?> runClass) {
+        return singleInstanceField(runClass, field -> field.getType() == String.class);
+    }
+
+    private static Field singleInstanceField(Class<?> owner, Predicate<Field> predicate) {
+        Field result = null;
+        for (Field field : owner.getDeclaredFields()) {
+            if (Modifier.isStatic(field.getModifiers()) || !predicate.test(field)) continue;
+            if (result != null) {
+                throw new IllegalStateException("Multiple matching fields in " + owner.getName());
+            }
+            result = field;
+        }
+        if (result == null) {
+            throw new IllegalStateException("No matching field in " + owner.getName());
+        }
+        result.setAccessible(true);
+        return result;
+    }
+
+    private static Object readField(
+            Object instance, String name) throws ReflectiveOperationException {
         if (instance == null) return null;
         for (Class<?> owner = instance.getClass(); owner != null && owner != Object.class;
                 owner = owner.getSuperclass()) {
@@ -464,38 +447,69 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             } catch (NoSuchFieldException ignored) {
             }
         }
-        return null;
+        throw new NoSuchFieldException(instance.getClass().getName() + "." + name);
     }
 
-    private static Object readFieldPath(Object instance, String[] fieldNames) throws Exception {
+    private static Object readFieldPath(
+            Object instance, String[] fieldNames) throws ReflectiveOperationException {
         Object value = instance;
-        if (fieldNames == null) return null;
         for (String fieldName : fieldNames) value = readField(value, fieldName);
         return value;
     }
 
-    private static Iterator<?> extensionEntries(Object message) {
-        try {
-            Object extensionMap = readField(message, EXTENSION_MAP_FIELD_NAME);
-            if (extensionMap == null) return null;
-            Method iteratorMethod = extensionMap.getClass().getDeclaredMethod(
-                    EXTENSION_ITERATOR_METHOD_NAME);
-            iteratorMethod.setAccessible(true);
-            Object iterator = iteratorMethod.invoke(extensionMap);
-            return iterator instanceof Iterator<?> ? (Iterator<?>) iterator : null;
-        } catch (Throwable ignored) {
-            return null;
+    private static Iterator<?> extensionEntries(
+            Object message) throws ReflectiveOperationException {
+        ExtensionAccessors accessors = extensionAccessors;
+        if (accessors == null) {
+            accessors = resolveExtensionAccessors(message.getClass());
+            if (accessors == null) return null;
+            extensionAccessors = accessors;
         }
+        // The object graph also contains protobuf messages that do not support extensions.
+        if (!accessors.extensionMap.getDeclaringClass().isInstance(message)) return null;
+        Object extensionMap = accessors.extensionMap.get(message);
+        return (Iterator<?>) accessors.iteratorMethod.invoke(extensionMap);
     }
 
-    private static Object findExtension(Object message, String className) {
+    private static ExtensionAccessors resolveExtensionAccessors(Class<?> messageClass) {
+        ExtensionAccessors accessors = null;
+        for (Class<?> owner = messageClass.getSuperclass();
+                owner != null && owner != Object.class; owner = owner.getSuperclass()) {
+            for (Field field : owner.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers())) continue;
+                Method iteratorMethod = singleIteratorMethod(field.getType());
+                if (iteratorMethod == null) continue;
+                if (accessors != null) {
+                    throw new IllegalStateException("Multiple extension maps in " +
+                            messageClass.getName());
+                }
+                field.setAccessible(true);
+                iteratorMethod.setAccessible(true);
+                accessors = new ExtensionAccessors(field, iteratorMethod);
+            }
+        }
+        return accessors;
+    }
+
+    private static Method singleIteratorMethod(Class<?> owner) {
+        Method result = null;
+        for (Method method : owner.getDeclaredMethods()) {
+            if (Modifier.isStatic(method.getModifiers()) ||
+                    method.getParameterTypes().length != 0 ||
+                    method.getReturnType() != Iterator.class) continue;
+            if (result != null) return null;
+            result = method;
+        }
+        return result;
+    }
+
+    private static Object findExtension(
+            Object message, String className) throws ReflectiveOperationException {
         Iterator<?> entries = extensionEntries(message);
         if (entries == null) return null;
         while (entries.hasNext()) {
-            Object entry = entries.next();
-            if (!(entry instanceof Map.Entry<?, ?>)) continue;
-            Object extension = ((Map.Entry<?, ?>) entry).getValue();
-            if (extension != null && extension.getClass().getName().equals(className)) {
+            Object extension = ((Map.Entry<?, ?>) entries.next()).getValue();
+            if (extension.getClass().getName().equals(className)) {
                 return extension;
             }
         }
@@ -503,7 +517,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     }
 
     private static void walkObjectGraph(
-            Object value, ObjectGraphState state, ObjectVisitor visitor) throws Exception {
+            Object value, ObjectGraphState state, ObjectVisitor visitor)
+            throws ReflectiveOperationException {
         ArrayDeque<Object> pending = new ArrayDeque<>();
         enqueue(value, state, pending);
 
@@ -525,10 +540,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             Iterator<?> entries = extensionEntries(current);
             if (entries != null) {
                 while (entries.hasNext()) {
-                    Object entry = entries.next();
-                    if (entry instanceof Map.Entry<?, ?>) {
-                        enqueue(((Map.Entry<?, ?>) entry).getValue(), state, pending);
-                    }
+                    enqueue(((Map.Entry<?, ?>) entries.next()).getValue(), state, pending);
                 }
             }
             for (Class<?> owner = valueClass; owner != null && owner != Object.class;
@@ -539,7 +551,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                     try {
                         field.setAccessible(true);
                         enqueue(field.get(current), state, pending);
-                    } catch (Throwable ignored) {
+                    } catch (IllegalAccessException ignored) {
                     }
                 }
             }
@@ -581,7 +593,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                     clientType == CLIENT_TYPE_ANDROID_AUTOMOTIVE
                     ? clientType
                     : UNSUPPORTED_CAR_CLIENT_TYPE;
-        } catch (Throwable ignored) {
+        } catch (IllegalArgumentException ignored) {
             return UNSUPPORTED_CAR_CLIENT_TYPE;
         }
     }
@@ -597,7 +609,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static byte[] decodeMediaId(String mediaId) {
         try {
             return Base64.decode(mediaId, MEDIA_ID_BASE64_OPTIONS);
-        } catch (RuntimeException ignored) {
+        } catch (IllegalArgumentException ignored) {
             return new byte[0];
         }
     }
@@ -629,19 +641,21 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static void deliver(Object loadResult, List<Object> items) {
         try {
             invokeDelivery(loadResult, items);
-        } catch (Throwable error) {
+        } catch (ReflectiveOperationException error) {
             Logger.printException(() -> "Could not deliver Android Auto playlists", error);
         }
     }
 
-    static void invokeDelivery(Object loadResult, List<Object> items) throws Exception {
+    static void invokeDelivery(
+            Object loadResult, List<Object> items) throws ReflectiveOperationException {
         // YouTube Music 9.30 added an optional second argument; null keeps the earlier behavior.
         Object[] arguments = new Object[resultDeliveryParameterCount];
         arguments[0] = items;
         invoke(loadResult, resultDeliveryMethodName, arguments);
     }
 
-    private static Object invoke(Object target, String name, Object... arguments) throws Exception {
+    private static Object invoke(
+            Object target, String name, Object... arguments) throws ReflectiveOperationException {
         for (Class<?> owner = target.getClass(); owner != null && owner != Object.class;
                 owner = owner.getSuperclass()) {
             for (Method method : owner.getDeclaredMethods()) {
@@ -669,9 +683,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     private static String mediaId(Object loadResult) {
         try {
-            Object value = readFieldPath(loadResult, loadResultMediaIdFieldPath);
-            return value instanceof String ? (String) value : null;
-        } catch (Throwable ignored) {
+            return (String) readFieldPath(loadResult, loadResultMediaIdFieldPath);
+        } catch (ReflectiveOperationException ignored) {
             return null;
         }
     }
@@ -688,7 +701,27 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     }
 
     private interface ObjectVisitor {
-        boolean skipChildren(Object value) throws Exception;
+        boolean skipChildren(Object value) throws ReflectiveOperationException;
+    }
+
+    private static final class TextAccessors {
+        private final Field directValue;
+        private final Field runs;
+
+        private TextAccessors(Field directValue, Field runs) {
+            this.directValue = directValue;
+            this.runs = runs;
+        }
+    }
+
+    private static final class ExtensionAccessors {
+        private final Field extensionMap;
+        private final Method iteratorMethod;
+
+        private ExtensionAccessors(Field extensionMap, Method iteratorMethod) {
+            this.extensionMap = extensionMap;
+            this.iteratorMethod = iteratorMethod;
+        }
     }
 
     private static final class ObjectGraphState {
