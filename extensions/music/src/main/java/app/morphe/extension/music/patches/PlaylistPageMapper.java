@@ -44,6 +44,8 @@ final class PlaylistPageMapper {
     private static final String TEXT_RUN_VALUE_FIELD_NAME = "c";
     private static final String EXTENSION_MAP_FIELD_NAME = "j";
     private static final String EXTENSION_ITERATOR_METHOD_NAME = "e";
+    // YTM already requests 544 px artwork for playlist tiles, but only 120 px for song rows.
+    private static final int ANDROID_AUTO_PLAYLIST_ROW_ARTWORK_SIZE_PX = 544;
     // Google image URLs encode their dimensions as w###, h###, or s###.
     private static final String IMAGE_DIMENSION_MARKERS = "whs";
     private static final String IMAGE_DIMENSION_PREFIXES = "=-/";
@@ -207,7 +209,8 @@ final class PlaylistPageMapper {
             }
             Object idValue = getMediaId.invoke(null, endpoint);
             if (!(idValue instanceof String)) return;
-            if (!RestoreAndroidAutoPlaylistsPatch.hasWatchEndpoint((String) idValue)) return;
+            // Editing actions can have a watch endpoint, but playable rows also have a video ID.
+            if (!RestoreAndroidAutoPlaylistsPatch.hasPlayableVideoId((String) idValue)) return;
             String mediaId = RestoreAndroidAutoPlaylistsPatch.removeOptionalPlayerConfigFromMediaId(
                     (String) idValue);
             if (mediaId.isEmpty() || state.mediaIds.contains(mediaId)) return;
@@ -258,7 +261,32 @@ final class PlaylistPageMapper {
             });
         } catch (Throwable ignored) {
         }
-        return best.bestUrl == null ? null : Uri.parse(best.bestUrl);
+        return best.bestUrl == null ? null : Uri.parse(largerGoogleArtwork(best.bestUrl));
+    }
+
+    private static String largerGoogleArtwork(String url) {
+        String host = Uri.parse(url).getHost();
+        if (!("yt3.googleusercontent.com".equals(host)
+                || "lh3.googleusercontent.com".equals(host)
+                || "yt3.ggpht.com".equals(host))) return url;
+        int currentSize = ArtworkCandidate.largestImageDimension(url);
+        if (currentSize == 0 || currentSize >= ANDROID_AUTO_PLAYLIST_ROW_ARTWORK_SIZE_PX) return url;
+
+        StringBuilder resizedUrl = new StringBuilder(url.length());
+        for (int index = 0; index < url.length();) {
+            char current = url.charAt(index);
+            boolean startsDimension = index > 0
+                    && IMAGE_DIMENSION_MARKERS.indexOf(current) >= 0
+                    && IMAGE_DIMENSION_PREFIXES.indexOf(url.charAt(index - 1)) >= 0
+                    && index + 1 < url.length()
+                    && Character.isDigit(url.charAt(index + 1));
+            resizedUrl.append(current);
+            index++;
+            if (!startsDimension) continue;
+            resizedUrl.append(ANDROID_AUTO_PLAYLIST_ROW_ARTWORK_SIZE_PX);
+            while (index < url.length() && Character.isDigit(url.charAt(index))) index++;
+        }
+        return resizedUrl.toString();
     }
 
     static String renderText(Object text) {
