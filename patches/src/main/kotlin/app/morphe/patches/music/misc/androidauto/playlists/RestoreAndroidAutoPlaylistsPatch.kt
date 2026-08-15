@@ -195,7 +195,7 @@ private fun findStringPaths(
 @Suppress("unused")
 val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
     name = "Restore Android Auto playlists",
-    description = "Restores YouTube Music playlist playback in Android Auto.",
+    description = "Restores YouTube Music playlists as directly playable items in Android Auto.",
 ) {
     extendWith("extensions/android-auto-playlists.mpe")
     dependsOn(
