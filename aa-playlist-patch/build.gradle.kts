@@ -5,7 +5,7 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
 apply<app.morphe.patches.gradle.PatchesPlugin>()
 
 group = "app.morphe"
-version = "0.1.2"
+version = "0.1.3"
 
 extensions.configure<PatchesExtension>("patches") {
     about {
@@ -35,8 +35,11 @@ extensions.configure<KotlinJvmProjectExtension>("kotlin") {
             kotlin.include(
                 "app/morphe/patches/music/misc/androidauto/playlists/Fingerprints.kt",
                 "app/morphe/patches/music/misc/androidauto/playlists/RestoreAndroidAutoPlaylistsPatch.kt",
+                "app/morphe/patches/music/misc/androidauto/playlists/StandaloneExtensionPatch.kt",
                 "app/morphe/patches/music/misc/androidauto/playlists/StandaloneSettingsPatch.kt",
+                "app/morphe/patches/music/misc/extension/hooks/ApplicationInitHook.kt",
                 "app/morphe/patches/music/shared/Constants.kt",
+                "app/morphe/patches/music/shared/Fingerprints.kt",
             )
         }
     }
@@ -47,7 +50,6 @@ tasks.withType<Jar>().configureEach {
     exclude(
         "extensions/music.mpe",
         "extensions/reddit.mpe",
-        "extensions/shared.mpe",
         "extensions/shared-youtube.mpe",
         "extensions/youtube.mpe",
     )

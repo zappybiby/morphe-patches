@@ -1,3 +1,9 @@
+## [0.1.3](https://github.com/zappybiby/morphe-patches/releases/tag/browse-android-auto-playlists-v0.1.3) (2026-08-15)
+
+### Bug Fixes
+
+* **YouTube Music:** Include the shared runtime required by the standalone bundle
+
 ## [0.1.2](https://github.com/zappybiby/morphe-patches/releases/tag/browse-android-auto-playlists-v0.1.2) (2026-08-15)
 
 ### Bug Fixes
