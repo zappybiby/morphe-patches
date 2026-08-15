@@ -68,10 +68,12 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     // playlist then hit Android Auto's 419,840-byte result limit and stopped at 102 tracks, so
     // leave that optional data out.
     private static final int WATCH_ENDPOINT_EXTENSION_FIELD_NUMBER = 48_687_757;
+    private static final int WATCH_ENDPOINT_VIDEO_ID_FIELD_NUMBER = 1;
     private static final int OPTIONAL_PLAYER_CONFIG_FIELD_NUMBER = 79_857_908;
-    private static final int[] WATCH_ENDPOINT_FIELD_PATH = {
+    private static final int[] PLAYABLE_VIDEO_ID_FIELD_PATH = {
             MEDIA_ITEM_ENDPOINT_FIELD_NUMBER,
-            WATCH_ENDPOINT_EXTENSION_FIELD_NUMBER
+            WATCH_ENDPOINT_EXTENSION_FIELD_NUMBER,
+            WATCH_ENDPOINT_VIDEO_ID_FIELD_NUMBER
     };
     private static final int[] OPTIONAL_PLAYER_CONFIG_FIELD_PATH = {
             MEDIA_ITEM_ENDPOINT_FIELD_NUMBER,
@@ -428,15 +430,16 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
-    static boolean hasWatchEndpoint(String mediaId) {
+    static boolean hasPlayableVideoId(String mediaId) {
         try {
-            return hasFieldPath(decodeMediaId(mediaId), WATCH_ENDPOINT_FIELD_PATH, 0);
+            return hasNonEmptyFieldPath(decodeMediaId(mediaId), PLAYABLE_VIDEO_ID_FIELD_PATH, 0);
         } catch (RuntimeException ignored) {
             return false;
         }
     }
 
-    private static boolean hasFieldPath(byte[] message, int[] fieldPath, int fieldPathIndex) {
+    private static boolean hasNonEmptyFieldPath(
+            byte[] message, int[] fieldPath, int fieldPathIndex) {
         int[] offset = {0};
         while (offset[0] < message.length) {
             long tag = readVarint(message, offset);
@@ -448,13 +451,13 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             int fieldEnd = offset[0];
             if (fieldNumber != fieldPath[fieldPathIndex]) continue;
             if (fieldPathIndex == fieldPath.length - 1) {
-                return wireType == PROTOBUF_WIRE_LENGTH_DELIMITED;
+                return wireType == PROTOBUF_WIRE_LENGTH_DELIMITED && fieldEnd > payloadStart;
             }
             if (wireType != PROTOBUF_WIRE_LENGTH_DELIMITED) continue;
 
             byte[] nestedMessage = new byte[fieldEnd - payloadStart];
             System.arraycopy(message, payloadStart, nestedMessage, 0, nestedMessage.length);
-            if (hasFieldPath(nestedMessage, fieldPath, fieldPathIndex + 1)) return true;
+            if (hasNonEmptyFieldPath(nestedMessage, fieldPath, fieldPathIndex + 1)) return true;
         }
         return false;
     }
