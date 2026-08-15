@@ -198,7 +198,10 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
     description = "Restores YouTube Music playlist playback in Android Auto.",
 ) {
     extendWith("extensions/android-auto-playlists.mpe")
-    dependsOn(resourceMappingPatch)
+    dependsOn(
+        standaloneExtensionPatch,
+        resourceMappingPatch,
+    )
 
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
 
