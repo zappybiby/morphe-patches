@@ -1,3 +1,9 @@
+## [0.2.2](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.2.2) (2026-08-15)
+
+### Bug Fixes
+
+* **YouTube Music:** Include the shared runtime required by the standalone bundle
+
 ## [0.2.1](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.2.1) (2026-08-15)
 
 ### Bug Fixes
