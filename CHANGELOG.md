@@ -1,3 +1,9 @@
+## [0.2.4](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.2.4) (2026-08-15)
+
+### Changes
+
+* **YouTube Music:** Update to the latest Morphe development version and simplify playlist data handling
+
 ## [0.2.3](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.2.3) (2026-08-15)
 
 ### Changes
