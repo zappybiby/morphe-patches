@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-08-15T07:56:26",
+  "created_at": "2026-08-15T08:28:32",
   "description": "Restores YouTube Music playlist playback in Android Auto.",
-  "download_url": "https://github.com/zappybiby/morphe-patches/releases/download/restore-android-auto-playlists-v0.2.0/restore-android-auto-playlists-0.2.0.mpp",
+  "download_url": "https://github.com/zappybiby/morphe-patches/releases/download/restore-android-auto-playlists-v0.2.1/restore-android-auto-playlists-0.2.1.mpp",
   "signature_download_url": "",
-  "version": "0.2.0"
+  "version": "0.2.1"
 }

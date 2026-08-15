@@ -10,7 +10,6 @@ package app.morphe.patches.music.misc.androidauto.playlists
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
-import app.morphe.patcher.patch.PatchException
 import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.all.misc.resources.ResourceType
@@ -40,10 +39,6 @@ import java.util.ArrayDeque
 
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch;"
-private val REQUIRED_MORPHE_EXTENSION_CLASSES = setOf(
-    "Lapp/morphe/extension/shared/Logger;",
-    "Lapp/morphe/extension/shared/Utils;",
-)
 private const val MEDIA_ITEM_CLASS =
     "Landroid/support/v4/media/MediaBrowserCompat\$MediaItem;"
 private const val MEDIA_DESCRIPTION_CLASS =
@@ -522,13 +517,5 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
                 invoke-static/range { p0 .. p1 }, $EXTENSION_CLASS->rememberNativePlaylistNode(Ljava/lang/Object;Ljava/util/List;)V
             """,
         )
-    }
-
-    finalize {
-        if (REQUIRED_MORPHE_EXTENSION_CLASSES.any { classDescriptor ->
-            mutableClassDefByOrNull(classDescriptor) == null
-        }) {
-            throw PatchException("Requires Morphe's official YouTube Music patches")
-        }
     }
 }
