@@ -648,7 +648,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     static void invokeDelivery(
             Object loadResult, List<Object> items) throws ReflectiveOperationException {
-        // YouTube Music 9.30 added an optional second argument; null keeps the earlier behavior.
+        // The second callback argument used from 9.30 onward is optional, so leave it null.
         Object[] arguments = new Object[resultDeliveryParameterCount];
         arguments[0] = items;
         invoke(loadResult, resultDeliveryMethodName, arguments);
