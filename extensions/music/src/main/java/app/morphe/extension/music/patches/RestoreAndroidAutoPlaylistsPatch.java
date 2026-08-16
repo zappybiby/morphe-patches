@@ -54,7 +54,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final int SCHEMA_PLAYLIST_TITLE_RESOURCE_ID_INDEX = 18;
     private static final int SCHEMA_SIZE = SCHEMA_PLAYLIST_TITLE_RESOURCE_ID_INDEX + 1;
 
-    // MediaItemInfo protobuf
+    // YTM 9.15/9.29/9.30/9.31 MediaItemInfo: field 3 is the endpoint, field 4 is
+    // container type, and field 5 is client type. Library is 3; car clients are 10 and 13.
     private static final int MEDIA_ITEM_ENDPOINT_FIELD_NUMBER = 3;
     private static final int MEDIA_ITEM_CONTAINER_TYPE_FIELD_NUMBER = 4;
     private static final int MEDIA_ITEM_CLIENT_TYPE_FIELD_NUMBER = 5;
@@ -63,10 +64,9 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final long CLIENT_TYPE_ANDROID_AUTO = 10;
     private static final long CLIENT_TYPE_ANDROID_AUTOMOTIVE = 13;
     private static final long UNSUPPORTED_CAR_CLIENT_TYPE = 0;
-    // Player config data, including the init-playback URL, supported decoders, and device flags,
-    // added about 1,840 characters (roughly 3.7 KB in a Parcel) to every media ID. A 285-track
-    // playlist then hit Android Auto's 419,840-byte result limit and stopped at 102 tracks, so
-    // leave that optional data out.
+    // YTM 9.29/9.30/9.31 estimate the first ten items and cap browse delivery at 419,840 bytes.
+    // Optional player config (init URL, decoders, and device flags) adds about 1,840 characters,
+    // or 3.7 KB in a Parcel, to each media ID. Removing it kept a 285-track test list below the cap.
     private static final int WATCH_ENDPOINT_EXTENSION_FIELD_NUMBER = 48_687_757;
     private static final int WATCH_ENDPOINT_VIDEO_ID_FIELD_NUMBER = 1;
     private static final int OPTIONAL_PLAYER_CONFIG_FIELD_NUMBER = 79_857_908;
@@ -212,6 +212,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
+    // YTM 9.15/9.29/9.30/9.31: Library returns a localized Playlists row with a car-specific
+    // media ID. Match its resource title and MediaItemInfo so other Library rows are left alone.
     private static String findNativePlaylistsMediaId(List<?> items, long clientType) {
         String playlistTitle;
         try {
@@ -341,6 +343,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static List<Object> mapLibrary(Object response) {
         LibraryState state = new LibraryState();
         try {
+            // YTM 9.15/9.29/9.30/9.31: Library playlists are nested in responsive-renderer
+            // protobuf extensions. Walk the response and map only those renderer messages.
             PlaylistPageMapper.walkObjectGraph(response, state.objectGraphState, value -> {
                 if (!PlaylistPageMapper.isResponsiveRenderer(value)) return false;
                 appendLibraryCollection(value, state);
@@ -547,7 +551,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     }
 
     static void invokeDelivery(Object loadResult, List<Object> items) throws Exception {
-        // The second callback argument used from 9.30 onward is optional, so leave it null.
+        // YTM 9.15/9.29: the one-argument wrapper supplied a null interaction context.
+        // YTM 9.30/9.31: the wrapper is gone, so supply the same null here.
         Object[] arguments = new Object[resultDeliveryParameterCount];
         arguments[0] = items;
         invoke(loadResult, resultDeliveryMethodName, arguments);

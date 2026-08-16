@@ -29,7 +29,8 @@ final class PlaylistPageMapper {
             "android.media.browse.CONTENT_STYLE_PLAYABLE_HINT";
     private static final int CONTENT_STYLE_LIST = 1;
 
-    // These field paths are the same in every supported 9.x version.
+    // YTM 9.15/9.29/9.30/9.31: continuation, tab, shelf, renderer, text, and
+    // protobuf-extension field paths below are unchanged.
     private static final String[] CONTINUATION_SECTION_FIELD_PATH = {"a", "i"};
     private static final String[] TAB_LIST_FIELD_PATH = {"a", "f", "c", "b"};
     private static final String[] TAB_CONTENT_FIELD_PATH = {"c", "i", "c"};
@@ -44,7 +45,8 @@ final class PlaylistPageMapper {
     private static final String TEXT_RUN_VALUE_FIELD_NAME = "c";
     private static final String EXTENSION_MAP_FIELD_NAME = "j";
     private static final String EXTENSION_ITERATOR_METHOD_NAME = "e";
-    // YTM already requests 544 px artwork for playlist tiles, but only 120 px for song rows.
+    // YTM 9.15/9.29/9.30/9.31 request 544 px playlist tiles but only 120 px song rows.
+    // Request 544 px for Android Auto song rows so their artwork is not blurred.
     private static final int ANDROID_AUTO_PLAYLIST_ROW_ARTWORK_SIZE_PX = 544;
     // Google image URLs encode their dimensions as w###, h###, or s###.
     private static final String IMAGE_DIMENSION_MARKERS = "whs";
@@ -134,8 +136,8 @@ final class PlaylistPageMapper {
     private static void appendPlaylistContents(Object response, PlaylistPageState state)
             throws Exception {
         int itemCountBeforeMapping = state.items.size();
-        // Start with the known playlist sections so unrelated renderers are not treated as tracks.
-        // If YouTube Music changes the layout, fall back to walking the full response.
+        // YTM 9.15/9.29/9.30/9.31: tracks are under continuation sections or the selected tab shelf.
+        // Try those paths first; walk the whole response only if neither produces an item.
         Iterator<?> continuationEntries = extensionEntries(
                 readFieldPath(response, CONTINUATION_SECTION_FIELD_PATH));
         if (continuationEntries != null) {
@@ -209,7 +211,8 @@ final class PlaylistPageMapper {
             }
             Object idValue = getMediaId.invoke(null, endpoint);
             if (!(idValue instanceof String)) return;
-            // Editing actions can have a watch endpoint, but playable rows also have a video ID.
+            // YTM 9.15/9.29/9.30/9.31: Add songs has a watch endpoint but no video ID.
+            // Require a video ID so that editing action is not exposed as a playable row.
             if (!RestoreAndroidAutoPlaylistsPatch.hasPlayableVideoId((String) idValue)) return;
             String mediaId = RestoreAndroidAutoPlaylistsPatch.removeOptionalPlayerConfigFromMediaId(
                     (String) idValue);
