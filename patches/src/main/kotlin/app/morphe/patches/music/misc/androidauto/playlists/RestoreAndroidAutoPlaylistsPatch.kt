@@ -214,7 +214,7 @@ private fun findStringPaths(
 
 @Suppress("unused")
 val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
-    name = "Browse Android Auto playlists",
+    name = "Restore Playlists in Android Auto",
     description = "Lets you open YouTube Music playlists and choose individual songs in Android Auto.",
 ) {
     extendWith("extensions/android-auto-playlists.mpe")
@@ -406,8 +406,9 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
         val resultDeliveryMethod = mediaIdValidationMethod.references<MethodReference>()
             .filter { reference ->
                 val parameters = reference.parameterTypes.map(CharSequence::toString)
-                // YouTube Music 9.30 added an optional second object parameter.
+                // The result callback has one parameter before 9.30 and two from 9.30 onward.
                 reference.definingClass == loadResultType && reference.returnType == "V" &&
+                    parameters.size in 1..2 &&
                     parameters.firstOrNull() == "Ljava/util/List;" &&
                     parameters.drop(1).all { it.startsWith("L") || it.startsWith("[") }
             }
