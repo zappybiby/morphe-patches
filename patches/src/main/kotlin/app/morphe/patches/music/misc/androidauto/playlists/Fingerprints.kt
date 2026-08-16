@@ -21,6 +21,7 @@ internal object BrowseRequestBuilderFingerprint : Fingerprint(
     returnType = "L",
     parameters = listOf("L"),
     strings = listOf("FEmusic_home"),
-    // The same marker also appears in a method that only returns Object.
+    // YTM 9.15/9.29/9.30/9.31: FEmusic_home also appears in an Object-returning lambda.
+    // Exclude that method so this fingerprint selects the Browse request builder.
     custom = { method, _ -> method.returnType != "Ljava/lang/Object;" }
 )

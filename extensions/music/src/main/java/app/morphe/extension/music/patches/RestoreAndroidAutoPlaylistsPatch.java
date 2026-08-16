@@ -41,7 +41,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final String LIBRARY_BROWSE_ID = "FEmusic_library_landing";
     private static final String YTM_COLLECTION_BROWSE_ID_PREFIX = "VL";
 
-    // MediaItemInfo protobuf
+    // YTM 9.15/9.29/9.30/9.31 MediaItemInfo: field 4 is container type and field 5 is client type.
+    // Library is 3; Android Auto and Android Automotive are 10 and 13.
     private static final int MEDIA_ITEM_CONTAINER_TYPE_FIELD_NUMBER = 4;
     private static final int MEDIA_ITEM_CLIENT_TYPE_FIELD_NUMBER = 5;
     private static final long CONTAINER_TYPE_DEFAULT = 0;
@@ -170,6 +171,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
+    // YTM 9.15/9.29/9.30/9.31: Library returns a localized Playlists row with a car-specific
+    // media ID. Match its resource title and MediaItemInfo so other Library rows are left alone.
     private static String findNativePlaylistsMediaId(
             List<?> items, long clientType) throws ReflectiveOperationException {
         String playlistTitle = Utils.getContext().getString(playlistTitleResourceId);
@@ -246,6 +249,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static List<Object> mapLibrary(Object response) {
         LibraryState state = new LibraryState();
         try {
+            // YTM 9.15/9.29/9.30/9.31: Library playlists are nested in responsive-renderer
+            // protobuf extensions. Walk the response and map only those renderer messages.
             walkObjectGraph(response, state.objectGraphState, value -> {
                 if (!isResponsiveRenderer(value)) return false;
                 appendLibraryPlaylist(value, state);
@@ -301,6 +306,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         return null;
     }
 
+    // YTM 9.15/9.29/9.30/9.31: the playlist endpoint extension contains the playlist ID.
+    // Match its value instead of relying on the generated String field name.
     private static boolean endpointContainsPlaylistId(
             Object endpoint, String playlistId) throws ReflectiveOperationException {
         Object extension = findExtension(endpoint, playlistEndpointClassName);
@@ -318,6 +325,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         return false;
     }
 
+    // YTM 9.15/9.29/9.30/9.31: the endpoint-to-media-ID helper keeps the same behavior but
+    // changes names. The bytecode patch supplies the helper resolved for the current APK.
     private static String mediaIdForEndpoint(
             Object endpoint) throws ReflectiveOperationException {
         Method getMediaId = endpointMediaIdMethod;
@@ -369,6 +378,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 description, MediaBrowserCompat.MediaItem.FLAG_PLAYABLE);
     }
 
+    // YTM 9.15/9.29/9.30/9.31 testing: the first HTTPS URL in this artwork message is the
+    // playlist thumbnail. Stop after finding it instead of traversing the remaining artwork data.
     private static Uri findArtworkUri(
             Object value) throws ReflectiveOperationException {
         if (value == null) return null;
@@ -385,6 +396,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         return artworkUrl[0] == null ? null : Uri.parse(artworkUrl[0]);
     }
 
+    // YTM 9.15/9.29/9.30/9.31: text messages have one direct String and one iterable field of
+    // text runs. Each run has one String, so resolve these fields by type rather than generated names.
     private static String renderText(Object text) throws IllegalAccessException {
         if (text == null) return "";
 
@@ -457,6 +470,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         return value;
     }
 
+    // YTM 9.15/9.29/9.30/9.31: extendable protobuf messages inherit one extension map with one
+    // iterator. Some response messages are not extendable, so reuse these accessors only when compatible.
     private static Iterator<?> extensionEntries(
             Object message) throws ReflectiveOperationException {
         ExtensionAccessors accessors = extensionAccessors;
@@ -465,7 +480,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             if (accessors == null) return null;
             extensionAccessors = accessors;
         }
-        // The object graph also contains protobuf messages that do not support extensions.
         if (!accessors.extensionMap.getDeclaringClass().isInstance(message)) return null;
         Object extensionMap = accessors.extensionMap.get(message);
         return (Iterator<?>) accessors.iteratorMethod.invoke(extensionMap);
@@ -516,6 +530,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         return null;
     }
 
+    // YTM 9.15/9.29/9.30/9.31: Library renderers may be nested in fields, lists, or protobuf
+    // extensions. Traverse generated YTM objects until the requested renderer is found.
     private static void walkObjectGraph(
             Object value, ObjectGraphState state, ObjectVisitor visitor)
             throws ReflectiveOperationException {
@@ -648,7 +664,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     static void invokeDelivery(
             Object loadResult, List<Object> items) throws ReflectiveOperationException {
-        // The second callback argument used from 9.30 onward is optional, so leave it null.
+        // YTM 9.15/9.29: the one-argument wrapper supplied a null interaction context.
+        // YTM 9.30/9.31: the wrapper is gone, so supply the same null here.
         Object[] arguments = new Object[resultDeliveryParameterCount];
         arguments[0] = items;
         invoke(loadResult, resultDeliveryMethodName, arguments);
