@@ -1,9 +1,9 @@
 {
   "NOTE": "Do NOT manually edit this file. This file is automatically updated when semantic release (release.yml) runs. Manually editing this file can break your releases and break third party tools that use this file.",
-  "version": "0.2.4",
+  "version": "0.0.1",
   "patches": [
     {
-      "name": "Restore Android Auto playlists",
+      "name": "Restore Playlists in Android Auto",
       "description": "Restores YouTube Music playlists as directly playable items in Android Auto.",
       "default": true,
       "dependencies": [],
