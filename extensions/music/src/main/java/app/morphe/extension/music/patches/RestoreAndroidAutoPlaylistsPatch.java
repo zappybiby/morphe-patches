@@ -25,6 +25,7 @@ import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 
 import app.morphe.extension.shared.Logger;
+import app.morphe.extension.shared.ResourceUtils;
 import app.morphe.extension.shared.Utils;
 
 @SuppressWarnings("unused")
@@ -32,6 +33,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final String LIBRARY_BROWSE_ID = "FEmusic_library_landing";
     private static final String YTM_COLLECTION_BROWSE_ID_PREFIX = "VL";
     private static final String COLLECTION_MEDIA_ID_PREFIX = "morphe:aa-collection:";
+    private static final String PLAYLISTS_TITLE_RESOURCE = "library_playlists_shelf_title";
 
     private static final int SCHEMA_RESPONSIVE_RENDERER_CLASS_INDEX = 0;
     private static final int SCHEMA_MUSIC_SHELF_RENDERER_CLASS_INDEX = 1;
@@ -48,22 +50,14 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final int SCHEMA_CLIENT_DATA_SETTER_INDEX = 12;
     private static final int SCHEMA_RESULT_DELIVERY_METHOD_INDEX = 13;
     private static final int SCHEMA_RESULT_DELIVERY_PARAMETER_COUNT_INDEX = 14;
-    private static final int SCHEMA_MEDIA_ITEM_DESCRIPTION_FIELD_INDEX = 15;
-    private static final int SCHEMA_DESCRIPTION_MEDIA_ID_FIELD_INDEX = 16;
-    private static final int SCHEMA_DESCRIPTION_TITLE_FIELD_INDEX = 17;
-    private static final int SCHEMA_PLAYLIST_TITLE_RESOURCE_ID_INDEX = 18;
-    private static final int SCHEMA_SIZE = SCHEMA_PLAYLIST_TITLE_RESOURCE_ID_INDEX + 1;
+    private static final int SCHEMA_EXTENSION_MAP_CLASS_INDEX = 15;
+    private static final int SCHEMA_EXTENSION_MAP_FIELD_INDEX = 16;
+    private static final int SCHEMA_EXTENSION_ITERATOR_METHOD_INDEX = 17;
+    private static final int SCHEMA_SIZE = SCHEMA_EXTENSION_ITERATOR_METHOD_INDEX + 1;
 
     // YTM 9.15/9.29/9.30/9.31 MediaItemInfo: field 3 is the endpoint, field 4 is
     // container type, and field 5 is client type. Library is 3; car clients are 10 and 13.
     private static final int MEDIA_ITEM_ENDPOINT_FIELD_NUMBER = 3;
-    private static final int MEDIA_ITEM_CONTAINER_TYPE_FIELD_NUMBER = 4;
-    private static final int MEDIA_ITEM_CLIENT_TYPE_FIELD_NUMBER = 5;
-    private static final long CONTAINER_TYPE_DEFAULT = 0;
-    private static final long CONTAINER_TYPE_LIBRARY = 3;
-    private static final long CLIENT_TYPE_ANDROID_AUTO = 10;
-    private static final long CLIENT_TYPE_ANDROID_AUTOMOTIVE = 13;
-    private static final long UNSUPPORTED_CAR_CLIENT_TYPE = 0;
     // YTM 9.29/9.30/9.31 estimate the first ten items and cap browse delivery at 419,840 bytes.
     // Optional player config (init URL, decoders, and device flags) adds about 1,840 characters,
     // or 3.7 KB in a Parcel, to each media ID. Removing it kept a 285-track test list below the cap.
@@ -96,10 +90,9 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final Executor REQUEST_EXECUTOR = Utils::runOnBackgroundThread;
     private static final ConcurrentHashMap<String, CompletableFuture<List<Object>>> IN_FLIGHT_LOADS =
             new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<Long, String> NATIVE_PLAYLIST_NODE_MEDIA_IDS =
-            new ConcurrentHashMap<>();
-
     private static volatile Object authenticatedBrowseService;
+    private static volatile String nativePlaylistsMediaId;
+    private static volatile String configuredSchema;
     private static volatile String[] loadResultMediaIdFieldPath;
     private static volatile String browseIdSetterMethodName;
     private static volatile String continuationSetterMethodName;
@@ -108,16 +101,13 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static volatile String clientDataSetterMethodName;
     private static volatile String resultDeliveryMethodName;
     private static volatile int resultDeliveryParameterCount;
-    private static volatile String mediaItemDescriptionFieldName;
-    private static volatile String descriptionMediaIdFieldName;
-    private static volatile String descriptionTitleFieldName;
-    private static volatile int playlistTitleResourceId;
-
     private RestoreAndroidAutoPlaylistsPatch() {
     }
 
-    public static void configure(String encodedSchema) {
+    /** Saves the fields and methods resolved for the installed YTM version. */
+    public static synchronized void configure(String encodedSchema) {
         if (encodedSchema == null) return;
+        if (encodedSchema.equals(configuredSchema)) return;
         String[] schemaValues = encodedSchema.split("\\|", -1);
         if (schemaValues.length != SCHEMA_SIZE) {
             Logger.printException(() -> "Android Auto playlist schema has " +
@@ -130,12 +120,9 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             }
             int deliveryParameterCount = Integer.parseInt(
                     schemaValues[SCHEMA_RESULT_DELIVERY_PARAMETER_COUNT_INDEX]);
-            int titleResourceId = Integer.parseInt(
-                    schemaValues[SCHEMA_PLAYLIST_TITLE_RESOURCE_ID_INDEX]);
             if (deliveryParameterCount < 1) {
                 throw new IllegalArgumentException("Invalid delivery parameter count");
             }
-            if (titleResourceId < 1) throw new IllegalArgumentException("Invalid title resource");
 
             PlaylistPageMapper.configure(
                     schemaValues[SCHEMA_RESPONSIVE_RENDERER_CLASS_INDEX],
@@ -144,7 +131,10 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                     schemaValues[SCHEMA_MEDIA_ID_HELPER_CLASS_INDEX],
                     schemaValues[SCHEMA_MEDIA_ID_HELPER_METHOD_INDEX],
                     schemaValues[SCHEMA_BROWSE_ENDPOINT_CLASS_INDEX],
-                    schemaValues[SCHEMA_BROWSE_ID_FIELD_INDEX]);
+                    schemaValues[SCHEMA_BROWSE_ID_FIELD_INDEX],
+                    schemaValues[SCHEMA_EXTENSION_MAP_CLASS_INDEX],
+                    schemaValues[SCHEMA_EXTENSION_MAP_FIELD_INDEX],
+                    schemaValues[SCHEMA_EXTENSION_ITERATOR_METHOD_INDEX]);
             loadResultMediaIdFieldPath = schemaValues[SCHEMA_MEDIA_ID_FIELD_PATH_INDEX].split(",");
             browseIdSetterMethodName = schemaValues[SCHEMA_BROWSE_ID_SETTER_INDEX];
             continuationSetterMethodName = schemaValues[SCHEMA_CONTINUATION_SETTER_INDEX];
@@ -153,19 +143,17 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             clientDataSetterMethodName = schemaValues[SCHEMA_CLIENT_DATA_SETTER_INDEX];
             resultDeliveryMethodName = schemaValues[SCHEMA_RESULT_DELIVERY_METHOD_INDEX];
             resultDeliveryParameterCount = deliveryParameterCount;
-            mediaItemDescriptionFieldName = schemaValues[SCHEMA_MEDIA_ITEM_DESCRIPTION_FIELD_INDEX];
-            descriptionMediaIdFieldName = schemaValues[SCHEMA_DESCRIPTION_MEDIA_ID_FIELD_INDEX];
-            descriptionTitleFieldName = schemaValues[SCHEMA_DESCRIPTION_TITLE_FIELD_INDEX];
-            playlistTitleResourceId = titleResourceId;
+            configuredSchema = encodedSchema;
         } catch (Throwable error) {
             Logger.printException(
                     () -> "Could not configure Android Auto playlist schema", error);
         }
     }
 
+    /** Saves the Browse service used by Android Auto and clears state when YTM replaces it. */
     public static void initialize(Object service) {
         if (service == null) return;
-        if (authenticatedBrowseService != service) NATIVE_PLAYLIST_NODE_MEDIA_IDS.clear();
+        if (authenticatedBrowseService != service) nativePlaylistsMediaId = null;
         authenticatedBrowseService = service;
         Logger.printDebug(() -> "Authenticated Browse service ready: " +
                 service.getClass().getName());
@@ -191,63 +179,12 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         return true;
     }
 
-    public static void rememberNativePlaylistNode(Object loadResult, List<?> items) {
-        if (loadResult == null || authenticatedBrowseService == null || items == null ||
-                items.isEmpty()) {
-            return;
-        }
-        String libraryMediaId = mediaId(loadResult);
-        if (libraryMediaId == null) return;
-        long clientType = carClientTypeForContainer(
-                decodeMediaId(libraryMediaId), CONTAINER_TYPE_LIBRARY);
-        if (clientType == UNSUPPORTED_CAR_CLIENT_TYPE) return;
-
-        String playlistNodeMediaId = findNativePlaylistsMediaId(items, clientType);
-        if (playlistNodeMediaId == null) {
-            NATIVE_PLAYLIST_NODE_MEDIA_IDS.remove(clientType);
-        } else {
-            NATIVE_PLAYLIST_NODE_MEDIA_IDS.put(clientType, playlistNodeMediaId);
-            Logger.printDebug(() -> "Matched Playlists among " +
-                    items.size() + " Library items");
-        }
-    }
-
-    // YTM 9.15/9.29/9.30/9.31: Library returns a localized Playlists row with a car-specific
-    // media ID. Match its resource title and MediaItemInfo so other Library rows are left alone.
-    private static String findNativePlaylistsMediaId(List<?> items, long clientType) {
-        String playlistTitle;
-        try {
-            playlistTitle = Utils.getContext().getString(playlistTitleResourceId);
-        } catch (Throwable error) {
-            return null;
-        }
-
-        String uniquePlaylistMediaId = null;
-        for (Object item : items) {
-            try {
-                Object description = PlaylistPageMapper.readField(
-                        item, mediaItemDescriptionFieldName);
-                if (description == null) continue;
-
-                Object title = PlaylistPageMapper.readField(description, descriptionTitleFieldName);
-                if (!(title instanceof CharSequence) ||
-                        !playlistTitle.contentEquals((CharSequence) title)) continue;
-
-                Object mediaId = PlaylistPageMapper.readField(
-                        description, descriptionMediaIdFieldName);
-                if (!(mediaId instanceof String)) continue;
-                String candidateMediaId = (String) mediaId;
-                if (carClientTypeForContainer(
-                        decodeMediaId(candidateMediaId), CONTAINER_TYPE_DEFAULT) != clientType) {
-                    continue;
-                }
-                if (uniquePlaylistMediaId != null &&
-                        !uniquePlaylistMediaId.equals(candidateMediaId)) return null;
-                uniquePlaylistMediaId = candidateMediaId;
-            } catch (Exception ignored) {
-            }
-        }
-        return uniquePlaylistMediaId;
+    /** Records the media ID for YTM's localized Playlists row and ignores every other row. */
+    public static void rememberNativePlaylistsMediaId(
+            String mediaId, CharSequence title) {
+        if (title == null || !ResourceUtils.getString(PLAYLISTS_TITLE_RESOURCE)
+                .contentEquals(title)) return;
+        nativePlaylistsMediaId = mediaId;
     }
 
     private static void loadAsync(
@@ -359,8 +296,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     private static void appendLibraryCollection(Object renderer, LibraryState state) {
         try {
-            String browseId = PlaylistPageMapper.findBrowseId(
-                    PlaylistPageMapper.responsiveRendererEndpoint(renderer));
+            String browseId = PlaylistPageMapper.responsiveRendererBrowseId(renderer);
             if (browseId == null || !browseId.startsWith(YTM_COLLECTION_BROWSE_ID_PREFIX)) return;
             if (state.browseIds.contains(browseId)) return;
 
@@ -376,43 +312,9 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
-    private static long carClientTypeForContainer(byte[] mediaId, long expectedContainerType) {
-        try {
-            int[] offset = {0};
-            long containerType = CONTAINER_TYPE_DEFAULT;
-            long clientType = 0;
-            while (offset[0] < mediaId.length) {
-                long tag = readVarint(mediaId, offset);
-                int fieldNumber = (int) (tag >>> PROTOBUF_TAG_FIELD_SHIFT);
-                int wireType = (int) (tag & PROTOBUF_TAG_WIRE_TYPE_MASK);
-                if (wireType == PROTOBUF_WIRE_VARINT) {
-                    long fieldValue = readVarint(mediaId, offset);
-                    if (fieldNumber == MEDIA_ITEM_CONTAINER_TYPE_FIELD_NUMBER) {
-                        containerType = fieldValue;
-                    }
-                    if (fieldNumber == MEDIA_ITEM_CLIENT_TYPE_FIELD_NUMBER) {
-                        clientType = fieldValue;
-                    }
-                } else {
-                    skipField(mediaId, offset, wireType);
-                }
-            }
-            if (containerType != expectedContainerType) return 0;
-            return clientType == CLIENT_TYPE_ANDROID_AUTO
-                    || clientType == CLIENT_TYPE_ANDROID_AUTOMOTIVE
-                    ? clientType
-                    : UNSUPPORTED_CAR_CLIENT_TYPE;
-        } catch (Throwable ignored) {
-            return UNSUPPORTED_CAR_CLIENT_TYPE;
-        }
-    }
-
     private static boolean isNativePlaylistNode(Object loadResult) {
         String mediaId = mediaId(loadResult);
-        if (mediaId == null) return false;
-        long clientType = carClientTypeForContainer(
-                decodeMediaId(mediaId), CONTAINER_TYPE_DEFAULT);
-        return mediaId.equals(NATIVE_PLAYLIST_NODE_MEDIA_IDS.get(clientType));
+        return mediaId != null && mediaId.equals(nativePlaylistsMediaId);
     }
 
     private static byte[] decodeMediaId(String mediaId) {
