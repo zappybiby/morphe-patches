@@ -230,6 +230,8 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
             "Landroid/os/Bundle;",
             "Landroid/net/Uri;",
         )
+        // YTM 9.15/9.29/9.30/9.31: MediaDescriptionCompat keeps the same constructor layout.
+        // Resolve the fields written by its parameters instead of relying on reflection field order.
         val mediaDescriptionMediaIdField =
             mediaDescriptionClass.constructorField(mediaDescriptionConstructor, 0)
         val mediaDescriptionTitleField =
@@ -237,6 +239,8 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
         val playlistTitleResourceId =
             getResourceId(ResourceType.STRING, "library_playlists_shelf_title")
 
+        // YTM 9.15 stores parsers on generated messages; 9.29+ gets them from the protobuf runtime.
+        // Extension numbers stay fixed, so resolve each message from the initializer containing its number.
         fun resolveExtensionMessageType(extensionFieldNumber: Int): String {
             return allMethods
                 .filter { method ->
@@ -272,6 +276,8 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
             }
             .singleOrError("Could not resolve responsive renderer field $name")
 
+        // YTM 9.15/9.29/9.30/9.31: artwork, title, and subtitle use fields c, g, and h.
+        // Verify their types before passing these generated field names to runtime.
         val rendererArtworkField = responsiveRendererField(
             RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME,
         )
@@ -287,6 +293,8 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
             "Unexpected responsive renderer artwork, title, or subtitle fields"
         }
 
+        // YTM 9.15/9.29/9.30/9.31: each responsive renderer keeps its endpoints in i and k.
+        // Pass both so runtime can identify the Browse and playback endpoints from their contents.
         val rendererEndpoints = responsiveRendererFields.asSequence()
             .filter { field -> !AccessFlags.STATIC.isSet(field.accessFlags) }
             .groupBy { field -> field.type }
@@ -314,6 +322,8 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
             )
         val endpointMediaIdMethod = rendererEndpoints.mediaIdMethod
 
+        // YTM 9.15/9.29/9.30/9.31: Browse class and method names change, but their signatures remain.
+        // Resolve the factory, builder, and request methods from that shared structure.
         val browseRequestBuilderMethod = BrowseRequestBuilderFingerprint.method
         val browseRequestBuilderInstructions = browseRequestBuilderMethod.instructionList
         val browseBuilderType = browseRequestBuilderMethod.returnType
@@ -362,7 +372,8 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
         }
             .singleOrError("Could not uniquely resolve the Browse ID setter")
 
-        // The FEmusic_home request gives us a stable way to find this field across versions.
+        // YTM 9.15/9.29/9.30/9.31: the request builder reads the Browse ID before FEmusic_home.
+        // Use that field read instead of relying on its generated name.
         val browseEndpointIdField = browseRequestBuilderInstructions.indices.asSequence()
             .mapNotNull { index ->
                 if (browseRequestBuilderInstructions[index].getReference<StringReference>()?.string !=
@@ -383,15 +394,18 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
             .references<FieldReference>().distinct().toList()
 
         val loadResultType = mediaIdValidationMethod.parameterTypes.first().toString()
+        // YTM 9.15 stores this media ID at i.k, 9.29 at j.k, and 9.30/9.31 at j.l.
+        // Derive the path from YTM's validation method instead of maintaining a version table.
         val mediaIdFieldPath = findStringPaths(
             loadResultType,
             loadResultFieldReferences,
         ).asSequence()
             .singleOrError("Could not uniquely resolve the Android Auto media ID field path")
+        // YTM 9.15/9.29: validation calls a wrapper that forwards (items, null).
+        // YTM 9.30/9.31: the wrapper is removed and validation calls the two-argument method directly.
         val resultDeliveryMethod = mediaIdValidationMethod.references<MethodReference>()
             .filter { reference ->
                 val parameters = reference.parameterTypes.map(CharSequence::toString)
-                // The result callback has one parameter before 9.30 and two from 9.30 onward.
                 reference.definingClass == loadResultType && reference.returnType == "V" &&
                     parameters.size in 1..2 &&
                     parameters.firstOrNull() == "Ljava/util/List;" &&
@@ -399,7 +413,8 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
             }
             .singleOrError("Could not uniquely resolve the Android Auto result delivery method")
 
-        // Android Auto can start YouTube Music first, so this path must initialize Browse too.
+        // YTM 9.15/9.29/9.30/9.31: Android Auto can create this controller before the phone UI
+        // initializes Browse. Initialize Browse from the controller startup path too.
         val androidAutoProviderMethod = allMethods
             .filter { method ->
                 !AccessFlags.STATIC.isSet(method.accessFlags) &&
@@ -422,6 +437,8 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
         }.distinctBy { provider -> provider.field }.toList()
         check(browseProviders.isNotEmpty()) { "Could not resolve a provider for the Browse service" }
 
+        // YTM 9.15/9.29/9.30/9.31: the provider field/getter pairs are eY/gG, gc/hE, gd/hC,
+        // and gi/hx. Resolve the only shortest path instead of hardcoding those generated names.
         val (browseProviderPath, browseProviderGetter) = findBrowseProviders(
             androidAutoProviderMethod.definingClass,
             browseProviders,
@@ -470,7 +487,8 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
         val controllerRegister = mutableAndroidAutoProviderMethod
             .getInstruction<Instruction>(controllerConstructorIndex)
             .receiverRegister() ?: error("Could not resolve the Android Auto controller register")
-        // Search for the matching return because other patches may add setup after the constructor.
+        // Morphe patches may add setup after YTM's controller constructor.
+        // Inject before the return that carries the constructed controller.
         val controllerReturnIndex = mutableAndroidAutoProviderMethod.indexOfFirstInstructionOrThrow(
             controllerConstructorIndex,
         ) {
