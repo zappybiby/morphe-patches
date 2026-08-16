@@ -43,8 +43,6 @@ final class PlaylistPageMapper {
     private static final String TEXT_RUNS_FIELD_NAME = "c";
     private static final String TEXT_DIRECT_VALUE_FIELD_NAME = "d";
     private static final String TEXT_RUN_VALUE_FIELD_NAME = "c";
-    private static final String EXTENSION_MAP_FIELD_NAME = "j";
-    private static final String EXTENSION_ITERATOR_METHOD_NAME = "e";
     // YTM 9.15/9.29/9.30/9.31 request 544 px playlist tiles but only 120 px song rows.
     // Request 544 px for Android Auto song rows so their artwork is not blurred.
     private static final int ANDROID_AUTO_PLAYLIST_ROW_ARTWORK_SIZE_PX = 544;
@@ -54,12 +52,14 @@ final class PlaylistPageMapper {
 
     private static volatile String responsiveRendererClassName;
     private static volatile String musicShelfRendererClassName;
-    private static volatile String responsiveRendererEndpointFieldName;
+    private static volatile String[] responsiveRendererEndpointFieldNames;
     private static volatile String mediaIdHelperClassName;
     private static volatile String mediaIdHelperMethodName;
     private static volatile String browseEndpointClassName;
     private static volatile String browseIdFieldName;
     private static volatile Method endpointMediaIdMethod;
+    private static volatile Field extensionMapField;
+    private static volatile Method extensionMapIteratorMethod;
 
     private PlaylistPageMapper() {
     }
@@ -67,27 +67,43 @@ final class PlaylistPageMapper {
     static void configure(
             String responsiveRendererClass,
             String musicShelfRendererClass,
-            String responsiveRendererEndpointField,
+            String responsiveRendererEndpointFields,
             String mediaIdHelperClass,
             String mediaIdHelperMethod,
             String browseEndpointClass,
-            String browseIdField) {
+            String browseIdField,
+            String extensionMapClass,
+            String extensionMapFieldName,
+            String extensionIteratorMethodName) throws ReflectiveOperationException {
         responsiveRendererClassName = responsiveRendererClass;
         musicShelfRendererClassName = musicShelfRendererClass;
-        responsiveRendererEndpointFieldName = responsiveRendererEndpointField;
+        responsiveRendererEndpointFieldNames = responsiveRendererEndpointFields.split(",");
         mediaIdHelperClassName = mediaIdHelperClass;
         mediaIdHelperMethodName = mediaIdHelperMethod;
         browseEndpointClassName = browseEndpointClass;
         browseIdFieldName = browseIdField;
         endpointMediaIdMethod = null;
+        ClassLoader classLoader = PlaylistPageMapper.class.getClassLoader();
+        Field mapField = Class.forName(extensionMapClass, false, classLoader)
+                .getDeclaredField(extensionMapFieldName);
+        mapField.setAccessible(true);
+        Method iteratorMethod = mapField.getType()
+                .getDeclaredMethod(extensionIteratorMethodName);
+        iteratorMethod.setAccessible(true);
+        extensionMapField = mapField;
+        extensionMapIteratorMethod = iteratorMethod;
     }
 
     static boolean isResponsiveRenderer(Object value) {
         return value != null && value.getClass().getName().equals(responsiveRendererClassName);
     }
 
-    static Object responsiveRendererEndpoint(Object renderer) throws Exception {
-        return readField(renderer, responsiveRendererEndpointFieldName);
+    static String responsiveRendererBrowseId(Object renderer) throws Exception {
+        for (String fieldName : responsiveRendererEndpointFieldNames) {
+            String browseId = findBrowseId(readField(renderer, fieldName));
+            if (browseId != null) return browseId;
+        }
+        return null;
     }
 
     static String responsiveRendererTitle(Object renderer) throws Exception {
@@ -198,24 +214,31 @@ final class PlaylistPageMapper {
 
     private static void appendPlayableItem(Object renderer, PlaylistPageState state) {
         try {
-            Object endpoint = responsiveRendererEndpoint(renderer);
-            if (endpoint == null) return;
-            Method getMediaId = endpointMediaIdMethod;
-            if (getMediaId == null) {
-                Class<?> mediaIdHelper = Class.forName(
-                        mediaIdHelperClassName, false, PlaylistPageMapper.class.getClassLoader());
-                getMediaId = mediaIdHelper.getDeclaredMethod(
-                        mediaIdHelperMethodName, endpoint.getClass());
-                getMediaId.setAccessible(true);
-                endpointMediaIdMethod = getMediaId;
+            String idValue = null;
+            for (String fieldName : responsiveRendererEndpointFieldNames) {
+                Object endpoint = readField(renderer, fieldName);
+                if (endpoint == null) continue;
+                Method getMediaId = endpointMediaIdMethod;
+                if (getMediaId == null) {
+                    Class<?> mediaIdHelper = Class.forName(
+                            mediaIdHelperClassName, false, PlaylistPageMapper.class.getClassLoader());
+                    getMediaId = mediaIdHelper.getDeclaredMethod(
+                            mediaIdHelperMethodName, endpoint.getClass());
+                    getMediaId.setAccessible(true);
+                    endpointMediaIdMethod = getMediaId;
+                }
+                Object candidate = getMediaId.invoke(null, endpoint);
+                if (candidate instanceof String &&
+                        RestoreAndroidAutoPlaylistsPatch.hasPlayableVideoId((String) candidate)) {
+                    idValue = (String) candidate;
+                    break;
+                }
             }
-            Object idValue = getMediaId.invoke(null, endpoint);
-            if (!(idValue instanceof String)) return;
-            // YTM 9.15/9.29/9.30/9.31: Add songs has a watch endpoint but no video ID.
+            // YTM 9.15/9.29/9.30/9.31: Add songs has an endpoint but no video ID.
             // Require a video ID so that editing action is not exposed as a playable row.
-            if (!RestoreAndroidAutoPlaylistsPatch.hasPlayableVideoId((String) idValue)) return;
+            if (idValue == null) return;
             String mediaId = RestoreAndroidAutoPlaylistsPatch.removeOptionalPlayerConfigFromMediaId(
-                    (String) idValue);
+                    idValue);
             if (mediaId.isEmpty() || state.mediaIds.contains(mediaId)) return;
 
             String title = responsiveRendererTitle(renderer);
@@ -333,14 +356,17 @@ final class PlaylistPageMapper {
 
     static Iterator<?> extensionEntries(Object message) {
         try {
-            Object extensionMap = readField(message, EXTENSION_MAP_FIELD_NAME);
+            // These accessors are resolved while patching, so runtime does not search generated
+            // protobuf classes on every Browse response.
+            Field mapField = extensionMapField;
+            Method iteratorMethod = extensionMapIteratorMethod;
+            if (mapField == null || iteratorMethod == null ||
+                    !mapField.getDeclaringClass().isInstance(message)) return null;
+            Object extensionMap = mapField.get(message);
             if (extensionMap == null) return null;
-            Method iteratorMethod = extensionMap.getClass().getDeclaredMethod(
-                    EXTENSION_ITERATOR_METHOD_NAME);
-            iteratorMethod.setAccessible(true);
             Object iterator = iteratorMethod.invoke(extensionMap);
             return iterator instanceof Iterator<?> ? (Iterator<?>) iterator : null;
-        } catch (Throwable ignored) {
+        } catch (ReflectiveOperationException ignored) {
             return null;
         }
     }
