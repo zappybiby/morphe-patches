@@ -12,6 +12,7 @@ import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLa
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.patch.BytecodePatchContext
 import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.util.proxy.mutableTypes.encodedValue.MutableStringEncodedValue
 import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.util.findFreeRegister
@@ -33,10 +34,13 @@ import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.Reference
 import com.android.tools.smali.dexlib2.iface.reference.StringReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
+import com.android.tools.smali.dexlib2.immutable.value.ImmutableStringEncodedValue
 import java.util.ArrayDeque
 
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch;"
+private const val EXTENSION_RUNTIME_VALUES_CLASS =
+    "Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch\$RuntimeValues;"
 private const val MEDIA_DESCRIPTION_CLASS =
     "Landroid/support/v4/media/MediaDescriptionCompat;"
 private const val OPTIONAL_CLASS = "Lj$/util/Optional;"
@@ -47,8 +51,6 @@ private const val PLAYLIST_ENDPOINT_EXTENSION_FIELD_NUMBER = 52_666_186
 private const val HOME_BROWSE_ID_MARKER = "FEmusic_home"
 private const val FOUR_BIT_REGISTER_LIMIT = 16
 private const val EIGHT_BIT_REGISTER_LIMIT = 256
-private const val RUNTIME_SCHEMA_VERSION = 2
-private const val RUNTIME_SCHEMA_DELIMITER = "|"
 private const val RUNTIME_METHOD_DELIMITER = "#"
 private const val RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME = "c"
 private const val RESPONSIVE_RENDERER_TITLE_FIELD_NAME = "g"
@@ -150,67 +152,11 @@ private data class DeliveryResolution(
 )
 
 private data class ResolvedRuntimeHooks(
-    val encodedSchema: String,
+    val runtimeValues: Map<String, String>,
     val startup: StartupResolution,
     val androidAutoControllerType: String,
     val loadResultType: String,
 )
-
-/**
- * Names, methods, and fields the Java extension needs from the installed APK.
- * Keep the encoded order in sync with the Java RuntimeSchema.
- */
-private data class RuntimeSchema(
-    val responsiveRendererClassName: String,
-    val playlistEndpointClassName: String,
-    val responsiveRendererEndpointFieldNames: List<String>,
-    val endpointMediaIdMethod: RuntimeMethod,
-    val browseEndpointClassName: String,
-    val browseIdFieldName: String,
-    val browseIdSetterMethod: RuntimeMethod,
-    val loadResultMediaIdFieldPath: List<String>,
-    val browseBuilderFactoryMethod: RuntimeMethod,
-    val browseRequestMethod: RuntimeMethod,
-    val clientDataSetterMethod: RuntimeMethod,
-    val resultDeliveryMethod: RuntimeMethod,
-    val responsiveRendererArtworkFieldName: String,
-    val playlistThumbnailRendererClassName: String,
-    val responsiveRendererTitleFieldName: String,
-    val responsiveRendererSubtitleFieldName: String,
-    val extensionMapClassName: String,
-    val extensionMapFieldName: String,
-    val extensionMapIteratorMethod: RuntimeMethod,
-) {
-    fun encode(): String {
-        require(responsiveRendererEndpointFieldNames.size == 2)
-        require(loadResultMediaIdFieldPath.isNotEmpty())
-
-        val values = listOf(
-            RUNTIME_SCHEMA_VERSION.toString(),
-            responsiveRendererClassName,
-            playlistEndpointClassName,
-            responsiveRendererEndpointFieldNames.joinToString(","),
-            endpointMediaIdMethod.encode(),
-            browseEndpointClassName,
-            browseIdFieldName,
-            browseIdSetterMethod.encode(),
-            loadResultMediaIdFieldPath.joinToString(","),
-            browseBuilderFactoryMethod.encode(),
-            browseRequestMethod.encode(),
-            clientDataSetterMethod.encode(),
-            resultDeliveryMethod.encode(),
-            responsiveRendererArtworkFieldName,
-            playlistThumbnailRendererClassName,
-            responsiveRendererTitleFieldName,
-            responsiveRendererSubtitleFieldName,
-            extensionMapClassName,
-            extensionMapFieldName,
-            extensionMapIteratorMethod.encode(),
-        )
-        require(values.none { value -> RUNTIME_SCHEMA_DELIMITER in value })
-        return values.joinToString(RUNTIME_SCHEMA_DELIMITER)
-    }
-}
 
 private fun findShortestFieldPaths(
     startType: String,
@@ -399,33 +345,40 @@ private fun BytecodePatchContext.resolveRuntimeHooks(
         allMethods,
     )
 
-    val encodedSchema = RuntimeSchema(
-        responsiveRendererClassName = renderer.responsiveRendererType.toRuntimeClassName(),
-        playlistEndpointClassName = renderer.playlistEndpointType.toRuntimeClassName(),
-        responsiveRendererEndpointFieldNames = renderer.endpoints.fields.map { it.name },
-        endpointMediaIdMethod = renderer.endpoints.mediaIdMethod.toRuntimeMethod(),
-        browseEndpointClassName = browse.endpointIdField.definingClass.toRuntimeClassName(),
-        browseIdFieldName = browse.endpointIdField.name,
-        browseIdSetterMethod = browse.idSetterMethod.toRuntimeMethod(),
-        loadResultMediaIdFieldPath = delivery.mediaIdFieldPath.map { it.name },
-        browseBuilderFactoryMethod = browse.builderFactoryMethod.toRuntimeMethod(),
-        browseRequestMethod = browse.requestMethod.toRuntimeMethod(),
-        clientDataSetterMethod = browse.clientDataSetterMethod.toRuntimeMethod(),
-        resultDeliveryMethod = delivery.resultDeliveryMethod.toRuntimeMethod(),
-        responsiveRendererArtworkFieldName = renderer.artworkField.name,
-        playlistThumbnailRendererClassName =
+    check(renderer.endpoints.fields.size == 2)
+    check(delivery.mediaIdFieldPath.isNotEmpty())
+    val runtimeValues = mapOf(
+        "RESPONSIVE_RENDERER_CLASS_NAME" to
+            renderer.responsiveRendererType.toRuntimeClassName(),
+        "PLAYLIST_ENDPOINT_CLASS_NAME" to renderer.playlistEndpointType.toRuntimeClassName(),
+        "RESPONSIVE_RENDERER_ENDPOINT_FIELD_NAMES" to
+            renderer.endpoints.fields.joinToString(",") { it.name },
+        "ENDPOINT_MEDIA_ID_METHOD" to renderer.endpoints.mediaIdMethod.toRuntimeMethod().encode(),
+        "BROWSE_ENDPOINT_CLASS_NAME" to
+            browse.endpointIdField.definingClass.toRuntimeClassName(),
+        "BROWSE_ID_FIELD_NAME" to browse.endpointIdField.name,
+        "BROWSE_ID_SETTER_METHOD" to browse.idSetterMethod.toRuntimeMethod().encode(),
+        "LOAD_RESULT_MEDIA_ID_FIELD_PATH" to
+            delivery.mediaIdFieldPath.joinToString(",") { it.name },
+        "BROWSE_BUILDER_FACTORY_METHOD" to
+            browse.builderFactoryMethod.toRuntimeMethod().encode(),
+        "BROWSE_REQUEST_METHOD" to browse.requestMethod.toRuntimeMethod().encode(),
+        "CLIENT_DATA_SETTER_METHOD" to browse.clientDataSetterMethod.toRuntimeMethod().encode(),
+        "RESULT_DELIVERY_METHOD" to delivery.resultDeliveryMethod.toRuntimeMethod().encode(),
+        "RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME" to renderer.artworkField.name,
+        "PLAYLIST_THUMBNAIL_RENDERER_CLASS_NAME" to
             renderer.playlistThumbnailRendererType.toRuntimeClassName(),
-        responsiveRendererTitleFieldName = renderer.titleField.name,
-        responsiveRendererSubtitleFieldName = renderer.subtitleField.name,
-        extensionMapClassName =
+        "RESPONSIVE_RENDERER_TITLE_FIELD_NAME" to renderer.titleField.name,
+        "RESPONSIVE_RENDERER_SUBTITLE_FIELD_NAME" to renderer.subtitleField.name,
+        "EXTENSION_MAP_CLASS_NAME" to
             renderer.extensionMapAccessors.field.definingClass.toRuntimeClassName(),
-        extensionMapFieldName = renderer.extensionMapAccessors.field.name,
-        extensionMapIteratorMethod =
-            renderer.extensionMapAccessors.iteratorMethod.toRuntimeMethod(),
-    ).encode()
+        "EXTENSION_MAP_FIELD_NAME" to renderer.extensionMapAccessors.field.name,
+        "EXTENSION_MAP_ITERATOR_METHOD" to
+            renderer.extensionMapAccessors.iteratorMethod.toRuntimeMethod().encode(),
+    )
 
     return ResolvedRuntimeHooks(
-        encodedSchema = encodedSchema,
+        runtimeValues = runtimeValues,
         startup = startup,
         androidAutoControllerType = delivery.controllerType,
         loadResultType = delivery.loadResultType,
@@ -715,7 +668,21 @@ private fun resolveExtensionMessageType(
         .singleOrError("Could not uniquely resolve protobuf extension $extensionFieldNumber")
 }
 
+private fun BytecodePatchContext.injectRuntimeValues(values: Map<String, String>) {
+    val fields = mutableClassDefBy(EXTENSION_RUNTIME_VALUES_CLASS).fields.associateBy { it.name }
+    check(fields.keys == values.keys) {
+        "Runtime value fields do not match the extension"
+    }
+    fields.forEach { (name, field) ->
+        field.initialValue = MutableStringEncodedValue(
+            ImmutableStringEncodedValue(values.getValue(name)),
+        )
+    }
+}
+
 private fun BytecodePatchContext.injectRuntimeHooks(runtimeHooks: ResolvedRuntimeHooks) {
+    injectRuntimeValues(runtimeHooks.runtimeValues)
+
     val startup = runtimeHooks.startup
     val mutableAndroidAutoProviderMethod =
         mutableClassDefBy(startup.androidAutoProviderMethod.definingClass).methods.single { method ->
@@ -764,13 +731,11 @@ private fun BytecodePatchContext.injectRuntimeHooks(runtimeHooks: ResolvedRuntim
         append("if-eqz v$providerRegister, :skip_playlist_initialization")
     }
 
-    // YTM 9.15/9.29/9.30/9.31: Android Auto can create its controller before the phone
-    // initializes Browse. Read the same Browse provider while that controller is created.
+    // YTM 9.15/9.29/9.30/9.31: on a cold start, Android Auto can create its controller before the
+    // phone UI initializes Browse. Read the same Browse provider while that controller is created.
     mutableAndroidAutoProviderMethod.addInstructionsWithLabels(
         controllerReturnIndex,
         """
-            const-string v$providerRegister, "${runtimeHooks.encodedSchema}"
-            invoke-static/range { v$providerRegister .. v$providerRegister }, $EXTENSION_CLASS->configure(Ljava/lang/String;)V
             $browseProviderTraversalInstructions
             invoke-static/range { v$providerRegister .. v$providerRegister }, $EXTENSION_CLASS->initialize(Ljava/lang/Object;)V
         """,

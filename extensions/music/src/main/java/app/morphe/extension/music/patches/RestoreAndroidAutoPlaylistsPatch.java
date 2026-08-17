@@ -50,8 +50,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final String LIBRARY_BROWSE_ID = "FEmusic_library_landing";
     private static final String PLAYLISTS_TITLE_RESOURCE = "library_playlists_shelf_title";
     private static final String YTM_COLLECTION_BROWSE_ID_PREFIX = "VL";
-    private static final int RUNTIME_SCHEMA_VERSION = 2;
-    private static final int RUNTIME_SCHEMA_VALUE_COUNT = 20;
     private static final long BROWSE_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
     private static final int PLAYLIST_ARTWORK_SIZE_PX = 544;
     // YTM 9.15/9.29/9.30/9.31: thumbnail extension 164480666 stores its list at c.c and
@@ -75,40 +73,14 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private RestoreAndroidAutoPlaylistsPatch() {
     }
 
-    /** Resolves and caches the fields and methods selected while patching this YTM version. */
-    public static synchronized void configure(String encodedSchema) {
-        RuntimeConfiguration current = runtimeConfiguration;
-        if (current != null) {
-            if (!encodedSchema.equals(current.schema.encodedValue)) {
-                Logger.printException(
-                        () -> "Could not configure Android Auto playlists",
-                        new IllegalStateException("Runtime schema changed in the same process"));
-            }
-            return;
-        }
-
-        try {
-            RuntimeSchema schema = RuntimeSchema.parse(encodedSchema);
-            runtimeConfiguration = new RuntimeConfiguration(
-                    schema,
-                    schema.endpointMediaIdMethodSchema.resolve(),
-                    schema.browseIdSetterMethodSchema.resolve(),
-                    schema.browseBuilderFactoryMethodSchema.resolve(),
-                    schema.browseRequestMethodSchema.resolve(),
-                    schema.clientDataSetterMethodSchema.resolve(),
-                    schema.resultDeliveryMethodSchema.resolve(),
-                    resolveDeclaredField(schema.extensionMapClassName, schema.extensionMapFieldName),
-                    schema.extensionMapIteratorMethodSchema.resolve());
-        } catch (ReflectiveOperationException | RuntimeException error) {
-            Logger.printException(() -> "Could not configure Android Auto playlists", error);
-        }
-    }
-
-    /** Stores Android Auto's Browse service and clears session state when its instance changes. */
+    /** Stores YTM's Browse service and clears session state when its instance changes. */
     public static void initialize(Object service) {
+        if (service == null) return;
         try {
-            if (runtimeConfiguration == null || service == null) return;
             synchronized (RestoreAndroidAutoPlaylistsPatch.class) {
+                if (runtimeConfiguration == null) {
+                    runtimeConfiguration = new RuntimeConfiguration();
+                }
                 if (authenticatedBrowseService != service) {
                     NATIVE_PLAYLISTS_NODE_MEDIA_IDS.clear();
                     inFlightLibraryLoad = null;
@@ -117,7 +89,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             }
             Logger.printDebug(() -> "Authenticated Browse service ready: " +
                     service.getClass().getName());
-        } catch (RuntimeException error) {
+        } catch (ReflectiveOperationException | RuntimeException error) {
             Logger.printException(() -> "Could not initialize Android Auto playlists", error);
         }
     }
@@ -137,7 +109,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
-    /** Records browsable Android Auto items whose title matches YTM's Playlists resource. */
+    /** Records media IDs from Android Auto items whose title matches YTM's Playlists resource. */
     public static void rememberNativePlaylistsMediaId(
             String mediaId, CharSequence title) {
         if (title == null || !ResourceUtils.getString(PLAYLISTS_TITLE_RESOURCE)
@@ -267,9 +239,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     private static String responsiveRendererBrowseId(
             Object renderer) throws ReflectiveOperationException {
-        RuntimeSchema schema = runtimeConfiguration.schema;
         String playlistBrowseId = null;
-        for (String fieldName : schema.responsiveRendererEndpointFieldNames) {
+        for (String fieldName : runtimeConfiguration.responsiveRendererEndpointFieldNames) {
             Object endpoint = readFieldValue(renderer, fieldName);
             if (endpoint == null) continue;
             String browseId = findBrowseId(endpoint);
@@ -314,8 +285,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
         LibraryPlaylist playlist = playlists.get(index);
         try {
-            // Library rows only contain VL Browse IDs. A playlist's own page contains the native
-            // play command, so one page supplies a current command for the whole result.
+            // Library rows expose a VL Browse ID but not the play command. A playlist page supplies
+            // a command that can be used as the template for every row.
             requestBrowse(playlist.browseId).whenComplete((response, error) -> {
                 if (error == null) {
                     try {
@@ -433,7 +404,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static boolean endpointContainsPlaylistId(
             Object endpoint, String playlistId) throws ReflectiveOperationException {
         Object extension = findExtension(
-                endpoint, runtimeConfiguration.schema.playlistEndpointClassName);
+                endpoint, runtimeConfiguration.playlistEndpointClassName);
         if (extension == null) return false;
         for (Class<?> owner = extension.getClass(); owner != null && owner != Object.class;
                 owner = owner.getSuperclass()) {
@@ -449,7 +420,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     }
 
     // YTM 9.15/9.29/9.30/9.31: the endpoint-to-media-ID method changes names, so the
-    // bytecode patch resolves it from the installed APK.
+    // bytecode patch resolves it from the target APK.
     private static String mediaIdForEndpoint(
             Object endpoint) throws ReflectiveOperationException {
         Object value = runtimeConfiguration.endpointMediaIdMethod.invoke(null, endpoint);
@@ -458,19 +429,19 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     private static boolean isResponsiveRenderer(Object value) {
         return value.getClass().getName().equals(
-                runtimeConfiguration.schema.responsiveRendererClassName);
+                runtimeConfiguration.responsiveRendererClassName);
     }
 
     private static String responsiveRendererTitle(
             Object renderer) throws ReflectiveOperationException {
         return renderText(readFieldValue(
-                renderer, runtimeConfiguration.schema.responsiveRendererTitleFieldName));
+                renderer, runtimeConfiguration.responsiveRendererTitleFieldName));
     }
 
     private static String optionalResponsiveRendererSubtitle(Object renderer) {
         try {
             return renderText(readFieldValue(
-                    renderer, runtimeConfiguration.schema.responsiveRendererSubtitleFieldName));
+                    renderer, runtimeConfiguration.responsiveRendererSubtitleFieldName));
         } catch (ReflectiveOperationException | RuntimeException ignored) {
             return "";
         }
@@ -478,10 +449,11 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     private static Uri optionalResponsiveRendererArtwork(Object renderer) {
         try {
-            RuntimeSchema schema = runtimeConfiguration.schema;
-            Object artwork = readFieldValue(renderer, schema.responsiveRendererArtworkFieldName);
+            RuntimeConfiguration configuration = runtimeConfiguration;
+            Object artwork = readFieldValue(
+                    renderer, configuration.responsiveRendererArtworkFieldName);
             Object thumbnailRenderer = findExtension(
-                    artwork, schema.playlistThumbnailRendererClassName);
+                    artwork, configuration.playlistThumbnailRendererClassName);
             Iterable<?> thumbnails = (Iterable<?>) readFieldPath(
                     thumbnailRenderer, PLAYLIST_THUMBNAIL_LIST_FIELD_PATH);
             for (Object thumbnail : thumbnails) {
@@ -497,10 +469,11 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     private static String findBrowseId(
             Object endpoint) throws ReflectiveOperationException {
-        RuntimeSchema schema = runtimeConfiguration.schema;
-        Object browseEndpoint = findExtension(endpoint, schema.browseEndpointClassName);
+        RuntimeConfiguration configuration = runtimeConfiguration;
+        Object browseEndpoint = findExtension(endpoint, configuration.browseEndpointClassName);
         if (browseEndpoint == null) return null;
-        String browseId = (String) readFieldValue(browseEndpoint, schema.browseIdFieldName);
+        String browseId = (String) readFieldValue(
+                browseEndpoint, configuration.browseIdFieldName);
         return browseId.isEmpty() ? null : browseId;
     }
 
@@ -631,8 +604,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     }
 
     private static boolean isObfuscatedYtmClass(Class<?> valueClass) {
-        // YTM's generated response classes use the default package. This boundary keeps traversal
-        // out of Android, Java, and support-library object graphs.
+        // YTM's obfuscated response objects have no package prefix. This keeps traversal out of
+        // Android, Java, and support-library object graphs.
         return valueClass.getName().indexOf('.') < 0;
     }
 
@@ -653,120 +626,65 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static String mediaId(Object loadResult) {
         try {
             return (String) readFieldPath(
-                    loadResult, runtimeConfiguration.schema.loadResultMediaIdFieldPath);
+                    loadResult, runtimeConfiguration.loadResultMediaIdFieldPath);
         } catch (ReflectiveOperationException | RuntimeException ignored) {
             return null;
         }
     }
 
-    // Field order must match RuntimeSchema.encode() in the Kotlin patch. Pipes separate values;
-    // commas separate lists, and hashes separate parts of a method descriptor.
-    private static final class RuntimeSchema {
-        private final String encodedValue;
+    private static Method resolveMethod(String encodedMethod)
+            throws ReflectiveOperationException {
+        String[] values = encodedMethod.split("#", -1);
+        if (values.length != 3) {
+            throw new IllegalArgumentException("Invalid runtime method descriptor");
+        }
+        ClassLoader classLoader = RestoreAndroidAutoPlaylistsPatch.class.getClassLoader();
+        Class<?> owner = Class.forName(values[0], false, classLoader);
+        MethodType methodType = MethodType.fromMethodDescriptorString(values[2], classLoader);
+        Method method = owner.getDeclaredMethod(values[1], methodType.parameterArray());
+        if (method.getReturnType() != methodType.returnType()) {
+            throw new NoSuchMethodException("Configured method has a different return type");
+        }
+        method.setAccessible(true);
+        return method;
+    }
+
+    // Filled by the patch with class, field, and method details from the target APK.
+    // These stay non-final so the compiler does not inline their empty defaults.
+    @SuppressWarnings("CanBeFinal")
+    private static final class RuntimeValues {
+        private static String RESPONSIVE_RENDERER_CLASS_NAME = "";
+        private static String PLAYLIST_ENDPOINT_CLASS_NAME = "";
+        private static String RESPONSIVE_RENDERER_ENDPOINT_FIELD_NAMES = "";
+        private static String ENDPOINT_MEDIA_ID_METHOD = "";
+        private static String BROWSE_ENDPOINT_CLASS_NAME = "";
+        private static String BROWSE_ID_FIELD_NAME = "";
+        private static String BROWSE_ID_SETTER_METHOD = "";
+        private static String LOAD_RESULT_MEDIA_ID_FIELD_PATH = "";
+        private static String BROWSE_BUILDER_FACTORY_METHOD = "";
+        private static String BROWSE_REQUEST_METHOD = "";
+        private static String CLIENT_DATA_SETTER_METHOD = "";
+        private static String RESULT_DELIVERY_METHOD = "";
+        private static String RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME = "";
+        private static String PLAYLIST_THUMBNAIL_RENDERER_CLASS_NAME = "";
+        private static String RESPONSIVE_RENDERER_TITLE_FIELD_NAME = "";
+        private static String RESPONSIVE_RENDERER_SUBTITLE_FIELD_NAME = "";
+        private static String EXTENSION_MAP_CLASS_NAME = "";
+        private static String EXTENSION_MAP_FIELD_NAME = "";
+        private static String EXTENSION_MAP_ITERATOR_METHOD = "";
+    }
+
+    private static final class RuntimeConfiguration {
         private final String responsiveRendererClassName;
         private final String playlistEndpointClassName;
         private final String[] responsiveRendererEndpointFieldNames;
-        private final RuntimeMethodSchema endpointMediaIdMethodSchema;
         private final String browseEndpointClassName;
         private final String browseIdFieldName;
-        private final RuntimeMethodSchema browseIdSetterMethodSchema;
         private final String[] loadResultMediaIdFieldPath;
-        private final RuntimeMethodSchema browseBuilderFactoryMethodSchema;
-        private final RuntimeMethodSchema browseRequestMethodSchema;
-        private final RuntimeMethodSchema clientDataSetterMethodSchema;
-        private final RuntimeMethodSchema resultDeliveryMethodSchema;
         private final String responsiveRendererArtworkFieldName;
         private final String playlistThumbnailRendererClassName;
         private final String responsiveRendererTitleFieldName;
         private final String responsiveRendererSubtitleFieldName;
-        private final String extensionMapClassName;
-        private final String extensionMapFieldName;
-        private final RuntimeMethodSchema extensionMapIteratorMethodSchema;
-
-        private RuntimeSchema(String encodedValue, String[] values) {
-            this.encodedValue = encodedValue;
-            int index = 1;
-            responsiveRendererClassName = values[index++];
-            playlistEndpointClassName = values[index++];
-            responsiveRendererEndpointFieldNames = splitList(values[index++]);
-            endpointMediaIdMethodSchema = RuntimeMethodSchema.parse(values[index++]);
-            browseEndpointClassName = values[index++];
-            browseIdFieldName = values[index++];
-            browseIdSetterMethodSchema = RuntimeMethodSchema.parse(values[index++]);
-            loadResultMediaIdFieldPath = splitList(values[index++]);
-            browseBuilderFactoryMethodSchema = RuntimeMethodSchema.parse(values[index++]);
-            browseRequestMethodSchema = RuntimeMethodSchema.parse(values[index++]);
-            clientDataSetterMethodSchema = RuntimeMethodSchema.parse(values[index++]);
-            resultDeliveryMethodSchema = RuntimeMethodSchema.parse(values[index++]);
-            responsiveRendererArtworkFieldName = values[index++];
-            playlistThumbnailRendererClassName = values[index++];
-            responsiveRendererTitleFieldName = values[index++];
-            responsiveRendererSubtitleFieldName = values[index++];
-            extensionMapClassName = values[index++];
-            extensionMapFieldName = values[index++];
-            extensionMapIteratorMethodSchema = RuntimeMethodSchema.parse(values[index]);
-
-            if (responsiveRendererEndpointFieldNames.length != 2) {
-                throw new IllegalArgumentException(
-                        "Runtime schema must contain exactly two renderer endpoint fields");
-            }
-        }
-
-        private static RuntimeSchema parse(String encodedSchema) {
-            String[] values = encodedSchema.split("\\|", -1);
-            if (values.length != RUNTIME_SCHEMA_VALUE_COUNT) {
-                throw new IllegalArgumentException(
-                        "Runtime schema has " + values.length + " values; expected " +
-                                RUNTIME_SCHEMA_VALUE_COUNT);
-            }
-            int version = Integer.parseInt(values[0]);
-            if (version != RUNTIME_SCHEMA_VERSION) {
-                throw new IllegalArgumentException(
-                        "Unsupported runtime schema version " + version);
-            }
-            return new RuntimeSchema(encodedSchema, values);
-        }
-
-        private static String[] splitList(String value) {
-            return value.split(",");
-        }
-    }
-
-    private static final class RuntimeMethodSchema {
-        private final String ownerClassName;
-        private final String name;
-        private final String descriptor;
-
-        private RuntimeMethodSchema(String[] values) {
-            ownerClassName = values[0];
-            name = values[1];
-            descriptor = values[2];
-        }
-
-        private static RuntimeMethodSchema parse(String encodedMethod) {
-            String[] values = encodedMethod.split("#", -1);
-            if (values.length != 3 || values[0].isEmpty() || values[1].isEmpty() ||
-                    values[2].isEmpty()) {
-                throw new IllegalArgumentException("Invalid runtime method descriptor");
-            }
-            return new RuntimeMethodSchema(values);
-        }
-
-        private Method resolve() throws ReflectiveOperationException {
-            ClassLoader classLoader = RestoreAndroidAutoPlaylistsPatch.class.getClassLoader();
-            Class<?> owner = Class.forName(ownerClassName, false, classLoader);
-            MethodType methodType = MethodType.fromMethodDescriptorString(descriptor, classLoader);
-            Method method = owner.getDeclaredMethod(name, methodType.parameterArray());
-            if (method.getReturnType() != methodType.returnType()) {
-                throw new NoSuchMethodException("Configured method has a different return type");
-            }
-            method.setAccessible(true);
-            return method;
-        }
-    }
-
-    private static final class RuntimeConfiguration {
-        private final RuntimeSchema schema;
         private final Method endpointMediaIdMethod;
         private final Method browseIdSetterMethod;
         private final Method browseBuilderFactoryMethod;
@@ -776,25 +694,32 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         private final Field extensionMapField;
         private final Method extensionMapIteratorMethod;
 
-        private RuntimeConfiguration(
-                RuntimeSchema schema,
-                Method endpointMediaIdMethod,
-                Method browseIdSetterMethod,
-                Method browseBuilderFactoryMethod,
-                Method browseRequestMethod,
-                Method clientDataSetterMethod,
-                Method resultDeliveryMethod,
-                Field extensionMapField,
-                Method extensionMapIteratorMethod) {
-            this.schema = schema;
-            this.endpointMediaIdMethod = endpointMediaIdMethod;
-            this.browseIdSetterMethod = browseIdSetterMethod;
-            this.browseBuilderFactoryMethod = browseBuilderFactoryMethod;
-            this.browseRequestMethod = browseRequestMethod;
-            this.clientDataSetterMethod = clientDataSetterMethod;
-            this.resultDeliveryMethod = resultDeliveryMethod;
-            this.extensionMapField = extensionMapField;
-            this.extensionMapIteratorMethod = extensionMapIteratorMethod;
+        private RuntimeConfiguration() throws ReflectiveOperationException {
+            responsiveRendererClassName = RuntimeValues.RESPONSIVE_RENDERER_CLASS_NAME;
+            playlistEndpointClassName = RuntimeValues.PLAYLIST_ENDPOINT_CLASS_NAME;
+            responsiveRendererEndpointFieldNames =
+                    RuntimeValues.RESPONSIVE_RENDERER_ENDPOINT_FIELD_NAMES.split(",");
+            browseEndpointClassName = RuntimeValues.BROWSE_ENDPOINT_CLASS_NAME;
+            browseIdFieldName = RuntimeValues.BROWSE_ID_FIELD_NAME;
+            loadResultMediaIdFieldPath = RuntimeValues.LOAD_RESULT_MEDIA_ID_FIELD_PATH.split(",");
+            responsiveRendererArtworkFieldName =
+                    RuntimeValues.RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME;
+            playlistThumbnailRendererClassName =
+                    RuntimeValues.PLAYLIST_THUMBNAIL_RENDERER_CLASS_NAME;
+            responsiveRendererTitleFieldName =
+                    RuntimeValues.RESPONSIVE_RENDERER_TITLE_FIELD_NAME;
+            responsiveRendererSubtitleFieldName =
+                    RuntimeValues.RESPONSIVE_RENDERER_SUBTITLE_FIELD_NAME;
+            endpointMediaIdMethod = resolveMethod(RuntimeValues.ENDPOINT_MEDIA_ID_METHOD);
+            browseIdSetterMethod = resolveMethod(RuntimeValues.BROWSE_ID_SETTER_METHOD);
+            browseBuilderFactoryMethod = resolveMethod(RuntimeValues.BROWSE_BUILDER_FACTORY_METHOD);
+            browseRequestMethod = resolveMethod(RuntimeValues.BROWSE_REQUEST_METHOD);
+            clientDataSetterMethod = resolveMethod(RuntimeValues.CLIENT_DATA_SETTER_METHOD);
+            resultDeliveryMethod = resolveMethod(RuntimeValues.RESULT_DELIVERY_METHOD);
+            extensionMapField = resolveDeclaredField(
+                    RuntimeValues.EXTENSION_MAP_CLASS_NAME,
+                    RuntimeValues.EXTENSION_MAP_FIELD_NAME);
+            extensionMapIteratorMethod = resolveMethod(RuntimeValues.EXTENSION_MAP_ITERATOR_METHOD);
         }
     }
 
