@@ -1,3 +1,9 @@
+## [0.0.10](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.0.10) (2026-08-17)
+
+### Changes
+
+* **YouTube Music:** Clarify how playlist fields and endpoints are resolved
+
 ## [0.0.9](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.0.9) (2026-08-17)
 
 ### Changes

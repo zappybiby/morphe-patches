@@ -412,7 +412,7 @@ private fun resolveRenderer(
         }
         .singleOrError("Could not resolve responsive renderer field $name")
 
-    // These field names are obfuscated. In every supported version, artwork has its own
+    // YTM 9.15/9.29/9.30/9.31: these field names are obfuscated. Artwork has its own
     // message type, while title and subtitle use the same text type.
     val artworkField = responsiveRendererField(RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME)
     val titleField = responsiveRendererField(RESPONSIVE_RENDERER_TITLE_FIELD_NAME)
@@ -421,8 +421,8 @@ private fun resolveRenderer(
         "Unexpected responsive renderer artwork, title, or subtitle fields"
     }
 
-    // Each playlist row contains two endpoints of the same type: one opens the playlist
-    // and one starts playback. YTM's media-ID method uniquely identifies that pair.
+    // YTM 9.15/9.29/9.30/9.31: each playlist row contains two endpoints of the same type:
+    // one opens the playlist and one starts playback. YTM's media-ID method identifies the pair.
     val endpoints = responsiveRendererFields.asSequence()
         .filter { field -> !AccessFlags.STATIC.isSet(field.accessFlags) }
         .groupBy { field -> field.type }
@@ -450,8 +450,8 @@ private fun resolveRenderer(
         }
         .singleOrError("Could not uniquely resolve the responsive renderer endpoints")
 
-    // Browse and playback endpoints are stored in protobuf's internal extension storage.
-    // Resolve its field and iterator here so the extension can read those endpoints later.
+    // YTM 9.15/9.29/9.30/9.31: Browse and playback endpoints are stored in protobuf's
+    // internal extension storage. Resolve its field and iterator for the runtime code.
     val endpointContainerType = endpoints.fields.first().type
     val extensionMapAccessors = generateSequence(
         classesByType[endpointContainerType]?.superclass,
@@ -643,7 +643,7 @@ private fun BytecodePatchContext.resolveDelivery(): DeliveryResolution {
     )
 }
 
-// YTM 9.15 stores parsers on generated messages; 9.29+ gets them from the protobuf runtime.
+// YTM 9.15 stores parsers on generated messages; 9.29/9.30/9.31 get them from protobuf.
 // Extension numbers stay fixed, so resolve each message from the initializer containing its number.
 private fun resolveExtensionMessageType(
     allMethods: Sequence<Method>,
