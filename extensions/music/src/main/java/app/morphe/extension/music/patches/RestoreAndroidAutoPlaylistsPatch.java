@@ -10,15 +10,19 @@ package app.morphe.extension.music.patches;
 import android.net.Uri;
 import android.support.v4.media.MediaBrowserCompat;
 import android.support.v4.media.MediaDescriptionCompat;
+import android.util.Base64;
 
 import com.google.common.util.concurrent.ListenableFuture;
 
+import java.io.ByteArrayOutputStream;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -45,6 +49,12 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final int RUNTIME_SCHEMA_VERSION = 2;
     private static final int RUNTIME_SCHEMA_VALUE_COUNT = 20;
     private static final long BROWSE_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
+    // MediaItemInfo protobuf wire types.
+    private static final int PROTOBUF_WIRE_VARINT = 0;
+    private static final int PROTOBUF_WIRE_FIXED_64 = 1;
+    private static final int PROTOBUF_WIRE_LENGTH_DELIMITED = 2;
+    private static final int PROTOBUF_WIRE_FIXED_32 = 5;
+    private static final int PROTOBUF_WIRE_TYPE_MASK = 0x7;
     private static final int PLAYLIST_ARTWORK_SIZE_PX = 544;
     // YTM 9.15/9.29/9.30/9.31: thumbnail extension 164480666 stores its list at c.c and
     // each URL in c. Library URLs request 60-192 px; the same Google CDN URL supports 544 px.
@@ -142,12 +152,13 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         synchronized (RestoreAndroidAutoPlaylistsPatch.class) {
             if (inFlightLibraryLoad != null) return inFlightLibraryLoad;
 
-            CompletableFuture<Object> response = requestLibrary();
+            CompletableFuture<Object> response = requestBrowse(LIBRARY_BROWSE_ID);
             CompletableFuture<List<MediaBrowserCompat.MediaItem>> load = new CompletableFuture<>();
             inFlightLibraryLoad = load;
             // Only concurrent requests share work. A later open reloads the current Library.
             response
-                    .thenApply(RestoreAndroidAutoPlaylistsPatch::extractPlayableLibraryPlaylists)
+                    .thenApply(RestoreAndroidAutoPlaylistsPatch::extractLibraryPlaylists)
+                    .thenCompose(RestoreAndroidAutoPlaylistsPatch::createPlayableLibraryItems)
                     .whenComplete((items, error) -> completeLibraryLoad(load, items, error));
             return load;
         }
@@ -189,13 +200,14 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         deliveryMethod.invoke(loadResult, arguments);
     }
 
-    private static CompletableFuture<Object> requestLibrary() throws ReflectiveOperationException {
+    private static CompletableFuture<Object> requestBrowse(
+            String browseId) throws ReflectiveOperationException {
         CompletableFuture<Object> responseFuture = new CompletableFuture<>();
         RuntimeConfiguration configuration = runtimeConfiguration;
         Object service = authenticatedBrowseService;
         Object builder = configuration.browseBuilderFactoryMethod.invoke(service);
-        configuration.browseIdSetterMethod.invoke(builder, LIBRARY_BROWSE_ID);
-        // The builder requires a non-null byte array; this Library root has no client-data token.
+        configuration.browseIdSetterMethod.invoke(builder, browseId);
+        // The builder requires a non-null byte array; these Browse pages have no client-data token.
         configuration.clientDataSetterMethod.invoke(builder, new byte[0]);
 
         ListenableFuture<?> browseRequest = (ListenableFuture<?>)
@@ -212,69 +224,244 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }, REQUEST_EXECUTOR);
         // A claimed request must still complete Android Auto's callback if YTM's future stalls.
         Utils.runOnMainThreadDelayed(() -> {
-            TimeoutException error = new TimeoutException("Library Browse request timed out");
+            TimeoutException error = new TimeoutException("Browse request timed out");
             if (responseFuture.completeExceptionally(error)) browseRequest.cancel(true);
         }, BROWSE_REQUEST_TIMEOUT_MILLISECONDS);
         return responseFuture;
     }
 
-    private static List<MediaBrowserCompat.MediaItem> extractPlayableLibraryPlaylists(
+    private static List<LibraryPlaylist> extractLibraryPlaylists(
             Object response) {
         LibraryState state = new LibraryState();
         try {
-            // YTM 9.15/9.29/9.30/9.31: saved playlist collection IDs start with VL and contain
-            // the same playlist ID as the matching playback endpoint. Find those renderers.
-            collectLibraryPlaylists(response, state);
+            walkResponse(response, value -> {
+                if (isResponsiveRenderer(value)) {
+                    try {
+                        appendLibraryPlaylist(value, state);
+                    } catch (ReflectiveOperationException | RuntimeException error) {
+                        Logger.printException(() -> "Library playlist skipped", error);
+                    }
+                }
+                return false;
+            });
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException("Could not map Library response", error);
         }
-        Logger.printDebug(() -> "Mapped playable Library playlists: " + state.items.size());
-        return state.items;
+        Logger.printDebug(() -> "Mapped Library playlists: " + state.playlists.size());
+        return state.playlists;
     }
 
     private static void appendLibraryPlaylist(
             Object renderer, LibraryState state) throws ReflectiveOperationException {
-        PlaylistMediaIds mediaIds = responsiveRendererMediaIds(renderer);
-        if (mediaIds == null || state.seenBrowseIds.contains(mediaIds.browseId)) return;
+        String browseId = responsiveRendererBrowseId(renderer);
+        if (browseId == null || state.seenBrowseIds.contains(browseId)) return;
 
         String title = responsiveRendererTitle(renderer);
         if (title.isEmpty()) return;
-        state.seenBrowseIds.add(mediaIds.browseId);
-        state.items.add(createPlayableItem(
-                mediaIds.playableMediaId,
+        state.seenBrowseIds.add(browseId);
+        state.playlists.add(new LibraryPlaylist(
+                browseId,
+                browseId.substring(YTM_COLLECTION_BROWSE_ID_PREFIX.length()),
                 title,
                 optionalResponsiveRendererSubtitle(renderer),
                 optionalResponsiveRendererArtwork(renderer)));
     }
 
-    private static PlaylistMediaIds responsiveRendererMediaIds(
+    private static String responsiveRendererBrowseId(
             Object renderer) throws ReflectiveOperationException {
         RuntimeSchema schema = runtimeConfiguration.schema;
-        List<Object> endpoints = new ArrayList<>(schema.responsiveRendererEndpointFieldNames.length);
         String playlistBrowseId = null;
         for (String fieldName : schema.responsiveRendererEndpointFieldNames) {
             Object endpoint = readFieldValue(renderer, fieldName);
             if (endpoint == null) continue;
-            endpoints.add(endpoint);
             String browseId = findBrowseId(endpoint);
             if (browseId == null || !browseId.startsWith(YTM_COLLECTION_BROWSE_ID_PREFIX)) continue;
             if (playlistBrowseId != null && !playlistBrowseId.equals(browseId)) return null;
             playlistBrowseId = browseId;
         }
-        if (playlistBrowseId == null) return null;
+        return playlistBrowseId;
+    }
 
-        String playlistId = playlistBrowseId.substring(YTM_COLLECTION_BROWSE_ID_PREFIX.length());
-        String playableMediaId = null;
-        for (Object endpoint : endpoints) {
-            if (!endpointContainsPlaylistId(endpoint, playlistId)) continue;
-            String mediaId = mediaIdForEndpoint(endpoint);
-            if (mediaId == null || mediaId.isEmpty()) continue;
-            if (playableMediaId != null && !playableMediaId.equals(mediaId)) return null;
-            playableMediaId = mediaId;
+    private static CompletableFuture<List<MediaBrowserCompat.MediaItem>>
+            createPlayableLibraryItems(List<LibraryPlaylist> playlists) {
+        if (playlists.isEmpty()) {
+            return CompletableFuture.completedFuture(Collections.emptyList());
         }
-        return playableMediaId == null
-                ? null
-                : new PlaylistMediaIds(playlistBrowseId, playableMediaId);
+
+        CompletableFuture<PlaybackTemplate> templateFuture = new CompletableFuture<>();
+        findPlaybackTemplate(playlists, 0, templateFuture);
+        return templateFuture.thenApply(template -> {
+            List<MediaBrowserCompat.MediaItem> items = new ArrayList<>(playlists.size());
+            for (LibraryPlaylist playlist : playlists) {
+                String mediaId = mediaIdForPlaylist(template, playlist.playlistId);
+                items.add(createPlayableItem(
+                        mediaId,
+                        playlist.title,
+                        playlist.subtitle,
+                        playlist.artwork));
+            }
+            return items;
+        });
+    }
+
+    private static void findPlaybackTemplate(
+            List<LibraryPlaylist> playlists,
+            int index,
+            CompletableFuture<PlaybackTemplate> result) {
+        if (index >= playlists.size()) {
+            result.completeExceptionally(
+                    new IllegalStateException("No Library playlist supplied a play command"));
+            return;
+        }
+
+        LibraryPlaylist playlist = playlists.get(index);
+        try {
+            // Library rows only contain VL Browse IDs. A playlist's own page contains the native
+            // play command, so one page supplies a current command for the whole result.
+            requestBrowse(playlist.browseId).whenComplete((response, error) -> {
+                if (error == null) {
+                    try {
+                        String mediaId = findPlaylistPlaybackMediaId(
+                                response, playlist.playlistId);
+                        if (mediaId != null) {
+                            result.complete(new PlaybackTemplate(
+                                    mediaId, playlist.playlistId));
+                            return;
+                        }
+                    } catch (ReflectiveOperationException | RuntimeException mappingError) {
+                        Logger.printException(
+                                () -> "Could not read playlist play command", mappingError);
+                    }
+                }
+                findPlaybackTemplate(playlists, index + 1, result);
+            });
+        } catch (ReflectiveOperationException | RuntimeException error) {
+            findPlaybackTemplate(playlists, index + 1, result);
+        }
+    }
+
+    private static String findPlaylistPlaybackMediaId(
+            Object response, String playlistId) throws ReflectiveOperationException {
+        Class<?> endpointClass = runtimeConfiguration.endpointMediaIdMethod.getParameterTypes()[0];
+        String[] mediaId = {null};
+        walkResponse(response, value -> {
+            if (!endpointClass.isInstance(value) ||
+                    !endpointContainsPlaylistId(value, playlistId)) {
+                return false;
+            }
+            String candidate = mediaIdForEndpoint(value);
+            if (candidate == null || candidate.isEmpty()) return false;
+            mediaId[0] = candidate;
+            return true;
+        });
+        return mediaId[0];
+    }
+
+    private static String mediaIdForPlaylist(
+            PlaybackTemplate template, String playlistId) {
+        if (template.playlistId.equals(playlistId)) return template.mediaId;
+
+        byte[] source = template.playlistId.getBytes(StandardCharsets.UTF_8);
+        byte[] replacement = playlistId.getBytes(StandardCharsets.UTF_8);
+        byte[] encodedMediaId = Base64.decode(
+                template.mediaId,
+                Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+        ProtobufRewrite rewritten = rewriteProtobuf(encodedMediaId, source, replacement);
+        if (!rewritten.valid || rewritten.replacements != 1) {
+            throw new IllegalStateException(
+                    "Playlist play command did not contain one playlist ID");
+        }
+        return Base64.encodeToString(
+                rewritten.message,
+                Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+    }
+
+    // The native play command stores its playlist ID inside nested protobuf messages. Re-encode
+    // each enclosing length when the replacement ID has a different number of bytes.
+    private static ProtobufRewrite rewriteProtobuf(
+            byte[] message, byte[] source, byte[] replacement) {
+        ByteArrayOutputStream output = new ByteArrayOutputStream(message.length);
+        int[] offset = {0};
+        int replacements = 0;
+        try {
+            while (offset[0] < message.length) {
+                long tag = readVarint(message, offset);
+                if (tag == 0) return ProtobufRewrite.invalid();
+                writeVarint(output, tag);
+
+                switch ((int) (tag & PROTOBUF_WIRE_TYPE_MASK)) {
+                    case PROTOBUF_WIRE_VARINT:
+                        writeVarint(output, readVarint(message, offset));
+                        break;
+                    case PROTOBUF_WIRE_FIXED_64:
+                        copyBytes(message, offset, output, Long.BYTES);
+                        break;
+                    case PROTOBUF_WIRE_LENGTH_DELIMITED:
+                        long length = readVarint(message, offset);
+                        if (length > Integer.MAX_VALUE ||
+                                length > message.length - offset[0]) {
+                            return ProtobufRewrite.invalid();
+                        }
+                        byte[] payload = Arrays.copyOfRange(
+                                message, offset[0], offset[0] + (int) length);
+                        offset[0] += (int) length;
+
+                        byte[] rewrittenPayload = payload;
+                        int payloadReplacements = 0;
+                        if (Arrays.equals(payload, source)) {
+                            rewrittenPayload = replacement;
+                            payloadReplacements = 1;
+                        } else {
+                            ProtobufRewrite nested = rewriteProtobuf(
+                                    payload, source, replacement);
+                            if (nested.valid && nested.replacements > 0) {
+                                rewrittenPayload = nested.message;
+                                payloadReplacements = nested.replacements;
+                            }
+                        }
+                        writeVarint(output, rewrittenPayload.length);
+                        output.write(rewrittenPayload, 0, rewrittenPayload.length);
+                        replacements += payloadReplacements;
+                        break;
+                    case PROTOBUF_WIRE_FIXED_32:
+                        copyBytes(message, offset, output, Integer.BYTES);
+                        break;
+                    default:
+                        return ProtobufRewrite.invalid();
+                }
+            }
+            return new ProtobufRewrite(output.toByteArray(), replacements, true);
+        } catch (IllegalArgumentException error) {
+            return ProtobufRewrite.invalid();
+        }
+    }
+
+    private static long readVarint(byte[] message, int[] offset) {
+        long value = 0;
+        for (int shift = 0; shift < Long.SIZE; shift += 7) {
+            if (offset[0] >= message.length) throw new IllegalArgumentException("Truncated varint");
+            int current = message[offset[0]++] & 0xff;
+            value |= (long) (current & 0x7f) << shift;
+            if ((current & 0x80) == 0) return value;
+        }
+        throw new IllegalArgumentException("Varint is too long");
+    }
+
+    private static void writeVarint(ByteArrayOutputStream output, long value) {
+        while ((value & ~0x7fL) != 0) {
+            output.write((int) (value & 0x7f) | 0x80);
+            value >>>= 7;
+        }
+        output.write((int) value);
+    }
+
+    private static void copyBytes(
+            byte[] message, int[] offset, ByteArrayOutputStream output, int length) {
+        if (length > message.length - offset[0]) {
+            throw new IllegalArgumentException("Truncated fixed-width field");
+        }
+        output.write(message, offset[0], length);
+        offset[0] += length;
     }
 
     // YTM 9.15/9.29/9.30/9.31: the playlist endpoint extension contains the playlist ID.
@@ -435,23 +622,17 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         return null;
     }
 
-    // YTM 9.15/9.29/9.30/9.31: renderer messages can appear in generated fields, iterables, or
-    // protobuf extensions. Breadth-first traversal finds renderers through all three shapes.
-    private static void collectLibraryPlaylists(
-            Object value, LibraryState state) throws ReflectiveOperationException {
+    // YTM 9.15/9.29/9.30/9.31: response messages can appear in generated fields, iterables, or
+    // protobuf extensions. Breadth-first traversal covers all three shapes.
+    private static void walkResponse(
+            Object value, ResponseVisitor visitor) throws ReflectiveOperationException {
+        Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
         ArrayDeque<Object> pending = new ArrayDeque<>();
-        enqueue(value, state, pending);
+        enqueue(value, visited, pending);
 
         while (!pending.isEmpty()) {
             Object current = pending.removeFirst();
-            if (isResponsiveRenderer(current)) {
-                try {
-                    appendLibraryPlaylist(current, state);
-                } catch (ReflectiveOperationException | RuntimeException error) {
-                    Logger.printException(() -> "Library playlist skipped", error);
-                }
-                continue;
-            }
+            if (visitor.visit(current)) return;
 
             Class<?> valueClass = current.getClass();
             if (current instanceof CharSequence || current instanceof Number ||
@@ -459,7 +640,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 continue;
             }
             if (current instanceof Iterable<?>) {
-                for (Object item : (Iterable<?>) current) enqueue(item, state, pending);
+                for (Object item : (Iterable<?>) current) enqueue(item, visited, pending);
                 continue;
             }
 
@@ -467,7 +648,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             Iterator<?> entries = extensionEntries(current);
             if (entries != null) {
                 while (entries.hasNext()) {
-                    enqueue(((Map.Entry<?, ?>) entries.next()).getValue(), state, pending);
+                    enqueue(((Map.Entry<?, ?>) entries.next()).getValue(), visited, pending);
                 }
             }
             for (Class<?> owner = valueClass; owner != null && owner != Object.class;
@@ -477,7 +658,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                             field.getType().isPrimitive()) continue;
                     try {
                         field.setAccessible(true);
-                        enqueue(field.get(current), state, pending);
+                        enqueue(field.get(current), visited, pending);
                     } catch (IllegalAccessException ignored) {
                     }
                 }
@@ -492,8 +673,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     }
 
     private static void enqueue(
-            Object value, LibraryState state, ArrayDeque<Object> pending) {
-        if (value != null && state.visitedObjects.add(value)) pending.addLast(value);
+            Object value, Set<Object> visited, ArrayDeque<Object> pending) {
+        if (value != null && visited.add(value)) pending.addLast(value);
     }
 
     private static boolean isNativePlaylistsNode(Object loadResult) {
@@ -653,20 +834,56 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
-    private static final class PlaylistMediaIds {
-        private final String browseId;
-        private final String playableMediaId;
-
-        private PlaylistMediaIds(String browseId, String playableMediaId) {
-            this.browseId = browseId;
-            this.playableMediaId = playableMediaId;
-        }
+    private interface ResponseVisitor {
+        boolean visit(Object value) throws ReflectiveOperationException;
     }
 
     private static final class LibraryState {
-        private final List<MediaBrowserCompat.MediaItem> items = new ArrayList<>();
+        private final List<LibraryPlaylist> playlists = new ArrayList<>();
         private final Set<String> seenBrowseIds = new HashSet<>();
-        private final Set<Object> visitedObjects = Collections.newSetFromMap(new IdentityHashMap<>());
+    }
+
+    private static final class LibraryPlaylist {
+        private final String browseId;
+        private final String playlistId;
+        private final String title;
+        private final String subtitle;
+        private final Uri artwork;
+
+        private LibraryPlaylist(
+                String browseId, String playlistId, String title, String subtitle, Uri artwork) {
+            this.browseId = browseId;
+            this.playlistId = playlistId;
+            this.title = title;
+            this.subtitle = subtitle;
+            this.artwork = artwork;
+        }
+    }
+
+    private static final class PlaybackTemplate {
+        private final String mediaId;
+        private final String playlistId;
+
+        private PlaybackTemplate(String mediaId, String playlistId) {
+            this.mediaId = mediaId;
+            this.playlistId = playlistId;
+        }
+    }
+
+    private static final class ProtobufRewrite {
+        private final byte[] message;
+        private final int replacements;
+        private final boolean valid;
+
+        private ProtobufRewrite(byte[] message, int replacements, boolean valid) {
+            this.message = message;
+            this.replacements = replacements;
+            this.valid = valid;
+        }
+
+        private static ProtobufRewrite invalid() {
+            return new ProtobufRewrite(new byte[0], 0, false);
+        }
     }
 
 }
