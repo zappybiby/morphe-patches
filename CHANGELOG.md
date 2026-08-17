@@ -1,3 +1,9 @@
+## [0.0.4](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.0.4) (2026-08-17)
+
+### Changes
+
+* **YouTube Music:** Reorganize Android Auto playlist setup for easier maintenance
+
 ## [0.0.3](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.0.3) (2026-08-17)
 
 ### Changes
