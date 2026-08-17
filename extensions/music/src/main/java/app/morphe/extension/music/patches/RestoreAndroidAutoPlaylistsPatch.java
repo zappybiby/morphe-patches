@@ -13,8 +13,12 @@ import android.support.v4.media.MediaDescriptionCompat;
 import android.util.Base64;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.protobuf.CodedInputStream;
+import com.google.protobuf.CodedOutputStream;
+import com.google.protobuf.WireFormat;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -49,12 +53,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final int RUNTIME_SCHEMA_VERSION = 2;
     private static final int RUNTIME_SCHEMA_VALUE_COUNT = 20;
     private static final long BROWSE_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
-    // MediaItemInfo protobuf wire types.
-    private static final int PROTOBUF_WIRE_VARINT = 0;
-    private static final int PROTOBUF_WIRE_FIXED_64 = 1;
-    private static final int PROTOBUF_WIRE_LENGTH_DELIMITED = 2;
-    private static final int PROTOBUF_WIRE_FIXED_32 = 5;
-    private static final int PROTOBUF_WIRE_TYPE_MASK = 0x7;
     private static final int PLAYLIST_ARTWORK_SIZE_PX = 544;
     // YTM 9.15/9.29/9.30/9.31: thumbnail extension 164480666 stores its list at c.c and
     // each URL in c. Library URLs request 60-192 px; the same Google CDN URL supports 544 px.
@@ -380,32 +378,25 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     // each enclosing length when the replacement ID has a different number of bytes.
     private static ProtobufRewrite rewriteProtobuf(
             byte[] message, byte[] source, byte[] replacement) {
-        ByteArrayOutputStream output = new ByteArrayOutputStream(message.length);
-        int[] offset = {0};
+        CodedInputStream input = CodedInputStream.newInstance(message);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(message.length);
+        CodedOutputStream output = CodedOutputStream.newInstance(bytes);
         int replacements = 0;
         try {
-            while (offset[0] < message.length) {
-                long tag = readVarint(message, offset);
+            while (!input.isAtEnd()) {
+                int tag = input.readTag();
                 if (tag == 0) return ProtobufRewrite.invalid();
-                writeVarint(output, tag);
+                output.writeUInt32NoTag(tag);
 
-                switch ((int) (tag & PROTOBUF_WIRE_TYPE_MASK)) {
-                    case PROTOBUF_WIRE_VARINT:
-                        writeVarint(output, readVarint(message, offset));
+                switch (WireFormat.getTagWireType(tag)) {
+                    case WireFormat.WIRETYPE_VARINT:
+                        output.writeUInt64NoTag(input.readRawVarint64());
                         break;
-                    case PROTOBUF_WIRE_FIXED_64:
-                        copyBytes(message, offset, output, Long.BYTES);
+                    case WireFormat.WIRETYPE_FIXED64:
+                        output.writeFixed64NoTag(input.readRawLittleEndian64());
                         break;
-                    case PROTOBUF_WIRE_LENGTH_DELIMITED:
-                        long length = readVarint(message, offset);
-                        if (length > Integer.MAX_VALUE ||
-                                length > message.length - offset[0]) {
-                            return ProtobufRewrite.invalid();
-                        }
-                        byte[] payload = Arrays.copyOfRange(
-                                message, offset[0], offset[0] + (int) length);
-                        offset[0] += (int) length;
-
+                    case WireFormat.WIRETYPE_LENGTH_DELIMITED:
+                        byte[] payload = input.readRawBytes(input.readRawVarint32());
                         byte[] rewrittenPayload = payload;
                         int payloadReplacements = 0;
                         if (Arrays.equals(payload, source)) {
@@ -419,49 +410,22 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                                 payloadReplacements = nested.replacements;
                             }
                         }
-                        writeVarint(output, rewrittenPayload.length);
-                        output.write(rewrittenPayload, 0, rewrittenPayload.length);
+                        output.writeUInt32NoTag(rewrittenPayload.length);
+                        output.writeRawBytes(rewrittenPayload);
                         replacements += payloadReplacements;
                         break;
-                    case PROTOBUF_WIRE_FIXED_32:
-                        copyBytes(message, offset, output, Integer.BYTES);
+                    case WireFormat.WIRETYPE_FIXED32:
+                        output.writeFixed32NoTag(input.readRawLittleEndian32());
                         break;
                     default:
                         return ProtobufRewrite.invalid();
                 }
             }
-            return new ProtobufRewrite(output.toByteArray(), replacements, true);
-        } catch (IllegalArgumentException error) {
+            output.flush();
+            return new ProtobufRewrite(bytes.toByteArray(), replacements, true);
+        } catch (IOException error) {
             return ProtobufRewrite.invalid();
         }
-    }
-
-    private static long readVarint(byte[] message, int[] offset) {
-        long value = 0;
-        for (int shift = 0; shift < Long.SIZE; shift += 7) {
-            if (offset[0] >= message.length) throw new IllegalArgumentException("Truncated varint");
-            int current = message[offset[0]++] & 0xff;
-            value |= (long) (current & 0x7f) << shift;
-            if ((current & 0x80) == 0) return value;
-        }
-        throw new IllegalArgumentException("Varint is too long");
-    }
-
-    private static void writeVarint(ByteArrayOutputStream output, long value) {
-        while ((value & ~0x7fL) != 0) {
-            output.write((int) (value & 0x7f) | 0x80);
-            value >>>= 7;
-        }
-        output.write((int) value);
-    }
-
-    private static void copyBytes(
-            byte[] message, int[] offset, ByteArrayOutputStream output, int length) {
-        if (length > message.length - offset[0]) {
-            throw new IllegalArgumentException("Truncated fixed-width field");
-        }
-        output.write(message, offset[0], length);
-        offset[0] += length;
     }
 
     // YTM 9.15/9.29/9.30/9.31: the playlist endpoint extension contains the playlist ID.
