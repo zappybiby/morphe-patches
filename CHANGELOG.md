@@ -1,3 +1,9 @@
+## [0.0.8](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.0.8) (2026-08-17)
+
+### Changes
+
+* **YouTube Music:** Use protobuf's wire helpers when building playlist playback IDs
+
 ## [0.0.4](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.0.4) (2026-08-17)
 
 ### Changes

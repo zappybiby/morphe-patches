@@ -5,7 +5,7 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
 apply<app.morphe.patches.gradle.PatchesPlugin>()
 
 group = "app.morphe"
-version = "0.0.7"
+version = "0.0.8"
 
 extensions.configure<PatchesExtension>("patches") {
     about {
@@ -49,7 +49,6 @@ tasks.withType<Jar>().configureEach {
     exclude(
         "extensions/music.mpe",
         "extensions/reddit.mpe",
-        "extensions/shared-youtube.mpe",
         "extensions/youtube.mpe",
     )
 }
