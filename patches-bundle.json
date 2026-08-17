@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-08-16T09:07:37",
+  "created_at": "2026-08-17T18:50:31Z",
   "description": "Lets you open YouTube Music playlists and choose individual songs in Android Auto.",
-  "download_url": "https://github.com/zappybiby/morphe-patches/releases/download/browse-android-auto-playlists-v0.0.2/browse-android-auto-playlists-0.0.2.mpp",
+  "download_url": "https://github.com/zappybiby/morphe-patches/releases/download/browse-android-auto-playlists-v0.0.3/browse-android-auto-playlists-0.0.3.mpp",
   "signature_download_url": "",
-  "version": "0.0.2"
+  "version": "0.0.3"
 }

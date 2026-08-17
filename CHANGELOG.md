@@ -1,3 +1,9 @@
+## [0.0.3](https://github.com/zappybiby/morphe-patches/releases/tag/browse-android-auto-playlists-v0.0.3) (2026-08-17)
+
+### Changes
+
+* **YouTube Music:** Use protobuf's wire helpers for playlist media IDs
+
 ## [0.0.2](https://github.com/zappybiby/morphe-patches/releases/tag/browse-android-auto-playlists-v0.0.2) (2026-08-16)
 
 ### Changes
