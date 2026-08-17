@@ -412,8 +412,8 @@ private fun resolveRenderer(
         }
         .singleOrError("Could not resolve responsive renderer field $name")
 
-    // YTM 9.15/9.29/9.30/9.31: artwork field c has a different type; title g and
-    // subtitle h share the text type. Check that relationship before using these names.
+    // These field names are obfuscated. In every supported version, artwork has its own
+    // message type, while title and subtitle use the same text type.
     val artworkField = responsiveRendererField(RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME)
     val titleField = responsiveRendererField(RESPONSIVE_RENDERER_TITLE_FIELD_NAME)
     val subtitleField = responsiveRendererField(RESPONSIVE_RENDERER_SUBTITLE_FIELD_NAME)
@@ -421,8 +421,8 @@ private fun resolveRenderer(
         "Unexpected responsive renderer artwork, title, or subtitle fields"
     }
 
-    // YTM 9.15/9.29/9.30/9.31: Browse and playback are the only same-typed pair of
-    // renderer endpoint fields. The media-ID method accepts that type and stores it in MediaItemInfo.
+    // Each playlist row contains two endpoints of the same type: one opens the playlist
+    // and one starts playback. YTM's media-ID method uniquely identifies that pair.
     val endpoints = responsiveRendererFields.asSequence()
         .filter { field -> !AccessFlags.STATIC.isSet(field.accessFlags) }
         .groupBy { field -> field.type }
@@ -450,9 +450,8 @@ private fun resolveRenderer(
         }
         .singleOrError("Could not uniquely resolve the responsive renderer endpoints")
 
-    // YTM 9.15/9.29/9.30/9.31: endpoint messages inherit one extension-map field, and
-    // that map type has one zero-argument Iterator method. Resolve both here instead of
-    // searching generated protobuf classes at runtime.
+    // Browse and playback endpoints are stored in protobuf's internal extension storage.
+    // Resolve its field and iterator here so the extension can read those endpoints later.
     val endpointContainerType = endpoints.fields.first().type
     val extensionMapAccessors = generateSequence(
         classesByType[endpointContainerType]?.superclass,
