@@ -17,14 +17,17 @@ import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.util.findFreeRegister
 import app.morphe.util.getReference
 import app.morphe.util.indexOfFirstInstructionOrThrow
+import app.morphe.util.p0Register
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.ClassDef
 import com.android.tools.smali.dexlib2.iface.Method
+import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.NarrowLiteralInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.Reference
@@ -42,6 +45,7 @@ private const val MUSIC_RESPONSIVE_RENDERER_EXTENSION_FIELD_NUMBER = 161_429_595
 private const val PLAYLIST_THUMBNAIL_EXTENSION_FIELD_NUMBER = 164_480_666
 private const val PLAYLIST_ENDPOINT_EXTENSION_FIELD_NUMBER = 52_666_186
 private const val HOME_BROWSE_ID_MARKER = "FEmusic_home"
+private const val FOUR_BIT_REGISTER_LIMIT = 16
 private const val EIGHT_BIT_REGISTER_LIMIT = 256
 private const val RUNTIME_SCHEMA_VERSION = 2
 private const val RUNTIME_SCHEMA_DELIMITER = "|"
@@ -108,6 +112,17 @@ private data class ResolvedExtensionMapAccessors(
     val iteratorMethod: Method,
 )
 
+private data class BrowseProvider(
+    val field: FieldReference,
+    val getter: MethodReference,
+)
+
+private data class StartupResolution(
+    val androidAutoProviderMethod: Method,
+    val browseProviderPath: List<FieldReference>,
+    val browseProviderGetter: MethodReference,
+)
+
 private data class RendererResolution(
     val responsiveRendererType: String,
     val playlistThumbnailRendererType: String,
@@ -136,7 +151,7 @@ private data class DeliveryResolution(
 
 private data class ResolvedRuntimeHooks(
     val encodedSchema: String,
-    val browseBuilderFactoryMethod: MethodReference,
+    val startup: StartupResolution,
     val androidAutoControllerType: String,
     val loadResultType: String,
 )
@@ -197,11 +212,11 @@ private data class RuntimeSchema(
     }
 }
 
-private fun findShortestReferencedStringPaths(
+private fun findShortestFieldPaths(
     startType: String,
-    fields: List<FieldReference>,
+    fieldsForType: (String) -> Iterable<FieldReference>,
+    matches: (FieldReference) -> Boolean,
 ): List<List<FieldReference>> {
-    val fieldsByOwner = fields.groupBy { it.definingClass }
     val pending = ArrayDeque<List<FieldReference>>()
     pending.add(emptyList())
     val results = mutableListOf<List<FieldReference>>()
@@ -210,9 +225,9 @@ private fun findShortestReferencedStringPaths(
     while (pending.isNotEmpty()) {
         val current = pending.removeFirst()
         if (matchDepth?.let { current.size >= it } == true) continue
-        fieldsByOwner[current.lastOrNull()?.type ?: startType].orEmpty().forEach { field ->
+        fieldsForType(current.lastOrNull()?.type ?: startType).forEach { field ->
             val path = current + field
-            if (field.type == "Ljava/lang/String;") {
+            if (matches(field)) {
                 results += path
                 matchDepth = path.size
             } else if (matchDepth == null && field.type != startType &&
@@ -223,6 +238,73 @@ private fun findShortestReferencedStringPaths(
         }
     }
     return results.distinct()
+}
+
+private fun findShortestReferencedStringPaths(
+    startType: String,
+    fields: List<FieldReference>,
+): List<List<FieldReference>> {
+    val fieldsByOwner = fields.groupBy { it.definingClass }
+    return findShortestFieldPaths(
+        startType,
+        fieldsForType = { type -> fieldsByOwner[type].orEmpty() },
+        matches = { field -> field.type == "Ljava/lang/String;" },
+    )
+}
+
+private fun Instruction.receiverRegister() = when (this) {
+    is FiveRegisterInstruction -> registerC.takeIf { registerCount > 0 }
+    is RegisterRangeInstruction -> startRegister.takeIf { registerCount > 0 }
+    else -> null
+}
+
+private fun List<Instruction>.browseProviderAt(
+    browseServiceCastIndex: Int,
+    browseServiceType: String,
+): BrowseProvider? {
+    val browseServiceCast =
+        getOrNull(browseServiceCastIndex) as? OneRegisterInstruction ?: return null
+    if (browseServiceCast.opcode != Opcode.CHECK_CAST ||
+        browseServiceCast.getReference<TypeReference>()?.type != browseServiceType
+    ) return null
+
+    val moveResult = getOrNull(browseServiceCastIndex - 1) as? OneRegisterInstruction ?: return null
+    if (moveResult.opcode != Opcode.MOVE_RESULT_OBJECT ||
+        moveResult.registerA != browseServiceCast.registerA
+    ) return null
+
+    val providerGetterCall = getOrNull(browseServiceCastIndex - 2) ?: return null
+    if (providerGetterCall.opcode != Opcode.INVOKE_INTERFACE &&
+        providerGetterCall.opcode != Opcode.INVOKE_INTERFACE_RANGE
+    ) return null
+    val getter = providerGetterCall.getReference<MethodReference>() ?: return null
+    if (getter.parameterTypes.isNotEmpty() || getter.returnType != "Ljava/lang/Object;") return null
+
+    val providerRead = getOrNull(browseServiceCastIndex - 3) as? TwoRegisterInstruction
+        ?: return null
+    if (providerRead.opcode != Opcode.IGET_OBJECT ||
+        providerRead.registerA != providerGetterCall.receiverRegister()
+    ) return null
+    val field = providerRead.getReference<FieldReference>() ?: return null
+    return field.takeIf { it.type == getter.definingClass }?.let { BrowseProvider(it, getter) }
+}
+
+private fun findBrowseProviders(
+    startType: String,
+    providers: List<BrowseProvider>,
+    classesByType: Map<String, ClassDef>,
+): List<Pair<List<FieldReference>, MethodReference>> {
+    val providersByField = providers.associateBy { it.field }
+    return findShortestFieldPaths(
+        startType,
+        fieldsForType = { type ->
+            classesByType[type]?.fields?.filter { field ->
+                !AccessFlags.STATIC.isSet(field.accessFlags) &&
+                    (classesByType.containsKey(field.type) || providersByField.containsKey(field))
+            }.orEmpty()
+        },
+        matches = providersByField::containsKey,
+    ).map { path -> path to providersByField.getValue(path.last()).getter }
 }
 
 @Suppress("unused")
@@ -310,6 +392,12 @@ private fun BytecodePatchContext.resolveRuntimeHooks(
     val renderer = resolveRenderer(classesByType, allMethods)
     val browse = resolveBrowse(classesByType)
     val delivery = resolveDelivery()
+    val startup = resolveStartup(
+        delivery.controllerType,
+        browse.builderFactoryMethod.definingClass,
+        classesByType,
+        allMethods,
+    )
 
     val encodedSchema = RuntimeSchema(
         responsiveRendererClassName = renderer.responsiveRendererType.toRuntimeClassName(),
@@ -338,7 +426,7 @@ private fun BytecodePatchContext.resolveRuntimeHooks(
 
     return ResolvedRuntimeHooks(
         encodedSchema = encodedSchema,
-        browseBuilderFactoryMethod = browse.builderFactoryMethod,
+        startup = startup,
         androidAutoControllerType = delivery.controllerType,
         loadResultType = delivery.loadResultType,
     )
@@ -524,6 +612,48 @@ private fun BytecodePatchContext.resolveBrowse(
     )
 }
 
+private fun resolveStartup(
+    androidAutoControllerType: String,
+    browseServiceType: String,
+    classesByType: Map<String, ClassDef>,
+    allMethods: Sequence<Method>,
+): StartupResolution {
+    val androidAutoProviderMethod = allMethods
+        .filter { method ->
+            !AccessFlags.STATIC.isSet(method.accessFlags) &&
+                method.returnType == "Ljava/lang/Object;" &&
+                method.instructionList.any { instruction ->
+                    instruction.getReference<MethodReference>()?.let { reference ->
+                        reference.definingClass == androidAutoControllerType &&
+                            reference.name == "<init>"
+                    } == true
+                }
+        }
+        .singleOrError("Could not uniquely resolve the Android Auto controller provider")
+
+    val browseProviders = allMethods.flatMap { method ->
+        val instructions = method.instructionList
+        instructions.indices.asSequence().mapNotNull { index ->
+            instructions.browseProviderAt(index, browseServiceType)
+        }
+    }.distinctBy { provider -> provider.field }.toList()
+    check(browseProviders.isNotEmpty()) { "Could not resolve a provider for the Browse service" }
+
+    val (browseProviderPath, browseProviderGetter) = findBrowseProviders(
+        androidAutoProviderMethod.definingClass,
+        browseProviders,
+        classesByType,
+    ).asSequence().singleOrError(
+        "Could not uniquely reach the Browse service provider from the Android Auto provider",
+    )
+
+    return StartupResolution(
+        androidAutoProviderMethod,
+        browseProviderPath,
+        browseProviderGetter,
+    )
+}
+
 private fun BytecodePatchContext.resolveDelivery(): DeliveryResolution {
     val mediaIdValidationMethod = AndroidAutoMediaIdValidationFingerprint.method
     val controllerType = mediaIdValidationMethod.definingClass
@@ -586,23 +716,68 @@ private fun resolveExtensionMessageType(
 }
 
 private fun BytecodePatchContext.injectRuntimeHooks(runtimeHooks: ResolvedRuntimeHooks) {
-    val mutableBrowseBuilderFactoryMethod =
-        mutableClassDefBy(runtimeHooks.browseBuilderFactoryMethod.definingClass).methods
-            .single { method -> method.matches(runtimeHooks.browseBuilderFactoryMethod) }
-    val schemaRegister = mutableBrowseBuilderFactoryMethod.findFreeRegister(0)
-    check(schemaRegister < EIGHT_BIT_REGISTER_LIMIT) {
-        "Browse builder factory has no free 8-bit register"
+    val startup = runtimeHooks.startup
+    val mutableAndroidAutoProviderMethod =
+        mutableClassDefBy(startup.androidAutoProviderMethod.definingClass).methods.single { method ->
+            method.matches(startup.androidAutoProviderMethod)
+        }
+    val controllerConstructorIndex = mutableAndroidAutoProviderMethod
+        .indexOfFirstInstructionOrThrow {
+            getReference<MethodReference>()?.let { reference ->
+                reference.definingClass == runtimeHooks.androidAutoControllerType &&
+                    reference.name == "<init>"
+            } == true
+        }
+    val controllerRegister = mutableAndroidAutoProviderMethod
+        .getInstruction<Instruction>(controllerConstructorIndex)
+        .receiverRegister() ?: error("Could not resolve the Android Auto controller register")
+    val controllerReturnIndex = mutableAndroidAutoProviderMethod.indexOfFirstInstructionOrThrow(
+        controllerConstructorIndex,
+    ) {
+        opcode == Opcode.RETURN_OBJECT &&
+            (this as? OneRegisterInstruction)?.registerA == controllerRegister
+    }
+    val providerRegister = mutableAndroidAutoProviderMethod.findFreeRegister(
+        controllerReturnIndex,
+        mutableAndroidAutoProviderMethod.p0Register,
+    )
+    check(providerRegister < FOUR_BIT_REGISTER_LIMIT) {
+        "Android Auto provider has no free 4-bit register"
     }
 
-    // YTM 9.15/9.29/9.30/9.31: Android Auto calls this factory before it asks for Library.
-    // Save the Browse service here so playlists work even when YTM was not already open.
-    mutableBrowseBuilderFactoryMethod.addInstructions(
-        0,
+    val browseProviderTraversalInstructions = buildString {
+        appendLine("move-object/from16 v$providerRegister, p0")
+        startup.browseProviderPath.forEach { field ->
+            appendLine(
+                "iget-object v$providerRegister, v$providerRegister, " +
+                    "${field.definingClass}->${field.name}:${field.type}",
+            )
+            appendLine("if-eqz v$providerRegister, :skip_playlist_initialization")
+        }
+        appendLine(
+            "invoke-interface/range { v$providerRegister .. v$providerRegister }, " +
+                "${startup.browseProviderGetter.definingClass}->" +
+                "${startup.browseProviderGetter.name}()" +
+                startup.browseProviderGetter.returnType,
+        )
+        appendLine("move-result-object v$providerRegister")
+        append("if-eqz v$providerRegister, :skip_playlist_initialization")
+    }
+
+    // YTM 9.15/9.29/9.30/9.31: Android Auto can create its controller before the phone
+    // initializes Browse. Read the same Browse provider while that controller is created.
+    mutableAndroidAutoProviderMethod.addInstructionsWithLabels(
+        controllerReturnIndex,
         """
-            const-string v$schemaRegister, "${runtimeHooks.encodedSchema}"
-            invoke-static/range { v$schemaRegister .. v$schemaRegister }, $EXTENSION_CLASS->configure(Ljava/lang/String;)V
-            invoke-static/range { p0 .. p0 }, $EXTENSION_CLASS->initialize(Ljava/lang/Object;)V
+            const-string v$providerRegister, "${runtimeHooks.encodedSchema}"
+            invoke-static/range { v$providerRegister .. v$providerRegister }, $EXTENSION_CLASS->configure(Ljava/lang/String;)V
+            $browseProviderTraversalInstructions
+            invoke-static/range { v$providerRegister .. v$providerRegister }, $EXTENSION_CLASS->initialize(Ljava/lang/Object;)V
         """,
+        ExternalLabel(
+            "skip_playlist_initialization",
+            mutableAndroidAutoProviderMethod.getInstruction<Instruction>(controllerReturnIndex),
+        ),
     )
 
     val androidAutoLoadChildrenMethod =
