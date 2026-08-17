@@ -12,7 +12,7 @@ import app.morphe.patches.music.misc.extension.hooks.youTubeMusicApplicationInit
 import app.morphe.patches.music.misc.extension.hooks.youTubeMusicApplicationInitOnCreateHook
 
 val standaloneExtensionPatch = sharedExtensionPatch(
-    emptyList(),
+    listOf("shared-youtube"),
     youTubeMusicApplicationInitHook,
     youTubeMusicApplicationInitOnCreateHook,
 )

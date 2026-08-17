@@ -50,7 +50,6 @@ tasks.withType<Jar>().configureEach {
     exclude(
         "extensions/music.mpe",
         "extensions/reddit.mpe",
-        "extensions/shared-youtube.mpe",
         "extensions/youtube.mpe",
     )
 }

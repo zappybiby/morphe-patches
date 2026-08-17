@@ -11,8 +11,12 @@ import android.net.Uri;
 import android.util.Base64;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.protobuf.CodedInputStream;
+import com.google.protobuf.CodedOutputStream;
+import com.google.protobuf.WireFormat;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -77,16 +81,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final int MEDIA_ID_BASE64_OPTIONS =
             Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING;
 
-    private static final int PROTOBUF_WIRE_VARINT = 0;
-    private static final int PROTOBUF_WIRE_FIXED_64 = 1;
-    private static final int PROTOBUF_WIRE_LENGTH_DELIMITED = 2;
-    private static final int PROTOBUF_WIRE_FIXED_32 = 5;
-    private static final int PROTOBUF_TAG_FIELD_SHIFT = 3;
-    private static final int PROTOBUF_TAG_WIRE_TYPE_MASK = 0x7;
-    private static final int VARINT_PAYLOAD_BITS = 7;
-    private static final int VARINT_PAYLOAD_MASK = 0x7f;
-    private static final int VARINT_CONTINUATION_BIT = 0x80;
-    private static final int UNSIGNED_BYTE_MASK = 0xff;
     private static final Executor REQUEST_EXECUTOR = Utils::runOnBackgroundThread;
     private static final ConcurrentHashMap<String, CompletableFuture<List<Object>>> IN_FLIGHT_LOADS =
             new ConcurrentHashMap<>();
@@ -346,101 +340,76 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     private static boolean hasNonEmptyFieldPath(
             byte[] message, int[] fieldPath, int fieldPathIndex) {
-        int[] offset = {0};
-        while (offset[0] < message.length) {
-            long tag = readVarint(message, offset);
-            int fieldNumber = (int) (tag >>> PROTOBUF_TAG_FIELD_SHIFT);
-            int wireType = (int) (tag & PROTOBUF_TAG_WIRE_TYPE_MASK);
-            if (fieldNumber == 0) throw new IllegalArgumentException("Invalid field number");
+        CodedInputStream input = CodedInputStream.newInstance(message);
+        try {
+            while (!input.isAtEnd()) {
+                int tag = input.readTag();
+                int wireType = WireFormat.getTagWireType(tag);
+                if (WireFormat.getTagFieldNumber(tag) != fieldPath[fieldPathIndex]
+                        || wireType != WireFormat.WIRETYPE_LENGTH_DELIMITED) {
+                    input.skipField(tag);
+                    continue;
+                }
 
-            int payloadStart = skipField(message, offset, wireType);
-            int fieldEnd = offset[0];
-            if (fieldNumber != fieldPath[fieldPathIndex]) continue;
-            if (fieldPathIndex == fieldPath.length - 1) {
-                return wireType == PROTOBUF_WIRE_LENGTH_DELIMITED && fieldEnd > payloadStart;
+                byte[] nestedMessage = input.readByteArray();
+                if (fieldPathIndex == fieldPath.length - 1) {
+                    return nestedMessage.length != 0;
+                }
+                if (hasNonEmptyFieldPath(nestedMessage, fieldPath, fieldPathIndex + 1)) return true;
             }
-            if (wireType != PROTOBUF_WIRE_LENGTH_DELIMITED) continue;
-
-            byte[] nestedMessage = new byte[fieldEnd - payloadStart];
-            System.arraycopy(message, payloadStart, nestedMessage, 0, nestedMessage.length);
-            if (hasNonEmptyFieldPath(nestedMessage, fieldPath, fieldPathIndex + 1)) return true;
+            return false;
+        } catch (IOException error) {
+            throw new IllegalArgumentException("Invalid media ID", error);
         }
-        return false;
     }
 
     private static byte[] removeOptionalPlayerConfig(byte[] message, int fieldPathIndex) {
-        ByteArrayOutputStream output = new ByteArrayOutputStream(message.length);
-        int[] offset = {0};
-        boolean removed = false;
+        CodedInputStream input = CodedInputStream.newInstance(message);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(message.length);
+        CodedOutputStream output = CodedOutputStream.newInstance(bytes);
+        try {
+            boolean removed = false;
+            while (!input.isAtEnd()) {
+                int fieldStart = input.getTotalBytesRead();
+                int tag = input.readTag();
+                int tagEnd = input.getTotalBytesRead();
+                int wireType = WireFormat.getTagWireType(tag);
+                if (WireFormat.getTagFieldNumber(tag)
+                        != OPTIONAL_PLAYER_CONFIG_FIELD_PATH[fieldPathIndex]) {
+                    input.skipField(tag);
+                    output.writeRawBytes(
+                            message, fieldStart, input.getTotalBytesRead() - fieldStart);
+                    continue;
+                }
 
-        while (offset[0] < message.length) {
-            int fieldStart = offset[0];
-            long tag = readVarint(message, offset);
-            int fieldNumber = (int) (tag >>> PROTOBUF_TAG_FIELD_SHIFT);
-            int wireType = (int) (tag & PROTOBUF_TAG_WIRE_TYPE_MASK);
-            if (fieldNumber == 0) throw new IllegalArgumentException("Invalid field number");
+                if (wireType != WireFormat.WIRETYPE_LENGTH_DELIMITED) {
+                    throw new IllegalArgumentException("Invalid player config field");
+                }
+                byte[] nestedMessage = input.readByteArray();
+                if (fieldPathIndex == OPTIONAL_PLAYER_CONFIG_FIELD_PATH.length - 1) {
+                    if (removed) throw new IllegalArgumentException("Repeated player config");
+                    removed = true;
+                    continue;
+                }
 
-            int tagEnd = offset[0];
-            int payloadStart = skipField(message, offset, wireType);
-            int fieldEnd = offset[0];
-            if (fieldNumber != OPTIONAL_PLAYER_CONFIG_FIELD_PATH[fieldPathIndex]) {
-                output.write(message, fieldStart, fieldEnd - fieldStart);
-                continue;
-            }
-
-            if (fieldPathIndex == OPTIONAL_PLAYER_CONFIG_FIELD_PATH.length - 1) {
-                if (wireType != PROTOBUF_WIRE_LENGTH_DELIMITED) {
-                    throw new IllegalArgumentException("Invalid player config");
+                byte[] nested = removeOptionalPlayerConfig(nestedMessage, fieldPathIndex + 1);
+                if (nested == null) {
+                    output.writeRawBytes(
+                            message, fieldStart, input.getTotalBytesRead() - fieldStart);
+                    continue;
                 }
                 if (removed) throw new IllegalArgumentException("Repeated player config");
+
+                output.writeRawBytes(message, fieldStart, tagEnd - fieldStart);
+                output.writeUInt32NoTag(nested.length);
+                output.writeRawBytes(nested);
                 removed = true;
-                continue;
             }
-            if (wireType != PROTOBUF_WIRE_LENGTH_DELIMITED) {
-                throw new IllegalArgumentException("Invalid nested message");
-            }
-
-            byte[] nestedMessage = new byte[fieldEnd - payloadStart];
-            System.arraycopy(message, payloadStart, nestedMessage, 0, nestedMessage.length);
-            byte[] nested = removeOptionalPlayerConfig(nestedMessage, fieldPathIndex + 1);
-            if (nested == null) {
-                output.write(message, fieldStart, fieldEnd - fieldStart);
-                continue;
-            }
-            if (removed) throw new IllegalArgumentException("Repeated player config");
-
-            output.write(message, fieldStart, tagEnd - fieldStart);
-            writeVarint(output, nested.length);
-            output.write(nested, 0, nested.length);
-            removed = true;
+            output.flush();
+            return removed ? bytes.toByteArray() : null;
+        } catch (IOException error) {
+            throw new IllegalArgumentException("Invalid media ID", error);
         }
-        return removed ? output.toByteArray() : null;
-    }
-
-    private static int skipField(byte[] message, int[] offset, int wireType) {
-        if (wireType == PROTOBUF_WIRE_VARINT) {
-            readVarint(message, offset);
-            return offset[0];
-        }
-
-        int length;
-        if (wireType == PROTOBUF_WIRE_FIXED_64) {
-            length = Long.BYTES;
-        } else if (wireType == PROTOBUF_WIRE_LENGTH_DELIMITED) {
-            long value = readVarint(message, offset);
-            if (value > Integer.MAX_VALUE) throw new IllegalArgumentException("Field too large");
-            length = (int) value;
-        } else if (wireType == PROTOBUF_WIRE_FIXED_32) {
-            length = Integer.BYTES;
-        } else {
-            throw new IllegalArgumentException("Unsupported wire type");
-        }
-        if (length > message.length - offset[0]) {
-            throw new IllegalArgumentException("Truncated field");
-        }
-        int payloadStart = offset[0];
-        offset[0] += length;
-        return payloadStart;
     }
 
     private static void deliver(Object loadResult, List<Object> items) {
@@ -498,25 +467,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         } catch (Throwable ignored) {
             return null;
         }
-    }
-
-    private static long readVarint(byte[] data, int[] offset) {
-        long value = 0;
-        for (int shift = 0; shift < Long.SIZE; shift += VARINT_PAYLOAD_BITS) {
-            if (offset[0] >= data.length) throw new IllegalArgumentException("Truncated varint");
-            int current = data[offset[0]++] & UNSIGNED_BYTE_MASK;
-            value |= (long) (current & VARINT_PAYLOAD_MASK) << shift;
-            if ((current & VARINT_CONTINUATION_BIT) == 0) return value;
-        }
-        throw new IllegalArgumentException("Invalid varint");
-    }
-
-    private static void writeVarint(ByteArrayOutputStream output, int value) {
-        while ((value & ~VARINT_PAYLOAD_MASK) != 0) {
-            output.write((value & VARINT_PAYLOAD_MASK) | VARINT_CONTINUATION_BIT);
-            value >>>= VARINT_PAYLOAD_BITS;
-        }
-        output.write(value);
     }
 
     private static final class LibraryState {
