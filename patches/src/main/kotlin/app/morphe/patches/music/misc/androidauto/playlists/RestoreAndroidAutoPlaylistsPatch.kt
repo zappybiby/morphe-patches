@@ -284,22 +284,23 @@ private fun BytecodePatchContext.injectNativePlaylistsNodeCapture(allMethods: Se
         "Android Auto media-item mapper does not have three description constructors"
     }
 
-    val browsableConstructorIndex = descriptionConstructorIndexes.last()
-    val browsableConstructor =
-        mutableAndroidAutoMediaItemMapper.getInstruction<RegisterRangeInstruction>(
-            browsableConstructorIndex,
-        )
-    val nativeNodeMediaIdRegister = browsableConstructor.startRegister + 1
-    val nativeNodeTitleRegister = browsableConstructor.startRegister + 2
+    // YTM 9.15 can return Library items through more than one mapper branch. Check each
+    // branch, but only inside this Android Auto mapper and only for the localized title.
+    descriptionConstructorIndexes.asReversed().forEach { constructorIndex ->
+        val constructor =
+            mutableAndroidAutoMediaItemMapper.getInstruction<RegisterRangeInstruction>(
+                constructorIndex,
+            )
+        val nativeNodeMediaIdRegister = constructor.startRegister + 1
+        val nativeNodeTitleRegister = constructor.startRegister + 2
 
-    // YTM 9.15/9.29/9.30/9.31: browsable Android Auto items use the mapper's final
-    // description-constructor path. Check the localized title only on that path.
-    mutableAndroidAutoMediaItemMapper.addInstructions(
-        browsableConstructorIndex,
-        """
-            invoke-static/range { v$nativeNodeMediaIdRegister .. v$nativeNodeTitleRegister }, $EXTENSION_CLASS->rememberNativePlaylistsMediaId(Ljava/lang/String;Ljava/lang/CharSequence;)V
-        """,
-    )
+        mutableAndroidAutoMediaItemMapper.addInstructions(
+            constructorIndex,
+            """
+                invoke-static/range { v$nativeNodeMediaIdRegister .. v$nativeNodeTitleRegister }, $EXTENSION_CLASS->rememberNativePlaylistsMediaId(Ljava/lang/String;Ljava/lang/CharSequence;)V
+            """,
+        )
+    }
 }
 
 private fun BytecodePatchContext.resolveRuntimeHooks(
