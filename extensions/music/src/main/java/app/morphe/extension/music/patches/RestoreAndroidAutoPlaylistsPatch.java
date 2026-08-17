@@ -129,7 +129,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
-    /** Records the media ID for YTM's localized Playlists row and ignores every other row. */
+    /** Records the media ID for YTM's localized Playlists category. */
     public static void rememberNativePlaylistsMediaId(
             String mediaId, CharSequence title) {
         if (title == null || !ResourceUtils.getString(PLAYLISTS_TITLE_RESOURCE)

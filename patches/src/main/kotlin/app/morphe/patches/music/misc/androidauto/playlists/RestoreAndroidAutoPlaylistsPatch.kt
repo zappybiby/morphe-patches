@@ -23,6 +23,7 @@ import com.android.tools.smali.dexlib2.iface.Method
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.NarrowLiteralInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.Reference
@@ -34,6 +35,7 @@ private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch;"
 private const val MEDIA_DESCRIPTION_CLASS =
     "Landroid/support/v4/media/MediaDescriptionCompat;"
+private const val OPTIONAL_CLASS = "Lj$/util/Optional;"
 private const val ITERATOR_CLASS = "Ljava/util/Iterator;"
 private const val MUSIC_RESPONSIVE_RENDERER_EXTENSION_FIELD_NUMBER = 161_429_595
 private const val PLAYLIST_THUMBNAIL_EXTENSION_FIELD_NUMBER = 164_480_666
@@ -195,9 +197,6 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
         classDefForEach { classDef -> classesByType[classDef.type] = classDef }
         val allMethods = classesByType.values.asSequence().flatMap { it.methods.asSequence() }
 
-        // YTM 9.15/9.29/9.30/9.31: the method that directly references the Playlists title
-        // builds offline Library items, while Android Auto reaches this shared constructor.
-        // Capture the ID here and let the extension compare YTM's localized Playlists title.
         val mediaDescriptionConstructorParameters = listOf(
             "Ljava/lang/String;",
             "Ljava/lang/CharSequence;",
@@ -208,16 +207,53 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
             "Landroid/os/Bundle;",
             "Landroid/net/Uri;",
         )
-        val mediaDescriptionConstructor =
-            mutableClassDefBy(MEDIA_DESCRIPTION_CLASS).methods.single { method ->
-                method.name == "<init>" &&
-                    method.parameterTypes.map(CharSequence::toString) ==
-                    mediaDescriptionConstructorParameters
+        fun MethodReference.isMediaDescriptionConstructor() =
+            definingClass == MEDIA_DESCRIPTION_CLASS &&
+                name == "<init>" && returnType == "V" &&
+                parameterTypes.map(CharSequence::toString) ==
+                mediaDescriptionConstructorParameters
+
+        val androidAutoMediaItemMapper = allMethods
+            .filter { method ->
+                method.returnType == OPTIONAL_CLASS &&
+                    method.parameterTypes.map(CharSequence::toString).let { parameters ->
+                        parameters.size == 3 && parameters[1] == "Ljava/util/Set;"
+                    } &&
+                    method.references<MethodReference>()
+                        .count { reference -> reference.isMediaDescriptionConstructor() } == 3
             }
-        val mediaDescriptionConstructorReturnIndex =
-            mediaDescriptionConstructor.indexOfFirstInstructionOrThrow {
-                opcode == Opcode.RETURN_VOID
+            .singleOrError("Could not resolve Android Auto media-item mapper")
+        val mutableAndroidAutoMediaItemMapper =
+            mutableClassDefBy(androidAutoMediaItemMapper.definingClass).methods.single { method ->
+                method.name == androidAutoMediaItemMapper.name &&
+                    method.returnType == androidAutoMediaItemMapper.returnType &&
+                    method.parameterTypes == androidAutoMediaItemMapper.parameterTypes
             }
+        val mediaDescriptionConstructorIndexes =
+            mutableAndroidAutoMediaItemMapper.instructionList.mapIndexedNotNull { index, instruction ->
+                instruction.getReference<MethodReference>()
+                    ?.takeIf { reference -> reference.isMediaDescriptionConstructor() }
+                    ?.let { index }
+            }
+        check(mediaDescriptionConstructorIndexes.size == 3) {
+            "Android Auto media-item mapper does not have three description constructors"
+        }
+        val browsableDescriptionConstructorIndex = mediaDescriptionConstructorIndexes.last()
+        val browsableDescriptionConstructor =
+            mutableAndroidAutoMediaItemMapper.getInstruction<RegisterRangeInstruction>(
+                browsableDescriptionConstructorIndex,
+            )
+        val nativeNodeMediaIdRegister = browsableDescriptionConstructor.startRegister + 1
+        val nativeNodeTitleRegister = browsableDescriptionConstructor.startRegister + 2
+
+        // YTM 9.15/9.29/9.30/9.31: this mapper ends with separate playable-only and
+        // browsable-only paths. Library categories use the last path.
+        mutableAndroidAutoMediaItemMapper.addInstructions(
+            browsableDescriptionConstructorIndex,
+            """
+                invoke-static/range { v$nativeNodeMediaIdRegister .. v$nativeNodeTitleRegister }, $EXTENSION_CLASS->rememberNativePlaylistsMediaId(Ljava/lang/String;Ljava/lang/CharSequence;)V
+            """,
+        )
 
         // YTM 9.15 stores parsers on generated messages; 9.29+ gets them from the protobuf runtime.
         // Extension numbers stay fixed, so resolve each message from the initializer containing its number.
@@ -486,11 +522,5 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
             ExternalLabel("resume", androidAutoLoadChildrenMethod.getInstruction<Instruction>(0)),
         )
 
-        mediaDescriptionConstructor.addInstructions(
-            mediaDescriptionConstructorReturnIndex,
-            """
-                invoke-static/range { p1 .. p2 }, $EXTENSION_CLASS->rememberNativePlaylistsMediaId(Ljava/lang/String;Ljava/lang/CharSequence;)V
-            """,
-        )
     }
 }
