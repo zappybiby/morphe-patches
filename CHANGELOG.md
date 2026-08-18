@@ -1,3 +1,9 @@
+## [0.0.11](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.0.11) (2026-08-17)
+
+### Changes
+
+* **YouTube Music:** Return matching Library playlists from Android Auto search
+
 ## [0.0.10](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.0.10) (2026-08-17)
 
 ### Changes
