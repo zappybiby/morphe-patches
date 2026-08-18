@@ -51,6 +51,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final String LIBRARY_BROWSE_ID = "FEmusic_library_landing";
     private static final String PLAYLISTS_TITLE_RESOURCE = "library_playlists_shelf_title";
     private static final String YTM_COLLECTION_BROWSE_ID_PREFIX = "VL";
+    private static final String EPISODES_FOR_LATER_BROWSE_ID = "VLSE";
     private static final long BROWSE_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
     private static final int PLAYLIST_ARTWORK_SIZE_PX = 544;
     // YTM 9.15/9.29/9.30/9.31: thumbnail extension 164480666 stores its list at c.c and
@@ -289,6 +290,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             Object renderer, LibraryState state) throws ReflectiveOperationException {
         String browseId = responsiveRendererBrowseId(renderer);
         if (browseId == null || state.seenBrowseIds.contains(browseId)) return;
+        // YTM 9.15/9.29/9.30/9.31: VLSE opens Episodes for Later but has no playlist play command.
+        if (EPISODES_FOR_LATER_BROWSE_ID.equals(browseId)) return;
 
         String title = responsiveRendererTitle(renderer);
         if (title.isEmpty()) return;
