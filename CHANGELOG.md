@@ -1,3 +1,9 @@
+## [0.0.12](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.0.12) (2026-08-17)
+
+### Changes
+
+* **YouTube Music:** Hide Episodes for Later because it has no playlist play command
+
 ## [0.0.11](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.0.11) (2026-08-17)
 
 ### Changes
