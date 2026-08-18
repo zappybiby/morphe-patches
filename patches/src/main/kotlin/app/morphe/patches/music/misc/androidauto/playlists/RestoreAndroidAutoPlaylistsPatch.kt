@@ -49,6 +49,8 @@ private const val MUSIC_RESPONSIVE_RENDERER_EXTENSION_FIELD_NUMBER = 161_429_595
 private const val PLAYLIST_THUMBNAIL_EXTENSION_FIELD_NUMBER = 164_480_666
 private const val PLAYLIST_ENDPOINT_EXTENSION_FIELD_NUMBER = 52_666_186
 private const val HOME_BROWSE_ID_MARKER = "FEmusic_home"
+private const val SEARCH_RESULT_ALREADY_SENT_MESSAGE =
+    "MBS: SearchResult.sendResult() called multiple times."
 private const val FOUR_BIT_REGISTER_LIMIT = 16
 private const val EIGHT_BIT_REGISTER_LIMIT = 256
 private const val RUNTIME_METHOD_DELIMITER = "#"
@@ -151,11 +153,18 @@ private data class DeliveryResolution(
     val resultDeliveryMethod: MethodReference,
 )
 
+private data class SearchResolution(
+    val resultType: String,
+    val queryField: FieldReference,
+    val deliveryMethod: Method,
+)
+
 private data class ResolvedRuntimeHooks(
     val runtimeValues: Map<String, String>,
     val startup: StartupResolution,
     val androidAutoControllerType: String,
     val loadResultType: String,
+    val search: SearchResolution,
 )
 
 private fun findShortestFieldPaths(
@@ -338,6 +347,7 @@ private fun BytecodePatchContext.resolveRuntimeHooks(
     val renderer = resolveRenderer(classesByType, allMethods)
     val browse = resolveBrowse(classesByType)
     val delivery = resolveDelivery()
+    val search = resolveSearch(classesByType, allMethods)
     val startup = resolveStartup(
         delivery.controllerType,
         browse.builderFactoryMethod.definingClass,
@@ -365,6 +375,9 @@ private fun BytecodePatchContext.resolveRuntimeHooks(
         "BROWSE_REQUEST_METHOD" to browse.requestMethod.toRuntimeMethod().encode(),
         "CLIENT_DATA_SETTER_METHOD" to browse.clientDataSetterMethod.toRuntimeMethod().encode(),
         "RESULT_DELIVERY_METHOD" to delivery.resultDeliveryMethod.toRuntimeMethod().encode(),
+        "SEARCH_RESULT_CLASS_NAME" to search.resultType.toRuntimeClassName(),
+        "SEARCH_RESULT_QUERY_FIELD_NAME" to search.queryField.name,
+        "SEARCH_RESULT_DELIVERY_METHOD" to search.deliveryMethod.toRuntimeMethod().encode(),
         "RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME" to renderer.artworkField.name,
         "PLAYLIST_THUMBNAIL_RENDERER_CLASS_NAME" to
             renderer.playlistThumbnailRendererType.toRuntimeClassName(),
@@ -382,6 +395,34 @@ private fun BytecodePatchContext.resolveRuntimeHooks(
         startup = startup,
         androidAutoControllerType = delivery.controllerType,
         loadResultType = delivery.loadResultType,
+        search = search,
+    )
+}
+
+private fun resolveSearch(
+    classesByType: Map<String, ClassDef>,
+    allMethods: Sequence<Method>,
+): SearchResolution {
+    val deliveryMethod = allMethods
+        .filter { method ->
+            method.hasSignature("V", "Ljava/util/List;") &&
+                method.references<StringReference>().any { reference ->
+                    reference.string == SEARCH_RESULT_ALREADY_SENT_MESSAGE
+                }
+        }
+        .singleOrError("Could not resolve Android Auto search-result delivery")
+    val resultType = deliveryMethod.definingClass
+    val resultClass = classesByType[resultType]
+        ?: error("Could not resolve Android Auto search-result class $resultType")
+    val queryField = resultClass.fields.asSequence()
+        .filter { field ->
+            !AccessFlags.STATIC.isSet(field.accessFlags) && field.type == "Ljava/lang/String;"
+        }
+        .singleOrError("Could not resolve Android Auto search query field")
+    return SearchResolution(
+        resultType,
+        queryField,
+        deliveryMethod,
     )
 }
 
@@ -681,6 +722,7 @@ private fun BytecodePatchContext.injectRuntimeValues(values: Map<String, String>
 
 private fun BytecodePatchContext.injectRuntimeHooks(runtimeHooks: ResolvedRuntimeHooks) {
     injectRuntimeValues(runtimeHooks.runtimeValues)
+    injectSearchHooks(runtimeHooks.search)
 
     val startup = runtimeHooks.startup
     val mutableAndroidAutoProviderMethod =
@@ -769,5 +811,28 @@ private fun BytecodePatchContext.injectRuntimeHooks(runtimeHooks: ResolvedRuntim
             return-void
         """,
         ExternalLabel("resume", androidAutoLoadChildrenMethod.getInstruction<Instruction>(0)),
+    )
+}
+
+private fun BytecodePatchContext.injectSearchHooks(search: SearchResolution) {
+    val deliveryMethod = mutableClassDefBy(search.resultType).methods.single { method ->
+        method.matches(search.deliveryMethod)
+    }
+    val handledRegister = deliveryMethod.findFreeRegister(0)
+    check(handledRegister < EIGHT_BIT_REGISTER_LIMIT) {
+        "Android Auto search-result method has no free 8-bit register"
+    }
+    deliveryMethod.addInstructionsWithLabels(
+        0,
+        """
+            invoke-static/range { p0 .. p1 }, $EXTENSION_CLASS->handleSearchResult(Ljava/lang/Object;Ljava/util/List;)Z
+            move-result v$handledRegister
+            if-eqz v$handledRegister, :deliver_native_search_result
+            return-void
+        """,
+        ExternalLabel(
+            "deliver_native_search_result",
+            deliveryMethod.getInstruction<Instruction>(0),
+        ),
     )
 }

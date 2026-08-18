@@ -32,6 +32,7 @@ import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
@@ -65,9 +66,10 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final Executor REQUEST_EXECUTOR = Utils::runOnBackgroundThread;
     private static final Set<String> NATIVE_PLAYLISTS_NODE_MEDIA_IDS =
             ConcurrentHashMap.newKeySet();
+    private static final ThreadLocal<Boolean> DELIVERING_SEARCH_RESULT = new ThreadLocal<>();
 
     private static volatile Object authenticatedBrowseService;
-    private static CompletableFuture<List<MediaBrowserCompat.MediaItem>> inFlightLibraryLoad;
+    private static CompletableFuture<List<PlayablePlaylist>> inFlightLibraryLoad;
     private static volatile RuntimeConfiguration runtimeConfiguration;
 
     private RestoreAndroidAutoPlaylistsPatch() {
@@ -101,7 +103,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     public static boolean handlePlaylistsNode(Object loadResult) {
         try {
             if (!isReady() || !isNativePlaylistsNode(loadResult)) return false;
-            loadPlayableLibraryPlaylists().thenAccept(items -> deliver(loadResult, items));
+            loadPlayableLibraryPlaylists().thenAccept(playlists ->
+                    deliver(loadResult, mediaItems(playlists)));
             return true;
         } catch (ReflectiveOperationException | RuntimeException error) {
             Logger.printException(() -> "Could not start Android Auto playlist request", error);
@@ -117,13 +120,74 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         if (mediaId != null) NATIVE_PLAYLISTS_NODE_MEDIA_IDS.add(mediaId);
     }
 
-    private static CompletableFuture<List<MediaBrowserCompat.MediaItem>>
+    /** Replaces YTM's Android Auto search response with matching Library playlists. */
+    public static boolean handleSearchResult(
+            Object searchResult, List<MediaBrowserCompat.MediaItem> ignoredNativeItems) {
+        if (Boolean.TRUE.equals(DELIVERING_SEARCH_RESULT.get())) return false;
+
+        try {
+            if (!isReady()) return false;
+            String query = (String) runtimeConfiguration.searchResultQueryField.get(searchResult);
+            String normalizedQuery = normalizeSearchQuery(query);
+            if (normalizedQuery.isEmpty()) return false;
+            // YTM 9.15.51 and 9.31.51 returned unrelated podcasts for non-Premium Android Auto
+            // searches, so only return matching Library playlists.
+            // TODO: Use YTM's phone search if it can be reused without copying its UI pipeline.
+            loadPlayableLibraryPlaylists().whenComplete((libraryItems, error) -> {
+                List<MediaBrowserCompat.MediaItem> items = Collections.emptyList();
+                if (error == null) {
+                    items = matchingPlaylistItems(normalizedQuery, libraryItems);
+                }
+                deliverSearchResult(searchResult, items);
+            });
+            return true;
+        } catch (ReflectiveOperationException | RuntimeException error) {
+            Logger.printException(() -> "Could not start Android Auto playlist search", error);
+            return false;
+        }
+    }
+
+    private static String normalizeSearchQuery(String query) {
+        return query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static List<MediaBrowserCompat.MediaItem> matchingPlaylistItems(
+            String normalizedQuery, List<PlayablePlaylist> libraryItems) {
+        List<MediaBrowserCompat.MediaItem> matches = new ArrayList<>();
+        for (PlayablePlaylist playlist : libraryItems) {
+            if (playlist.normalizedTitle.contains(normalizedQuery)) {
+                matches.add(playlist.item);
+            }
+        }
+        return matches;
+    }
+
+    private static List<MediaBrowserCompat.MediaItem> mediaItems(
+            List<PlayablePlaylist> playlists) {
+        List<MediaBrowserCompat.MediaItem> items = new ArrayList<>(playlists.size());
+        for (PlayablePlaylist playlist : playlists) items.add(playlist.item);
+        return items;
+    }
+
+    private static void deliverSearchResult(
+            Object searchResult, List<MediaBrowserCompat.MediaItem> items) {
+        DELIVERING_SEARCH_RESULT.set(true);
+        try {
+            runtimeConfiguration.searchResultDeliveryMethod.invoke(searchResult, items);
+        } catch (ReflectiveOperationException | RuntimeException error) {
+            Logger.printException(() -> "Could not deliver Android Auto search results", error);
+        } finally {
+            DELIVERING_SEARCH_RESULT.remove();
+        }
+    }
+
+    private static CompletableFuture<List<PlayablePlaylist>>
             loadPlayableLibraryPlaylists() throws ReflectiveOperationException {
         synchronized (RestoreAndroidAutoPlaylistsPatch.class) {
             if (inFlightLibraryLoad != null) return inFlightLibraryLoad;
 
             CompletableFuture<Object> response = requestBrowse(LIBRARY_BROWSE_ID);
-            CompletableFuture<List<MediaBrowserCompat.MediaItem>> load = new CompletableFuture<>();
+            CompletableFuture<List<PlayablePlaylist>> load = new CompletableFuture<>();
             inFlightLibraryLoad = load;
             // Only concurrent requests share work. A later open reloads the current Library.
             response
@@ -135,8 +199,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     }
 
     private static void completeLibraryLoad(
-            CompletableFuture<List<MediaBrowserCompat.MediaItem>> load,
-            List<MediaBrowserCompat.MediaItem> items,
+            CompletableFuture<List<PlayablePlaylist>> load,
+            List<PlayablePlaylist> items,
             Throwable error) {
         if (error != null) {
             Logger.printException(() -> "Library Browse request failed", error);
@@ -251,7 +315,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         return playlistBrowseId;
     }
 
-    private static CompletableFuture<List<MediaBrowserCompat.MediaItem>>
+    private static CompletableFuture<List<PlayablePlaylist>>
             createPlayableLibraryItems(List<LibraryPlaylist> playlists) {
         if (playlists.isEmpty()) {
             return CompletableFuture.completedFuture(Collections.emptyList());
@@ -260,14 +324,16 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         CompletableFuture<PlaybackTemplate> templateFuture = new CompletableFuture<>();
         findPlaybackTemplate(playlists, 0, templateFuture);
         return templateFuture.thenApply(template -> {
-            List<MediaBrowserCompat.MediaItem> items = new ArrayList<>(playlists.size());
+            List<PlayablePlaylist> items = new ArrayList<>(playlists.size());
             for (LibraryPlaylist playlist : playlists) {
                 String mediaId = mediaIdForPlaylist(template, playlist.playlistId);
-                items.add(createPlayableItem(
-                        mediaId,
-                        playlist.title,
-                        playlist.subtitle,
-                        playlist.artwork));
+                items.add(new PlayablePlaylist(
+                        normalizeSearchQuery(playlist.title),
+                        createPlayableItem(
+                                mediaId,
+                                playlist.title,
+                                playlist.subtitle,
+                                playlist.artwork)));
             }
             return items;
         });
@@ -665,6 +731,9 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         private static String BROWSE_REQUEST_METHOD = "";
         private static String CLIENT_DATA_SETTER_METHOD = "";
         private static String RESULT_DELIVERY_METHOD = "";
+        private static String SEARCH_RESULT_CLASS_NAME = "";
+        private static String SEARCH_RESULT_QUERY_FIELD_NAME = "";
+        private static String SEARCH_RESULT_DELIVERY_METHOD = "";
         private static String RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME = "";
         private static String PLAYLIST_THUMBNAIL_RENDERER_CLASS_NAME = "";
         private static String RESPONSIVE_RENDERER_TITLE_FIELD_NAME = "";
@@ -691,6 +760,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         private final Method browseRequestMethod;
         private final Method clientDataSetterMethod;
         private final Method resultDeliveryMethod;
+        private final Field searchResultQueryField;
+        private final Method searchResultDeliveryMethod;
         private final Field extensionMapField;
         private final Method extensionMapIteratorMethod;
 
@@ -716,6 +787,10 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             browseRequestMethod = resolveMethod(RuntimeValues.BROWSE_REQUEST_METHOD);
             clientDataSetterMethod = resolveMethod(RuntimeValues.CLIENT_DATA_SETTER_METHOD);
             resultDeliveryMethod = resolveMethod(RuntimeValues.RESULT_DELIVERY_METHOD);
+            searchResultQueryField = resolveDeclaredField(
+                    RuntimeValues.SEARCH_RESULT_CLASS_NAME,
+                    RuntimeValues.SEARCH_RESULT_QUERY_FIELD_NAME);
+            searchResultDeliveryMethod = resolveMethod(RuntimeValues.SEARCH_RESULT_DELIVERY_METHOD);
             extensionMapField = resolveDeclaredField(
                     RuntimeValues.EXTENSION_MAP_CLASS_NAME,
                     RuntimeValues.EXTENSION_MAP_FIELD_NAME);
@@ -730,6 +805,18 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final class LibraryState {
         private final List<LibraryPlaylist> playlists = new ArrayList<>();
         private final Set<String> seenBrowseIds = new HashSet<>();
+    }
+
+    private static final class PlayablePlaylist {
+        private final String normalizedTitle;
+        private final MediaBrowserCompat.MediaItem item;
+
+        private PlayablePlaylist(
+                String normalizedTitle,
+                MediaBrowserCompat.MediaItem item) {
+            this.normalizedTitle = normalizedTitle;
+            this.item = item;
+        }
     }
 
     private static final class LibraryPlaylist {
