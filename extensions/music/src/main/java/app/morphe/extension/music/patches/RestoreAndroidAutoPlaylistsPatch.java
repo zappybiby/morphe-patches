@@ -1,6 +1,6 @@
 /*
  * Copyright 2026 Morphe.
- * https://github.com/MorpheApp/morphe-patches
+ * https://github.com/MorpheApp/morphe-patches/pull/2489
  *
  * See the included NOTICE file for GPLv3 Section 7 terms that apply to this code.
  */
@@ -44,7 +44,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             ConcurrentHashMap.newKeySet();
 
     private static volatile AndroidAutoPlaylistAccess authenticatedBrowseService;
-    private static CompletableFuture<List<MediaBrowserCompat.MediaItem>> inFlightLibraryLoad;
 
     private RestoreAndroidAutoPlaylistsPatch() {
     }
@@ -52,13 +51,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     // Reset cached state when YTM replaces its Browse service.
     public static void initialize(AndroidAutoPlaylistAccess service) {
         if (service == null) return;
-        synchronized (RestoreAndroidAutoPlaylistsPatch.class) {
-            if (authenticatedBrowseService != service) {
-                NATIVE_PLAYLISTS_NODE_MEDIA_IDS.clear();
-                inFlightLibraryLoad = null;
-            }
-            authenticatedBrowseService = service;
-        }
+        if (authenticatedBrowseService != service) NATIVE_PLAYLISTS_NODE_MEDIA_IDS.clear();
+        authenticatedBrowseService = service;
         Logger.printDebug(() -> "Authenticated Browse service ready: " +
                 service.getClass().getName());
     }
@@ -83,35 +77,14 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     private static CompletableFuture<List<MediaBrowserCompat.MediaItem>>
             loadAndroidAutoPlaylists() {
-        synchronized (RestoreAndroidAutoPlaylistsPatch.class) {
-            if (inFlightLibraryLoad != null) return inFlightLibraryLoad;
-
-            CompletableFuture<Object> response = requestBrowse(LIBRARY_BROWSE_ID);
-            CompletableFuture<List<MediaBrowserCompat.MediaItem>> load =
-                    new CompletableFuture<>();
-            inFlightLibraryLoad = load;
-            // Share only overlapping loads so reopening Library fetches fresh data.
-            response
-                    .thenApply(RestoreAndroidAutoPlaylistsPatch::extractLibraryPlaylists)
-                    .thenApply(RestoreAndroidAutoPlaylistsPatch::createAndroidAutoPlaylistItems)
-                    .whenComplete((items, error) -> completeLibraryLoad(load, items, error));
-            return load;
-        }
-    }
-
-    private static void completeLibraryLoad(
-            CompletableFuture<List<MediaBrowserCompat.MediaItem>> load,
-            List<MediaBrowserCompat.MediaItem> items,
-            Throwable error) {
-        if (error != null) {
-            Logger.printException(() -> "Library Browse request failed", error);
-            // When this patch handles the request, a failure still needs an empty result.
-            items = Collections.emptyList();
-        }
-        load.complete(items);
-        synchronized (RestoreAndroidAutoPlaylistsPatch.class) {
-            if (inFlightLibraryLoad == load) inFlightLibraryLoad = null;
-        }
+        return requestBrowse(LIBRARY_BROWSE_ID)
+                .thenApply(RestoreAndroidAutoPlaylistsPatch::extractLibraryPlaylists)
+                .thenApply(RestoreAndroidAutoPlaylistsPatch::createAndroidAutoPlaylistItems)
+                .exceptionally(error -> {
+                    Logger.printException(() -> "Library Browse request failed", error);
+                    // Android Auto still needs a result when the request fails.
+                    return Collections.emptyList();
+                });
     }
 
     private static void deliver(
