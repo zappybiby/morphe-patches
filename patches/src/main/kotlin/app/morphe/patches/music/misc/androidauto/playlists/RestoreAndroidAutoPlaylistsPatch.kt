@@ -19,6 +19,7 @@ import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMuta
 import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
+import app.morphe.util.constructor
 import app.morphe.util.findFreeRegister
 import app.morphe.util.findInstructionIndicesReversedOrThrow
 import app.morphe.util.findMutableMethodOf
@@ -32,12 +33,10 @@ import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
-import com.android.tools.smali.dexlib2.iface.reference.Reference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
-import com.android.tools.smali.dexlib2.util.MethodUtil
 
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch;"
@@ -61,15 +60,6 @@ private const val JAVA_LIST_CLASS = "Ljava/util/List;"
 private const val JAVA_EXECUTOR_CLASS = "Ljava/util/concurrent/Executor;"
 private const val LISTENABLE_FUTURE_CLASS =
     "Lcom/google/common/util/concurrent/ListenableFuture;"
-
-private inline fun <reified T : Reference> Method.references(): Sequence<T> =
-    instructions.asSequence().mapNotNull { it.getReference<T>() }
-
-private fun <T> Sequence<T>.singleOrThrow(message: String) =
-    distinct().toList().let { values ->
-        values.singleOrNull()
-            ?: throw PatchException("$message: ${values.joinToString()}")
-    }
 
 private data class RendererResolution(
     val responsiveRendererType: String,
@@ -213,11 +203,10 @@ private fun BytecodePatchContext.resolveRenderer(
         ?: throw PatchException("Could not resolve YTM's responsive renderer class")
     val responsiveRendererFields = classDefBy(responsiveRendererType).fields.toList()
 
-    fun responsiveRendererField(name: String) = responsiveRendererFields.asSequence()
-        .filter { field ->
+    fun responsiveRendererField(name: String) = responsiveRendererFields
+        .first { field ->
             !AccessFlags.STATIC.isSet(field.accessFlags) && field.name == name
         }
-        .singleOrThrow("Could not resolve responsive renderer field $name")
 
     // Playlist rows use c for artwork and g/h for title and subtitle.
     val artworkField = responsiveRendererField(RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME)
@@ -269,11 +258,11 @@ private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
     val requestBuilderMatch = BrowseRequestBuilderFingerprint.matchSingle()
     val requestBuilderMethod = requestBuilderMatch.originalMethod
     val builderType = requestBuilderMethod.returnType
-    val builderFactoryMethod = requestBuilderMethod.references<MethodReference>()
-        .filter { reference ->
+    val builderFactoryMethod = requestBuilderMethod.instructions.asSequence()
+        .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
+        .first { reference ->
             reference.parameterTypes.isEmpty() && reference.returnType == builderType
         }
-        .singleOrThrow("Could not uniquely resolve the Browse service factory")
     val serviceType = builderFactoryMethod.definingClass
     val requestMatch = authenticatedBrowseRequestFingerprint(serviceType, builderType).matchSingle()
     val requestMethod = requestMatch.originalMethod
@@ -286,12 +275,11 @@ private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
     }.flatMap { classDef -> classDef.methods.asSequence() }
     val clientDataSetterMethod = builderMethods
         // YTM 9.32/9.33: use the protected setter because these versions also expose a public wrapper.
-        .filter { method ->
+        .first { method ->
             AccessFlags.PROTECTED.isSet(method.accessFlags) &&
                 method.returnType == "V" &&
                 method.parameterTypes.map(CharSequence::toString) == listOf("[B")
         }
-        .singleOrThrow("Could not uniquely resolve the authenticated Browse client-data setter")
     val idSetterMethod = browseIdSetterFingerprint(browseBuilderIdField)
         .matchSingle()
         .originalMethod
@@ -319,23 +307,22 @@ private fun BytecodePatchContext.resolveDelivery(): DeliveryResolution {
         .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
         .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
         .windowed(2)
-        .filter { fields ->
+        .first { fields ->
             fields[0].definingClass == loadResultType &&
                 fields[1].definingClass == fields[0].type &&
                 fields[1].type == JAVA_STRING_CLASS
         }
-        .singleOrThrow("Could not uniquely resolve the Android Auto media ID field path")
 
     // YTM may use a one-argument wrapper or call the two-argument delivery method directly.
-    val resultDeliveryMethod = mediaIdValidationMethod.references<MethodReference>()
-        .filter { reference ->
+    val resultDeliveryMethod = mediaIdValidationMethod.instructions.asSequence()
+        .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
+        .first { reference ->
             val parameters = reference.parameterTypes.map(CharSequence::toString)
             reference.definingClass == loadResultType && reference.returnType == "V" &&
                 parameters.size in 1..2 &&
                 parameters.firstOrNull() == "Ljava/util/List;" &&
                 parameters.drop(1).all { it.startsWith("L") || it.startsWith("[") }
         }
-        .singleOrThrow("Could not uniquely resolve the Android Auto result delivery method")
 
     return DeliveryResolution(
         controllerType = controllerType,
@@ -600,12 +587,8 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
 private fun BytecodePatchContext.injectRuntimeHooks(runtimeHooks: ResolvedRuntimeHooks) {
     injectRuntimeAccess(runtimeHooks)
 
-    val browseServiceConstructors =
-        mutableClassDefBy(runtimeHooks.browse.builderFactoryMethod.definingClass).methods
-            .asSequence()
-            .filter(MethodUtil::isConstructor)
-    val browseServiceConstructor = browseServiceConstructors
-        .singleOrThrow("Could not uniquely resolve the Browse service constructor")
+    val browseServiceConstructor =
+        mutableClassDefBy(runtimeHooks.browse.builderFactoryMethod.definingClass).constructor()
 
     // Capture the Browse service at construction so Android Auto works before the phone UI has opened.
     browseServiceConstructor.findInstructionIndicesReversedOrThrow(Opcode.RETURN_VOID)
