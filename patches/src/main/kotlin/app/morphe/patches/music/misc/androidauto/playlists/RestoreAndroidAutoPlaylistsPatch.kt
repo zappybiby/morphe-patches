@@ -17,7 +17,6 @@ import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.util.proxy.mutableTypes.MutableClass
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patcher.util.smali.ExternalLabel
-import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.util.cloneMutable
 import app.morphe.util.findFreeRegister
@@ -203,9 +202,7 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
     name = "Restore playlists in Android Auto",
     description = "Restores YouTube Music playlists in Android Auto.",
 ) {
-    dependsOn(
-        sharedExtensionPatch,
-    )
+    extendWith("extensions/android-auto-playlists.mpe")
 
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
 
