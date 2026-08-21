@@ -22,6 +22,7 @@ import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.util.findFreeRegister
 import app.morphe.util.findInstructionIndicesReversedOrThrow
 import app.morphe.util.getReference
+import app.morphe.util.matchSingle
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.Method
@@ -129,7 +130,7 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
 
 private fun BytecodePatchContext.injectNativePlaylistsNodeCapture() {
     val androidAutoMediaItemMapper =
-        AndroidAutoMediaItemMapperFingerprint.matchAll(1..1).single().method
+        AndroidAutoMediaItemMapperFingerprint.matchSingle().method
 
     androidAutoMediaItemMapper
         .findInstructionIndicesReversedOrThrow(MEDIA_DESCRIPTION_CONSTRUCTOR_CALL)
@@ -168,29 +169,26 @@ private fun BytecodePatchContext.resolveRuntimeHooks(): ResolvedRuntimeHooks {
 
 private fun BytecodePatchContext.resolveBrowseResponse(): BrowseResponseResolution {
     // Use YTM's own methods to turn the Browse response into sections and playlist rows.
-    val responseContentsMatch = BrowseResponseContentsFingerprint.matchAll(1..1).single()
+    val responseContentsMatch = BrowseResponseContentsFingerprint.matchSingle()
     val responseContentsMethod = responseContentsMatch.originalMethod
     val contentMapperType = responseContentsMatch.instructionMatches.last()
         .instruction
         .getReference<TypeReference>()!!
         .type
-    val contentMapperMatch = browseContentMapperFingerprint(contentMapperType)
-        .matchAll(1..1)
-        .single()
+    val contentMapperMatch = browseContentMapperFingerprint(contentMapperType).matchSingle()
     val contentType = contentMapperMatch.instructionMatches.first()
         .instruction
         .getReference<TypeReference>()!!
         .type
     val contentSectionMethod = browseContentSectionFingerprint(contentType)
-        .matchAll(1..1)
-        .single()
+        .matchSingle()
         .originalMethod
     val sectionItemMethods = browseSectionItemsFingerprint(
         contentSectionMethod.returnType,
         responseContentsMethod.returnType,
     ).matchAll(2..2)
         .map { match -> match.originalMethod }
-    val playlistRenderersMethod = PlaylistRendererDecoderFingerprint.originalMethod
+    val playlistRenderersMethod = PlaylistRendererDecoderFingerprint.matchSingle().originalMethod
 
     return BrowseResponseResolution(
         responseContentsMethod,
@@ -204,6 +202,7 @@ private fun BytecodePatchContext.resolveRenderer(
     browseEndpointIdField: FieldReference,
 ): RendererResolution {
     val responsiveRendererType = MusicResponsiveRendererExtensionFingerprint
+        .matchSingle()
         .instructionMatches
         .first()
         .instruction
@@ -225,10 +224,10 @@ private fun BytecodePatchContext.resolveRenderer(
     if (artworkField.type == titleField.type || titleField.type != subtitleField.type) {
         throw PatchException("Unexpected responsive renderer artwork, title, or subtitle fields")
     }
-    val artworkUrlsMethod = artworkUrlsFingerprint(artworkField.type).originalMethod
-    val renderTextMethod = renderTextFingerprint(titleField.type).originalMethod
+    val artworkUrlsMethod = artworkUrlsFingerprint(artworkField.type).matchSingle().originalMethod
+    val renderTextMethod = renderTextFingerprint(titleField.type).matchSingle().originalMethod
 
-    val playlistMediaIdMatch = PlaylistPlaybackMediaIdFingerprint.matchAll(1..1).single()
+    val playlistMediaIdMatch = PlaylistPlaybackMediaIdFingerprint.matchSingle()
     val playlistMediaIdMethod = playlistMediaIdMatch.originalMethod
     val endpointContainerType = playlistMediaIdMatch.instructionMatches
         .first()
@@ -247,7 +246,7 @@ private fun BytecodePatchContext.resolveRenderer(
     val browseEndpointDecoderMethod = browseEndpointDecoderFingerprint(
         endpointContainerType,
         browseEndpointIdField.definingClass,
-    ).matchAll(1..1).single().originalMethod
+    ).matchSingle().originalMethod
 
     return RendererResolution(
         responsiveRendererType = responsiveRendererType,
@@ -265,7 +264,8 @@ private fun BytecodePatchContext.resolveRenderer(
 
 private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
     // Resolve the obfuscated Browse service from the methods that build and send its requests.
-    val requestBuilderMethod = BrowseRequestBuilderFingerprint.originalMethod
+    val requestBuilderMatch = BrowseRequestBuilderFingerprint.matchSingle()
+    val requestBuilderMethod = requestBuilderMatch.originalMethod
     val builderType = requestBuilderMethod.returnType
     val builderFactoryMethod = requestBuilderMethod.references<MethodReference>()
         .filter { reference ->
@@ -273,9 +273,7 @@ private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
         }
         .singleOrThrow("Could not uniquely resolve the Browse service factory")
     val serviceType = builderFactoryMethod.definingClass
-    val requestMatch = authenticatedBrowseRequestFingerprint(serviceType, builderType)
-        .matchAll(1..1)
-        .single()
+    val requestMatch = authenticatedBrowseRequestFingerprint(serviceType, builderType).matchSingle()
     val requestMethod = requestMatch.originalMethod
     val browseBuilderIdField = requestMatch.instructionMatches.single()
         .instruction
@@ -293,10 +291,9 @@ private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
         }
         .singleOrThrow("Could not uniquely resolve the authenticated Browse client-data setter")
     val idSetterMethod = browseIdSetterFingerprint(browseBuilderIdField)
-        .matchAll(1..1)
-        .single()
+        .matchSingle()
         .originalMethod
-    val endpointIdField = BrowseRequestBuilderFingerprint.instructionMatches
+    val endpointIdField = requestBuilderMatch.instructionMatches
         .first()
         .instruction
         .getReference<FieldReference>()
@@ -312,7 +309,7 @@ private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
 }
 
 private fun BytecodePatchContext.resolveDelivery(): DeliveryResolution {
-    val mediaIdValidationMethod = AndroidAutoMediaIdValidationFingerprint.originalMethod
+    val mediaIdValidationMethod = AndroidAutoMediaIdValidationFingerprint.matchSingle().originalMethod
     val controllerType = mediaIdValidationMethod.definingClass
     val loadResultType = mediaIdValidationMethod.parameterTypes.first().toString()
     // The validation method reads the media ID through two nested fields in its result callback.
@@ -625,7 +622,7 @@ private fun BytecodePatchContext.injectRuntimeHooks(runtimeHooks: ResolvedRuntim
     val androidAutoLoadChildrenMethod = androidAutoLoadChildrenFingerprint(
         runtimeHooks.delivery.controllerType,
         runtimeHooks.delivery.loadResultType,
-    ).matchAll(1..1).single().method
+    ).matchSingle().method
     val playlistHandledRegister = androidAutoLoadChildrenMethod.findFreeRegister(0)
     if (playlistHandledRegister >= EIGHT_BIT_REGISTER_LIMIT) {
         throw PatchException("Android Auto load-children method has no free 8-bit register")
