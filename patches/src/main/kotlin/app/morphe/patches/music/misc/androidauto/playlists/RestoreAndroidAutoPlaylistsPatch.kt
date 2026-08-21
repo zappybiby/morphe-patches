@@ -1,6 +1,6 @@
 /*
  * Copyright 2026 Morphe.
- * https://github.com/MorpheApp/morphe-patches
+ * https://github.com/MorpheApp/morphe-patches/pull/2489
  *
  * See the included NOTICE file for GPLv3 Section 7 terms that apply to this code.
  */
@@ -12,6 +12,7 @@ import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLa
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.instructions
 import app.morphe.patcher.patch.BytecodePatchContext
+import app.morphe.patcher.patch.PatchException
 import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.util.proxy.mutableTypes.MutableClass
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
@@ -29,19 +30,16 @@ import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstructio
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.Reference
-import com.android.tools.smali.dexlib2.iface.reference.StringReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
+import com.android.tools.smali.dexlib2.util.MethodUtil
 
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch;"
-private const val ACCESS_CLASS =
-    "Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch"
-private const val ANDROID_AUTO_PLAYLIST_ACCESS = "$ACCESS_CLASS\$AndroidAutoPlaylistAccess;"
-
-private const val HOME_BROWSE_ID_MARKER = "FEmusic_home"
+private const val ANDROID_AUTO_PLAYLIST_ACCESS_INTERFACE =
+    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$AndroidAutoPlaylistAccess;"
 
 // move-result can only write to registers 0-255.
 private const val EIGHT_BIT_REGISTER_LIMIT = 256
@@ -64,11 +62,11 @@ private const val LISTENABLE_FUTURE_CLASS =
 private inline fun <reified T : Reference> Method.references(): Sequence<T> =
     instructions.asSequence().mapNotNull { it.getReference<T>() }
 
-private fun Method.hasSignature(result: String, vararg parameters: String) =
-    returnType == result && parameterTypes.map(CharSequence::toString) == parameters.toList()
-
-private fun <T> Sequence<T>.singleOrError(message: String) =
-    distinct().toList().let { it.singleOrNull() ?: error("$message: ${it.joinToString()}") }
+private fun <T> Sequence<T>.singleOrThrow(message: String) =
+    distinct().toList().let { values ->
+        values.singleOrNull()
+            ?: throw PatchException("$message: ${values.joinToString()}")
+    }
 
 private data class RendererResolution(
     val responsiveRendererType: String,
@@ -114,7 +112,7 @@ private data class ResolvedRuntimeHooks(
 
 @Suppress("unused")
 val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
-    name = "Restore Playlists in Android Auto",
+    name = "Restore playlists in Android Auto",
     description = "Restores YouTube Music playlists in Android Auto.",
 ) {
     dependsOn(
@@ -128,11 +126,6 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
         injectRuntimeHooks(resolveRuntimeHooks())
     }
 }
-
-private fun Method.matches(reference: MethodReference) =
-    name == reference.name &&
-        returnType == reference.returnType &&
-        parameterTypes == reference.parameterTypes
 
 private fun BytecodePatchContext.injectNativePlaylistsNodeCapture() {
     val androidAutoMediaItemMapper =
@@ -165,8 +158,6 @@ private fun BytecodePatchContext.resolveRuntimeHooks(): ResolvedRuntimeHooks {
     val browseResponse = resolveBrowseResponse()
     val delivery = resolveDelivery()
 
-    check(renderer.endpointFields.size == 2)
-    check(delivery.mediaIdFieldPath.isNotEmpty())
     return ResolvedRuntimeHooks(
         renderer = renderer,
         browse = browse,
@@ -178,7 +169,7 @@ private fun BytecodePatchContext.resolveRuntimeHooks(): ResolvedRuntimeHooks {
 private fun BytecodePatchContext.resolveBrowseResponse(): BrowseResponseResolution {
     // Use YTM's own methods to turn the Browse response into sections and playlist rows.
     val responseContentsMatch = BrowseResponseContentsFingerprint.matchAll(1..1).single()
-    val responseContentsMethod = responseContentsMatch.method
+    val responseContentsMethod = responseContentsMatch.originalMethod
     val contentMapperType = responseContentsMatch.instructionMatches.last()
         .instruction
         .getReference<TypeReference>()!!
@@ -193,16 +184,13 @@ private fun BytecodePatchContext.resolveBrowseResponse(): BrowseResponseResoluti
     val contentSectionMethod = browseContentSectionFingerprint(contentType)
         .matchAll(1..1)
         .single()
-        .method
+        .originalMethod
     val sectionItemMethods = browseSectionItemsFingerprint(
         contentSectionMethod.returnType,
         responseContentsMethod.returnType,
     ).matchAll(2..2)
-        .map { match -> match.method }
-        .sortedBy { method -> method.name }
-    val playlistRenderersMethod = PlaylistRendererDecoderFingerprint
-        .match(PlaylistRendererDecoderClassFingerprint.classDef)
-        .method
+        .map { match -> match.originalMethod }
+    val playlistRenderersMethod = PlaylistRendererDecoderFingerprint.originalMethod
 
     return BrowseResponseResolution(
         responseContentsMethod,
@@ -215,57 +203,51 @@ private fun BytecodePatchContext.resolveBrowseResponse(): BrowseResponseResoluti
 private fun BytecodePatchContext.resolveRenderer(
     browseEndpointIdField: FieldReference,
 ): RendererResolution {
-    // Protobuf loads the playlist-row class immediately before registering this field number.
-    val responsiveRendererType = MusicResponsiveRendererExtensionFingerprint.let { fingerprint ->
-        fingerprint.method.instructions
-            .take(fingerprint.instructionMatches.single().index)
-            .lastOrNull { instruction -> instruction.opcode == Opcode.CONST_CLASS }
-            ?.getReference<TypeReference>()
-            ?.type
-            ?: error("Could not resolve YTM's responsive renderer class")
-    }
+    val responsiveRendererType = MusicResponsiveRendererExtensionFingerprint
+        .instructionMatches
+        .first()
+        .instruction
+        .getReference<TypeReference>()
+        ?.type
+        ?: throw PatchException("Could not resolve YTM's responsive renderer class")
     val responsiveRendererFields = classDefBy(responsiveRendererType).fields.toList()
 
     fun responsiveRendererField(name: String) = responsiveRendererFields.asSequence()
         .filter { field ->
             !AccessFlags.STATIC.isSet(field.accessFlags) && field.name == name
         }
-        .singleOrError("Could not resolve responsive renderer field $name")
+        .singleOrThrow("Could not resolve responsive renderer field $name")
 
     // Playlist rows use c for artwork and g/h for title and subtitle.
     val artworkField = responsiveRendererField(RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME)
     val titleField = responsiveRendererField(RESPONSIVE_RENDERER_TITLE_FIELD_NAME)
     val subtitleField = responsiveRendererField(RESPONSIVE_RENDERER_SUBTITLE_FIELD_NAME)
-    check(artworkField.type != titleField.type && titleField.type == subtitleField.type) {
-        "Unexpected responsive renderer artwork, title, or subtitle fields"
+    if (artworkField.type == titleField.type || titleField.type != subtitleField.type) {
+        throw PatchException("Unexpected responsive renderer artwork, title, or subtitle fields")
     }
-    val artworkUrlsMethod = artworkUrlsFingerprint(artworkField.type).method
-    val renderTextMethod = renderTextFingerprint(titleField.type).method
+    val artworkUrlsMethod = artworkUrlsFingerprint(artworkField.type).originalMethod
+    val renderTextMethod = renderTextFingerprint(titleField.type).originalMethod
 
-    // The media-ID helper's parameter type identifies the two action fields in each playlist row.
-    val playlistMediaIdMethod =
-        PlaylistPlaybackMediaIdFingerprint.matchAll(1..1).single().method
-    val endpointContainerType = playlistMediaIdMethod.references<MethodReference>()
-        .filter { reference ->
-            reference.returnType == "Ljava/lang/String;" &&
-                reference.parameterTypes.size == 1 &&
-                reference.parameterTypes.first().startsWith("L")
-        }
-        .map { reference -> reference.parameterTypes.single().toString() }
-        .singleOrError("Could not resolve the playlist action type")
+    val playlistMediaIdMatch = PlaylistPlaybackMediaIdFingerprint.matchAll(1..1).single()
+    val playlistMediaIdMethod = playlistMediaIdMatch.originalMethod
+    val endpointContainerType = playlistMediaIdMatch.instructionMatches
+        .first()
+        .instruction
+        .getReference<MethodReference>()
+        ?.returnType
+        ?: throw PatchException("Could not resolve the playlist action type")
     val endpointFields = responsiveRendererFields
         .filter { field ->
             !AccessFlags.STATIC.isSet(field.accessFlags) && field.type == endpointContainerType
         }
-        .sortedBy { field -> field.name }
-    check(endpointFields.size == 2) {
-        "Could not resolve the two responsive renderer action fields"
+    if (endpointFields.size != 2) {
+        throw PatchException("Could not resolve the two responsive renderer action fields")
     }
 
     val browseEndpointDecoderMethod = browseEndpointDecoderFingerprint(
         endpointContainerType,
         browseEndpointIdField.definingClass,
-    ).matchAll(1..1).single().method
+    ).matchAll(1..1).single().originalMethod
 
     return RendererResolution(
         responsiveRendererType = responsiveRendererType,
@@ -283,19 +265,18 @@ private fun BytecodePatchContext.resolveRenderer(
 
 private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
     // Resolve the obfuscated Browse service from the methods that build and send its requests.
-    val requestBuilderMethod = BrowseRequestBuilderFingerprint.method
-    val requestBuilderInstructions = requestBuilderMethod.instructions.toList()
+    val requestBuilderMethod = BrowseRequestBuilderFingerprint.originalMethod
     val builderType = requestBuilderMethod.returnType
     val builderFactoryMethod = requestBuilderMethod.references<MethodReference>()
         .filter { reference ->
             reference.parameterTypes.isEmpty() && reference.returnType == builderType
         }
-        .singleOrError("Could not uniquely resolve the Browse service factory")
+        .singleOrThrow("Could not uniquely resolve the Browse service factory")
     val serviceType = builderFactoryMethod.definingClass
     val requestMatch = authenticatedBrowseRequestFingerprint(serviceType, builderType)
         .matchAll(1..1)
         .single()
-    val requestMethod = requestMatch.method
+    val requestMethod = requestMatch.originalMethod
     val browseBuilderIdField = requestMatch.instructionMatches.single()
         .instruction
         .getReference<FieldReference>()!!
@@ -306,29 +287,20 @@ private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
     val clientDataSetterMethod = builderMethods
         // YTM 9.32/9.33: use the protected setter because these versions also expose a public wrapper.
         .filter { method ->
-            AccessFlags.PROTECTED.isSet(method.accessFlags) && method.hasSignature("V", "[B")
+            AccessFlags.PROTECTED.isSet(method.accessFlags) &&
+                method.returnType == "V" &&
+                method.parameterTypes.map(CharSequence::toString) == listOf("[B")
         }
-        .singleOrError("Could not uniquely resolve the authenticated Browse client-data setter")
+        .singleOrThrow("Could not uniquely resolve the authenticated Browse client-data setter")
     val idSetterMethod = browseIdSetterFingerprint(browseBuilderIdField)
         .matchAll(1..1)
         .single()
-        .method
-
-    // The builder reads the requested Browse ID immediately before the FEmusic_home fallback.
-    val endpointIdField = requestBuilderInstructions.indices.asSequence()
-        .mapNotNull { index ->
-            if (requestBuilderInstructions[index].getReference<StringReference>()?.string !=
-                HOME_BROWSE_ID_MARKER
-            ) return@mapNotNull null
-            requestBuilderInstructions.getOrNull(index - 1)
-                ?.takeIf { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
-                ?.getReference<FieldReference>()
-                ?.takeIf { field ->
-                    field.type == JAVA_STRING_CLASS &&
-                        classDefByOrNull(field.definingClass) != null
-                }
-        }
-        .singleOrError("Could not uniquely resolve the Browse endpoint ID field")
+        .originalMethod
+    val endpointIdField = BrowseRequestBuilderFingerprint.instructionMatches
+        .first()
+        .instruction
+        .getReference<FieldReference>()
+        ?: throw PatchException("Could not resolve the Browse endpoint ID field")
 
     return BrowseResolution(
         builderFactoryMethod = builderFactoryMethod,
@@ -340,7 +312,7 @@ private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
 }
 
 private fun BytecodePatchContext.resolveDelivery(): DeliveryResolution {
-    val mediaIdValidationMethod = AndroidAutoMediaIdValidationFingerprint.method
+    val mediaIdValidationMethod = AndroidAutoMediaIdValidationFingerprint.originalMethod
     val controllerType = mediaIdValidationMethod.definingClass
     val loadResultType = mediaIdValidationMethod.parameterTypes.first().toString()
     // The validation method reads the media ID through two nested fields in its result callback.
@@ -353,10 +325,9 @@ private fun BytecodePatchContext.resolveDelivery(): DeliveryResolution {
                 fields[1].definingClass == fields[0].type &&
                 fields[1].type == JAVA_STRING_CLASS
         }
-        .singleOrError("Could not uniquely resolve the Android Auto media ID field path")
+        .singleOrThrow("Could not uniquely resolve the Android Auto media ID field path")
 
-    // YTM 9.15/9.29: a one-argument helper supplies a null interaction context.
-    // YTM 9.30/9.31/9.32/9.33: the two-argument delivery method is called directly.
+    // YTM may use a one-argument wrapper or call the two-argument delivery method directly.
     val resultDeliveryMethod = mediaIdValidationMethod.references<MethodReference>()
         .filter { reference ->
             val parameters = reference.parameterTypes.map(CharSequence::toString)
@@ -365,7 +336,7 @@ private fun BytecodePatchContext.resolveDelivery(): DeliveryResolution {
                 parameters.firstOrNull() == "Ljava/util/List;" &&
                 parameters.drop(1).all { it.startsWith("L") || it.startsWith("[") }
         }
-        .singleOrError("Could not uniquely resolve the Android Auto result delivery method")
+        .singleOrThrow("Could not uniquely resolve the Android Auto result delivery method")
 
     return DeliveryResolution(
         controllerType = controllerType,
@@ -444,14 +415,14 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
 
     // Make YTM's playlist-row decoder public so the injected Java code can call it.
     mutableClassDefBy(response.playlistRenderersMethod.definingClass).methods
-        .single { method -> method.matches(response.playlistRenderersMethod) }
+        .single { method -> MethodUtil.methodSignaturesMatch(method, response.playlistRenderersMethod) }
         .apply {
             accessFlags =
                 (accessFlags and AccessFlags.PRIVATE.value.inv()) or AccessFlags.PUBLIC.value
         }
 
     mutableClassDefBy(browse.builderFactoryMethod.definingClass).apply {
-        implementAccess(ANDROID_AUTO_PLAYLIST_ACCESS)
+        implementAccess(ANDROID_AUTO_PLAYLIST_ACCESS_INTERFACE)
         addAccessMethod(
             "patch_requestBrowse",
             listOf(JAVA_STRING_CLASS, JAVA_EXECUTOR_CLASS),
@@ -634,13 +605,11 @@ private fun BytecodePatchContext.injectRuntimeHooks(runtimeHooks: ResolvedRuntim
     injectRuntimeAccess(runtimeHooks)
 
     val browseServiceConstructors =
-        mutableClassDefBy(runtimeHooks.browse.builderFactoryMethod.definingClass).methods.filter { method ->
-            method.name == "<init>"
-        }
-    check(browseServiceConstructors.size == 1) {
-        "Could not uniquely resolve the Browse service constructor"
-    }
-    val browseServiceConstructor = browseServiceConstructors.single()
+        mutableClassDefBy(runtimeHooks.browse.builderFactoryMethod.definingClass).methods
+            .asSequence()
+            .filter(MethodUtil::isConstructor)
+    val browseServiceConstructor = browseServiceConstructors
+        .singleOrThrow("Could not uniquely resolve the Browse service constructor")
 
     // Capture the Browse service at construction so Android Auto works before the phone UI has opened.
     browseServiceConstructor.findInstructionIndicesReversedOrThrow(Opcode.RETURN_VOID)
@@ -648,23 +617,18 @@ private fun BytecodePatchContext.injectRuntimeHooks(runtimeHooks: ResolvedRuntim
             browseServiceConstructor.addInstructions(
                 returnIndex,
                 """
-                    invoke-static/range { p0 .. p0 }, $EXTENSION_CLASS->initialize($ANDROID_AUTO_PLAYLIST_ACCESS)V
+                    invoke-static/range { p0 .. p0 }, $EXTENSION_CLASS->initialize($ANDROID_AUTO_PLAYLIST_ACCESS_INTERFACE)V
                 """,
             )
         }
 
-    val androidAutoLoadChildrenMethod =
-        mutableClassDefBy(runtimeHooks.delivery.controllerType).methods.single { method ->
-            !AccessFlags.STATIC.isSet(method.accessFlags) &&
-                AccessFlags.PUBLIC.isSet(method.accessFlags) &&
-                AccessFlags.FINAL.isSet(method.accessFlags) &&
-                method.returnType == "V" &&
-                method.parameterTypes.map(CharSequence::toString) ==
-                listOf(runtimeHooks.delivery.loadResultType)
-        }
+    val androidAutoLoadChildrenMethod = androidAutoLoadChildrenFingerprint(
+        runtimeHooks.delivery.controllerType,
+        runtimeHooks.delivery.loadResultType,
+    ).matchAll(1..1).single().method
     val playlistHandledRegister = androidAutoLoadChildrenMethod.findFreeRegister(0)
-    check(playlistHandledRegister < EIGHT_BIT_REGISTER_LIMIT) {
-        "Android Auto load-children method has no free 8-bit register"
+    if (playlistHandledRegister >= EIGHT_BIT_REGISTER_LIMIT) {
+        throw PatchException("Android Auto load-children method has no free 8-bit register")
     }
 
     // p1 is YTM's result callback; return early when the extension will send the playlist list.
