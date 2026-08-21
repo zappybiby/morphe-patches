@@ -59,7 +59,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     public static boolean handlePlaylistsNode(Object loadResult) {
         try {
-            if (!isReady() || !isNativePlaylistsNode(loadResult)) return false;
+            if (authenticatedBrowseService == null || !isNativePlaylistsNode(loadResult)) return false;
             loadAndroidAutoPlaylists().thenAccept(items -> deliver(loadResult, items));
             return true;
         } catch (RuntimeException error) {
@@ -248,16 +248,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     }
 
     private static boolean isNativePlaylistsNode(Object loadResult) {
-        String mediaId = mediaId(loadResult);
+        String mediaId = authenticatedBrowseService.patch_getMediaId(loadResult);
         return mediaId != null && NATIVE_PLAYLISTS_NODE_MEDIA_IDS.contains(mediaId);
-    }
-
-    private static boolean isReady() {
-        return authenticatedBrowseService != null;
-    }
-
-    private static String mediaId(Object loadResult) {
-        return authenticatedBrowseService.patch_getMediaId(loadResult);
     }
 
     public interface AndroidAutoPlaylistAccess {
