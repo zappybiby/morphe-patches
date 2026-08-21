@@ -1,3 +1,12 @@
+## [0.2.0](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.2.0) (2026-08-21)
+
+### Changes
+
+* **YouTube Music:** Use native Browse response mapping and playlist playback methods
+* **YouTube Music:** Load every page of saved Android Auto playlists
+* **YouTube Music:** Support versions 9.15.51, 9.31.51, 9.32.51, and 9.33.52
+* **YouTube Music:** Remove reflection, whole-response scanning, and custom protobuf rewriting
+
 ## [1.40.0-dev.13](https://github.com/MorpheApp/morphe-patches/compare/v1.40.0-dev.12...v1.40.0-dev.13) (2026-08-20)
 
 ### 🐛 Bug Fixes
