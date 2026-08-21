@@ -19,7 +19,6 @@ import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMuta
 import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
-import app.morphe.util.constructor
 import app.morphe.util.findFreeRegister
 import app.morphe.util.findInstructionIndicesReversedOrThrow
 import app.morphe.util.findMutableMethodOf
@@ -36,6 +35,7 @@ import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
+import com.android.tools.smali.dexlib2.util.MethodUtil
 
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch;"
@@ -575,7 +575,8 @@ private fun BytecodePatchContext.injectRuntimeHooks(runtimeHooks: ResolvedRuntim
     injectRuntimeAccess(runtimeHooks)
 
     val browseServiceConstructor =
-        mutableClassDefBy(runtimeHooks.browse.builderFactoryMethod.definingClass).constructor()
+        mutableClassDefBy(runtimeHooks.browse.builderFactoryMethod.definingClass).methods
+            .single(MethodUtil::isConstructor)
 
     // Capture the Browse service at construction so Android Auto works before the phone UI has opened.
     browseServiceConstructor.findInstructionIndicesReversedOrThrow(Opcode.RETURN_VOID)
