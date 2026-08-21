@@ -16,6 +16,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -71,23 +72,36 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     }
 
     private static void loadAndroidAutoPlaylists(Object loadResult) {
-        ListenableFuture<?> browseRequest = authenticatedBrowseService.patch_requestBrowse(
-                LIBRARY_BROWSE_ID, REQUEST_EXECUTOR);
+        LibraryState state = new LibraryState();
+        loadAndroidAutoPlaylists(loadResult, state,
+                authenticatedBrowseService.patch_requestBrowse(
+                        LIBRARY_BROWSE_ID, REQUEST_EXECUTOR), false);
+    }
+
+    private static void loadAndroidAutoPlaylists(
+            Object loadResult, LibraryState state, ListenableFuture<?> browseRequest,
+            boolean continuationRequest) {
         browseRequest.addListener(() -> {
-            List<MediaBrowserCompat.MediaItem> items;
             try {
-                items = createAndroidAutoPlaylistItems(
-                        extractLibraryPlaylists(browseRequest.get()));
+                Object response = browseRequest.get();
+                Object continuation = continuationRequest
+                        ? appendContinuationPlaylists(response, state)
+                        : appendLibraryPlaylists(response, state);
+                if (continuation != null) {
+                    loadAndroidAutoPlaylists(loadResult, state,
+                            authenticatedBrowseService.patch_requestContinuation(
+                                    continuation, REQUEST_EXECUTOR), true);
+                    return;
+                }
+                deliver(loadResult, createAndroidAutoPlaylistItems(state.playlists));
             } catch (InterruptedException error) {
                 Thread.currentThread().interrupt();
                 Logger.printException(() -> "Library Browse request interrupted", error);
-                items = Collections.emptyList();
+                deliver(loadResult, Collections.emptyList());
             } catch (ExecutionException | RuntimeException error) {
                 Logger.printException(() -> "Library Browse request failed", error);
-                items = Collections.emptyList();
+                deliver(loadResult, Collections.emptyList());
             }
-            // Android Auto still needs a result when the request fails.
-            deliver(loadResult, items);
         }, REQUEST_EXECUTOR);
     }
 
@@ -100,28 +114,47 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
-    private static List<LibraryPlaylist> extractLibraryPlaylists(
-            Object response) {
-        LibraryState state = new LibraryState();
+    private static Object appendLibraryPlaylists(
+            Object response, LibraryState state) {
+        Object nextContinuation = null;
         try {
             for (Object content : authenticatedBrowseService.patch_getContents(response)) {
                 Object section = authenticatedBrowseService.patch_getSection(content);
                 if (section == null) continue;
                 for (Iterable<?> items :
                         authenticatedBrowseService.patch_getItemGroups(section)) {
-                    appendSectionPlaylists(items, state);
+                    nextContinuation = appendSectionPlaylists(
+                            items, state, nextContinuation);
                 }
             }
         } catch (RuntimeException error) {
             throw new IllegalStateException("Could not map Library response", error);
         }
         Logger.printDebug(() -> "Mapped Library playlists: " + state.playlists.size());
-        return state.playlists;
+        return nextContinuation;
     }
 
-    private static void appendSectionPlaylists(
-            Iterable<?> items, LibraryState state) {
+    private static Object appendContinuationPlaylists(
+            Object response, LibraryState state) {
+        Object content = authenticatedBrowseService.patch_getContinuationContent(response);
+        Object nextContinuation = content == null ? null : appendSectionPlaylists(
+                Collections.singletonList(content), state, null);
+        Logger.printDebug(() -> "Mapped Library playlists: " + state.playlists.size());
+        return nextContinuation;
+    }
+
+    private static Object appendSectionPlaylists(
+            Iterable<?> items, LibraryState state, Object nextContinuation) {
         for (Object item : items) {
+            if (nextContinuation == null) {
+                Iterable<?> continuations =
+                        authenticatedBrowseService.patch_getContinuations(item);
+                if (continuations != null) {
+                    Iterator<?> iterator = continuations.iterator();
+                    if (iterator.hasNext()) nextContinuation = iterator.next();
+                }
+            }
+
             Iterable<?> renderers = authenticatedBrowseService.patch_getRenderers(item);
             if (renderers == null) continue;
             for (Object renderer : renderers) {
@@ -133,6 +166,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 }
             }
         }
+        return nextContinuation;
     }
 
     private static void appendLibraryPlaylist(
@@ -235,11 +269,14 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     public interface AndroidAutoPlaylistAccess {
         ListenableFuture<?> patch_requestBrowse(String browseId, Executor executor);
+        ListenableFuture<?> patch_requestContinuation(Object continuation, Executor executor);
         String patch_playlistMediaId(String playlistId);
         Iterable<?> patch_getContents(Object response);
+        Object patch_getContinuationContent(Object response);
         Object patch_getSection(Object content);
         Iterable<?>[] patch_getItemGroups(Object section);
         Iterable<?> patch_getRenderers(Object item);
+        Iterable<?> patch_getContinuations(Object item);
         boolean patch_isResponsiveRenderer(Object value);
         Object patch_getFirstEndpoint(Object renderer);
         Object patch_getSecondEndpoint(Object renderer);
