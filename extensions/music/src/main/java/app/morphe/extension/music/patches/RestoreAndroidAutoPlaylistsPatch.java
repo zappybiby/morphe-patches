@@ -18,12 +18,9 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeoutException;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.ResourceUtils;
@@ -35,8 +32,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final String PLAYLISTS_TITLE_RESOURCE = "library_playlists_shelf_title";
     private static final String YTM_COLLECTION_BROWSE_ID_PREFIX = "VL";
     private static final String EPISODES_FOR_LATER_BROWSE_ID = "VLSE";
-    // Android and YTM define no timeout here, so this patch uses 30 seconds.
-    private static final long BROWSE_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
     // Library artwork is 60-192 px, but the same CDN URL accepts a 544 px size.
     private static final int PLAYLIST_ARTWORK_SIZE_PX = 544;
     private static final Executor REQUEST_EXECUTOR = Utils::runOnBackgroundThread;
@@ -60,7 +55,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     public static boolean handlePlaylistsNode(Object loadResult) {
         try {
             if (authenticatedBrowseService == null || !isNativePlaylistsNode(loadResult)) return false;
-            loadAndroidAutoPlaylists().thenAccept(items -> deliver(loadResult, items));
+            loadAndroidAutoPlaylists(loadResult);
             return true;
         } catch (RuntimeException error) {
             Logger.printException(() -> "Could not start Android Auto playlist request", error);
@@ -75,16 +70,25 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         if (mediaId != null) NATIVE_PLAYLISTS_NODE_MEDIA_IDS.add(mediaId);
     }
 
-    private static CompletableFuture<List<MediaBrowserCompat.MediaItem>>
-            loadAndroidAutoPlaylists() {
-        return requestBrowse(LIBRARY_BROWSE_ID)
-                .thenApply(RestoreAndroidAutoPlaylistsPatch::extractLibraryPlaylists)
-                .thenApply(RestoreAndroidAutoPlaylistsPatch::createAndroidAutoPlaylistItems)
-                .exceptionally(error -> {
-                    Logger.printException(() -> "Library Browse request failed", error);
-                    // Android Auto still needs a result when the request fails.
-                    return Collections.emptyList();
-                });
+    private static void loadAndroidAutoPlaylists(Object loadResult) {
+        ListenableFuture<?> browseRequest = authenticatedBrowseService.patch_requestBrowse(
+                LIBRARY_BROWSE_ID, REQUEST_EXECUTOR);
+        browseRequest.addListener(() -> {
+            List<MediaBrowserCompat.MediaItem> items;
+            try {
+                items = createAndroidAutoPlaylistItems(
+                        extractLibraryPlaylists(browseRequest.get()));
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                Logger.printException(() -> "Library Browse request interrupted", error);
+                items = Collections.emptyList();
+            } catch (ExecutionException | RuntimeException error) {
+                Logger.printException(() -> "Library Browse request failed", error);
+                items = Collections.emptyList();
+            }
+            // Android Auto still needs a result when the request fails.
+            deliver(loadResult, items);
+        }, REQUEST_EXECUTOR);
     }
 
     private static void deliver(
@@ -94,29 +98,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         } catch (RuntimeException error) {
             Logger.printException(() -> "Could not deliver Android Auto playlists", error);
         }
-    }
-
-    private static CompletableFuture<Object> requestBrowse(
-            String browseId) {
-        CompletableFuture<Object> responseFuture = new CompletableFuture<>();
-        ListenableFuture<?> browseRequest =
-                authenticatedBrowseService.patch_requestBrowse(browseId, REQUEST_EXECUTOR);
-        browseRequest.addListener(() -> {
-            try {
-                responseFuture.complete(browseRequest.get());
-            } catch (InterruptedException error) {
-                Thread.currentThread().interrupt();
-                responseFuture.completeExceptionally(error);
-            } catch (ExecutionException | CancellationException error) {
-                responseFuture.completeExceptionally(error);
-            }
-        }, REQUEST_EXECUTOR);
-        // Complete timed-out requests so Android Auto is not left waiting.
-        Utils.runOnMainThreadDelayed(() -> {
-            TimeoutException error = new TimeoutException("Browse request timed out");
-            if (responseFuture.completeExceptionally(error)) browseRequest.cancel(true);
-        }, BROWSE_REQUEST_TIMEOUT_MILLISECONDS);
-        return responseFuture;
     }
 
     private static List<LibraryPlaylist> extractLibraryPlaylists(
