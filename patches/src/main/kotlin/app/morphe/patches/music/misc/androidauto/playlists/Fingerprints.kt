@@ -10,6 +10,7 @@ package app.morphe.patches.music.misc.androidauto.playlists
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
 import app.morphe.patcher.InstructionLocation.MatchAfterWithin
+import app.morphe.patcher.extensions.InstructionExtensions.instructions
 import app.morphe.patcher.fieldAccess
 import app.morphe.patcher.literal
 import app.morphe.patcher.methodCall
@@ -17,9 +18,11 @@ import app.morphe.patcher.newInstance
 import app.morphe.patcher.opcode
 import app.morphe.patcher.string
 import app.morphe.util.findInstructionIndicesReversed
+import app.morphe.util.getReference
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
+import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 
 private const val BROWSE_CONTENTS_EXTENSION_FIELD_NUMBER = 58_173_949L
 private const val BROWSE_SECTION_EXTENSION_FIELD_NUMBER = 58_174_010L
@@ -68,6 +71,28 @@ internal fun androidAutoLoadChildrenFingerprint(
     returnType = "V",
     parameters = listOf(loadResultType),
     custom = { method, _ -> !AccessFlags.STATIC.isSet(method.accessFlags) },
+)
+
+internal fun androidAutoControllerProviderFingerprint(controllerType: String) = Fingerprint(
+    returnType = "Ljava/lang/Object;",
+    filters = listOf(
+        methodCall(
+            definingClass = controllerType,
+            name = "<init>",
+            returnType = "V",
+        ),
+    ),
+    custom = { method, _ -> !AccessFlags.STATIC.isSet(method.accessFlags) },
+)
+
+internal fun browseServiceProviderAccessFingerprint(serviceType: String) = Fingerprint(
+    filters = listOf(opcode(Opcode.CHECK_CAST)),
+    custom = { method, _ ->
+        method.implementation?.instructions?.any { instruction ->
+            instruction.opcode == Opcode.CHECK_CAST &&
+                instruction.getReference<TypeReference>()?.type == serviceType
+        } == true
+    },
 )
 
 internal object BrowseRequestBuilderFingerprint : Fingerprint(
