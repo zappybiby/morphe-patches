@@ -346,10 +346,6 @@ private fun MutableClass.addAccessMethod(
     )
 }
 
-private fun MutableClass.implementAccess(interfaceType: String) {
-    if (interfaceType !in interfaces) interfaces.add(interfaceType)
-}
-
 private fun MutableClass.addObjectMethodAccess(
     name: String,
     method: MethodReference,
@@ -396,7 +392,7 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
         .apply { accessFlags = accessFlags.toPublicAccessFlags() }
 
     mutableClassDefBy(browse.builderFactoryMethod.definingClass).apply {
-        implementAccess(ANDROID_AUTO_PLAYLIST_ACCESS_INTERFACE)
+        interfaces.add(ANDROID_AUTO_PLAYLIST_ACCESS_INTERFACE)
         addAccessMethod(
             "patch_requestBrowse",
             listOf(JAVA_STRING_CLASS, JAVA_EXECUTOR_CLASS),
