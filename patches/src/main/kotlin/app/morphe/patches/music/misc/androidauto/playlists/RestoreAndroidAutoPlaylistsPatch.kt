@@ -19,6 +19,7 @@ import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMuta
 import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
+import app.morphe.util.cloneMutable
 import app.morphe.util.findFreeRegister
 import app.morphe.util.findInstructionIndicesReversedOrThrow
 import app.morphe.util.findMutableMethodOf
@@ -314,16 +315,8 @@ private fun BytecodePatchContext.resolveBrowseResponse(): BrowseResponseResoluti
                 method.returnType == JAVA_LIST_CLASS &&
                 method.parameterTypes.map(CharSequence::toString) == listOf(playlistContainerType)
         }
-    val continuationResponseDecoderMethod = classDefBy(
-        playlistRenderersMethod.definingClass,
-    ).methods.single { method ->
-        !AccessFlags.STATIC.isSet(method.accessFlags) &&
-            method.returnType == JAVA_OBJECT_CLASS &&
-            method.parameterTypes.size == 1 &&
-            method.instructions.any { instruction ->
-                instruction.getReference<TypeReference>()?.type == playlistContainerType
-            }
-    }
+    val continuationResponseDecoderMethod =
+        PlaylistContinuationResponseDecoderFingerprint.originalMethod
     val continuationResponsePayloadType = continuationResponseDecoderMethod
         .parameterTypes.single().toString()
     val continuationResponsePayloadMethod = classDefBy(
@@ -569,18 +562,13 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
     // The native decoder does not read its receiver. Keep the same register layout by
     // copying it as a static method with an unused first parameter.
     val continuationResponseDecoder = response.continuationResponseDecoderMethod.let { method ->
-        ImmutableMethod(
-            method.definingClass,
-            "patch_decodeContinuationResponse",
-            listOf(method.definingClass, method.parameterTypes.single().toString()).map { type ->
-                ImmutableMethodParameter(type, null, null)
-            },
-            method.returnType,
-            AccessFlags.PUBLIC.value or AccessFlags.STATIC.value,
-            null,
-            null,
-            method.implementation,
-        ).toMutable().also { copiedMethod ->
+        method.cloneMutable(
+            name = "patch_decodeContinuationResponse",
+            accessFlags = AccessFlags.PUBLIC.value or AccessFlags.STATIC.value,
+            parameters = listOf(
+                ImmutableMethodParameter(method.definingClass, null, null),
+            ) + method.parameters,
+        ).also { copiedMethod ->
             mutableClassDefBy(method.definingClass).methods.add(copiedMethod)
         }
     }
