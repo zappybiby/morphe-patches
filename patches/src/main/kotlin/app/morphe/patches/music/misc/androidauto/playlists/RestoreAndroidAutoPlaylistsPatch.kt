@@ -21,8 +21,10 @@ import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.util.findFreeRegister
 import app.morphe.util.findInstructionIndicesReversedOrThrow
+import app.morphe.util.findMutableMethodOf
 import app.morphe.util.getReference
 import app.morphe.util.matchSingle
+import app.morphe.util.toPublicAccessFlags
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.Method
@@ -411,12 +413,9 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
     val delivery = runtimeHooks.delivery
 
     // Make YTM's playlist-row decoder public so the injected Java code can call it.
-    mutableClassDefBy(response.playlistRenderersMethod.definingClass).methods
-        .single { method -> MethodUtil.methodSignaturesMatch(method, response.playlistRenderersMethod) }
-        .apply {
-            accessFlags =
-                (accessFlags and AccessFlags.PRIVATE.value.inv()) or AccessFlags.PUBLIC.value
-        }
+    mutableClassDefBy(response.playlistRenderersMethod.definingClass)
+        .findMutableMethodOf(response.playlistRenderersMethod)
+        .apply { accessFlags = accessFlags.toPublicAccessFlags() }
 
     mutableClassDefBy(browse.builderFactoryMethod.definingClass).apply {
         implementAccess(ANDROID_AUTO_PLAYLIST_ACCESS_INTERFACE)
