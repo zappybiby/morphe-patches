@@ -31,6 +31,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final String LIBRARY_BROWSE_ID = "FEmusic_library_landing";
     private static final String PLAYLISTS_TITLE_RESOURCE = "library_playlists_shelf_title";
     private static final String YTM_COLLECTION_BROWSE_ID_PREFIX = "VL";
+    private static final String EPISODES_FOR_LATER_BROWSE_ID = "VLSE";
     // Library artwork is 60-192 px, but the same CDN URL accepts a 544 px size.
     private static final int PLAYLIST_ARTWORK_SIZE_PX = 544;
     private static final Executor REQUEST_EXECUTOR = Utils::runOnBackgroundThread;
@@ -138,6 +139,9 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             Object renderer, LibraryState state) {
         String browseId = responsiveRendererBrowseId(renderer);
         if (browseId == null || state.seenBrowseIds.contains(browseId)) return;
+        // Episodes for Later uses VLSE, which has no play command, so hide it.
+        if (EPISODES_FOR_LATER_BROWSE_ID.equals(browseId)) return;
+
         String title = responsiveRendererTitle(renderer);
         if (title.isEmpty()) return;
         state.seenBrowseIds.add(browseId);
