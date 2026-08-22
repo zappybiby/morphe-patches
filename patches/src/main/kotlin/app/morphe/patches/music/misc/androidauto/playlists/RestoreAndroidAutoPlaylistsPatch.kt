@@ -34,7 +34,6 @@ import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
-import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
@@ -143,71 +142,19 @@ private fun Instruction.receiverRegister() = when (this) {
     else -> null
 }
 
-private fun List<Instruction>.browseProviderAt(
-    browseServiceCastIndex: Int,
-    browseServiceType: String,
-): BrowseProvider? {
-    val browseServiceCast = getOrNull(browseServiceCastIndex) as? OneRegisterInstruction
-        ?: return null
-    if (browseServiceCast.opcode != Opcode.CHECK_CAST ||
-        browseServiceCast.getReference<TypeReference>()?.type != browseServiceType
-    ) return null
-
-    val moveResult = getOrNull(browseServiceCastIndex - 1) as? OneRegisterInstruction
-        ?: return null
-    if (moveResult.opcode != Opcode.MOVE_RESULT_OBJECT ||
-        moveResult.registerA != browseServiceCast.registerA
-    ) return null
-
-    val providerGetterCall = getOrNull(browseServiceCastIndex - 2) ?: return null
-    if (providerGetterCall.opcode != Opcode.INVOKE_INTERFACE &&
-        providerGetterCall.opcode != Opcode.INVOKE_INTERFACE_RANGE
-    ) return null
-    val getter = providerGetterCall.getReference<MethodReference>() ?: return null
-    if (getter.parameterTypes.isNotEmpty() || getter.returnType != JAVA_OBJECT_CLASS) return null
-
-    val providerRead = getOrNull(browseServiceCastIndex - 3) as? TwoRegisterInstruction
-        ?: return null
-    if (providerRead.opcode != Opcode.IGET_OBJECT ||
-        providerRead.registerA != providerGetterCall.receiverRegister()
-    ) return null
-    val field = providerRead.getReference<FieldReference>() ?: return null
-    return field.takeIf { it.type == getter.definingClass }?.let { BrowseProvider(it, getter) }
-}
-
-private fun BytecodePatchContext.findBrowseProviderPaths(
+private fun BytecodePatchContext.findBrowseProviderPath(
     startType: String,
-    providers: List<BrowseProvider>,
-): List<Pair<List<FieldReference>, MethodReference>> {
-    val providersByField = providers.associateBy { provider -> provider.field }
-    val pending = ArrayDeque<List<FieldReference>>()
-    pending.add(emptyList())
-    val results = mutableListOf<List<FieldReference>>()
-    var matchDepth: Int? = null
+    provider: BrowseProvider,
+): List<FieldReference>? {
+    val rootField = classDefByOrNull(startType)?.fields?.singleOrNull { field ->
+        !AccessFlags.STATIC.isSet(field.accessFlags) &&
+            classDefByOrNull(field.type)?.fields?.any { it.type == provider.field.definingClass } == true
+    } ?: return null
+    val componentField = classDefByOrNull(rootField.type)?.fields?.singleOrNull { field ->
+        !AccessFlags.STATIC.isSet(field.accessFlags) && field.type == provider.field.definingClass
+    } ?: return null
 
-    while (pending.isNotEmpty()) {
-        val current = pending.removeFirst()
-        if (matchDepth?.let { current.size >= it } == true) continue
-        val currentType = current.lastOrNull()?.type ?: startType
-        classDefByOrNull(currentType)?.fields
-            ?.filter { field ->
-                !AccessFlags.STATIC.isSet(field.accessFlags) &&
-                    (classDefByOrNull(field.type) != null || providersByField.containsKey(field))
-            }
-            ?.forEach { field ->
-                val path = current + field
-                if (providersByField.containsKey(field)) {
-                    results += path
-                    matchDepth = path.size
-                } else if (field.type != startType &&
-                    current.none { previous -> previous.definingClass == field.type }
-                ) {
-                    pending.add(path)
-                }
-            }
-    }
-
-    return results.distinct().map { path -> path to providersByField.getValue(path.last()).getter }
+    return listOf(rootField, componentField, provider.field)
 }
 
 @Suppress("unused")
@@ -278,20 +225,19 @@ private fun BytecodePatchContext.resolveStartup(
 ): StartupResolution {
     val androidAutoProviderMethod =
         androidAutoControllerProviderFingerprint(androidAutoControllerType).originalMethod
-    val browseProviders = browseServiceProviderAccessFingerprint(browseServiceType)
+    val providerPaths = browseServiceProviderAccessFingerprint(browseServiceType)
         .matchAll()
-        .flatMap { match ->
-            val instructions = match.originalMethod.instructions.toList()
-            instructions.indices.mapNotNull { index ->
-                instructions.browseProviderAt(index, browseServiceType)
-            }
+        .map { match ->
+            val field = match.instructionMatches[0].instruction.getReference<FieldReference>()!!
+            val getter = match.instructionMatches[1].instruction.getReference<MethodReference>()!!
+            BrowseProvider(field, getter)
         }
         .distinctBy { provider -> provider.field }
-
-    val (browseProviderPath, browseProviderGetter) = findBrowseProviderPaths(
-        androidAutoProviderMethod.definingClass,
-        browseProviders,
-    ).single()
+        .mapNotNull { provider ->
+            findBrowseProviderPath(androidAutoProviderMethod.definingClass, provider)
+                ?.let { path -> path to provider.getter }
+        }
+    val (browseProviderPath, browseProviderGetter) = providerPaths.single()
 
     return StartupResolution(
         androidAutoProviderMethod,

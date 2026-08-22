@@ -10,6 +10,7 @@ package app.morphe.patches.music.misc.androidauto.playlists
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
 import app.morphe.patcher.InstructionLocation.MatchAfterWithin
+import app.morphe.patcher.checkCast
 import app.morphe.patcher.extensions.InstructionExtensions.instructions
 import app.morphe.patcher.fieldAccess
 import app.morphe.patcher.literal
@@ -89,13 +90,17 @@ internal fun androidAutoControllerProviderFingerprint(controllerType: String) = 
 )
 
 internal fun browseServiceProviderAccessFingerprint(serviceType: String) = Fingerprint(
-    filters = listOf(opcode(Opcode.CHECK_CAST)),
-    custom = { method, _ ->
-        method.implementation?.instructions?.any { instruction ->
-            instruction.opcode == Opcode.CHECK_CAST &&
-                instruction.getReference<TypeReference>()?.type == serviceType
-        } == true
-    },
+    filters = listOf(
+        fieldAccess(opcode = Opcode.IGET_OBJECT),
+        methodCall(
+            parameters = emptyList(),
+            returnType = "Ljava/lang/Object;",
+            opcodes = listOf(Opcode.INVOKE_INTERFACE, Opcode.INVOKE_INTERFACE_RANGE),
+            location = MatchAfterImmediately(),
+        ),
+        opcode(Opcode.MOVE_RESULT_OBJECT, location = MatchAfterImmediately()),
+        checkCast(serviceType, location = MatchAfterImmediately()),
+    ),
 )
 
 internal object BrowseRequestBuilderFingerprint : Fingerprint(
