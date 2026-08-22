@@ -35,8 +35,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final String PLAYLISTS_TITLE_RESOURCE = "library_playlists_shelf_title";
     private static final String YTM_COLLECTION_BROWSE_ID_PREFIX = "VL";
     private static final String EPISODES_FOR_LATER_BROWSE_ID = "VLSE";
-    // Library artwork is 60-192 px, but the same CDN URL accepts a 544 px size.
-    private static final int PLAYLIST_ARTWORK_SIZE_PX = 544;
     private static final Executor REQUEST_EXECUTOR = Utils::runOnBackgroundThread;
     private static final Set<String> NATIVE_PLAYLISTS_NODE_MEDIA_IDS =
             ConcurrentHashMap.newKeySet();
@@ -273,13 +271,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     private static Uri optionalResponsiveRendererArtwork(Object renderer) {
         try {
-            Iterable<?> artworkUrls = authenticatedBrowseService.patch_getArtworkUrls(renderer);
-            if (artworkUrls == null) return null;
-            for (Object value : artworkUrls) {
-                String candidate = (String) value;
-                if (candidate.startsWith("https://")) return playlistArtworkUri(candidate);
-            }
-            return null;
+            return authenticatedBrowseService.patch_getArtwork(renderer);
         } catch (RuntimeException ignored) {
             return null;
         }
@@ -291,14 +283,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 mediaId, title, subtitle, null, null, iconUri, null, null);
         return new MediaBrowserCompat.MediaItem(
                 description, MediaBrowserCompat.MediaItem.FLAG_PLAYABLE);
-    }
-
-    private static Uri playlistArtworkUri(String url) {
-        Uri uri = Uri.parse(url);
-        if (!"yt3.googleusercontent.com".equals(uri.getHost())) return uri;
-        int optionsStart = url.lastIndexOf('=');
-        return optionsStart < 0 ? uri : Uri.parse(
-                url.substring(0, optionsStart + 1) + "s" + PLAYLIST_ARTWORK_SIZE_PX);
     }
 
     private static boolean isNativePlaylistsNode(Object loadResult) {
@@ -319,7 +303,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         boolean patch_isResponsiveRenderer(Object value);
         Object patch_getFirstEndpoint(Object renderer);
         Object patch_getSecondEndpoint(Object renderer);
-        Iterable<?> patch_getArtworkUrls(Object renderer);
+        Uri patch_getArtwork(Object renderer);
         CharSequence patch_getTitle(Object renderer);
         CharSequence patch_getSubtitle(Object renderer);
         String patch_getBrowseId(Object endpoint);

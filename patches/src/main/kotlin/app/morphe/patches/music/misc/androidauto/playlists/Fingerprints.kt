@@ -31,6 +31,7 @@ private const val BROWSE_SECTION_PRESENT_FLAG = 1L
 private const val MUSIC_RESPONSIVE_RENDERER_EXTENSION_FIELD_NUMBER = 161_429_595L
 private const val PLAYLIST_HEADER_EXTENSION_FIELD_NUMBER = 65_153_809L
 private const val PLAYLIST_ENDPOINT_EXTENSION_FIELD_NUMBER = 52_666_186L
+private const val PLAYLIST_ARTWORK_EXTENSION_FIELD_NUMBER = 164_480_666L
 
 internal val MEDIA_DESCRIPTION_CONSTRUCTOR_CALL = methodCall(
     definingClass = "Landroid/support/v4/media/MediaDescriptionCompat;",
@@ -245,10 +246,53 @@ internal object PlaylistContinuationResponseDecoderFingerprint : Fingerprint(
     parameters = listOf("L"),
 )
 
-internal fun artworkUrlsFingerprint(artworkType: String) = Fingerprint(
+internal object PlaylistArtworkExtensionFingerprint : Fingerprint(
+    name = "<clinit>",
+    returnType = "V",
+    parameters = emptyList(),
+    filters = listOf(
+        opcode(Opcode.CONST_CLASS),
+        literal(
+            PLAYLIST_ARTWORK_EXTENSION_FIELD_NUMBER,
+            location = MatchAfterWithin(2),
+        ),
+    ),
+)
+
+internal fun generatedExtensionDecoderFingerprint(artworkType: String) = Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
-    returnType = "Ljava/util/List;",
+    returnType = "Lcom/google/protobuf/MessageLite;",
     parameters = listOf(artworkType),
+    filters = listOf(
+        methodCall(
+            definingClass = "Lcom/google/protobuf/ExtensionRegistryLite;",
+            name = "getGeneratedRegistry",
+            parameters = emptyList(),
+            returnType = "Lcom/google/protobuf/ExtensionRegistryLite;",
+        ),
+    ),
+)
+
+internal fun androidAutoPlaylistArtworkFingerprint(
+    payloadFieldTypes: Set<String>,
+) = Fingerprint(
+    filters = listOf(MEDIA_DESCRIPTION_CONSTRUCTOR_CALL),
+    custom = { method, _ ->
+        if (method.parameterTypes.size != 1) return@Fingerprint false
+        val instructions = method.implementation?.instructions ?: return@Fingerprint false
+        val readFieldTypes = instructions
+            .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
+            .mapNotNull { instruction -> instruction.getReference<FieldReference>()?.type }
+            .toSet()
+        instructions.any { instruction ->
+            instruction.getReference<MethodReference>()?.let { reference ->
+                reference.returnType == "Landroid/net/Uri;" &&
+                    reference.parameterTypes.size == 1 &&
+                    reference.parameterTypes.single().toString() in payloadFieldTypes &&
+                    reference.parameterTypes.single().toString() in readFieldTypes
+            } == true
+        }
+    },
 )
 
 internal fun renderTextFingerprint(textType: String) = Fingerprint(

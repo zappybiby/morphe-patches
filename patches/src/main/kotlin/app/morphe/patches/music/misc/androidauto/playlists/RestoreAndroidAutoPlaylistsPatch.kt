@@ -75,7 +75,9 @@ private data class RendererResolution(
     val browseEndpointDecoderMethod: Method,
     val browseEndpointIdField: FieldReference,
     val artworkField: FieldReference,
-    val artworkUrlsMethod: Method,
+    val artworkPayloadField: FieldReference,
+    val artworkDecoderMethod: Method,
+    val artworkUriMethod: MethodReference,
     val renderTextMethod: Method,
     val titleField: FieldReference,
     val subtitleField: FieldReference,
@@ -563,7 +565,37 @@ private fun BytecodePatchContext.resolveRenderer(
     if (artworkField.type == titleField.type || titleField.type != subtitleField.type) {
         throw PatchException("Unexpected responsive renderer artwork, title, or subtitle fields")
     }
-    val artworkUrlsMethod = artworkUrlsFingerprint(artworkField.type).originalMethod
+    val artworkPayloadType = PlaylistArtworkExtensionFingerprint.originalMethod.instructions
+        .first { instruction -> instruction.opcode == Opcode.CONST_CLASS }
+        .getReference<TypeReference>()!!
+        .type
+    val artworkPayloadFields = classDefBy(artworkPayloadType).fields
+        .filter { field -> !AccessFlags.STATIC.isSet(field.accessFlags) }
+        .toList()
+    val artworkDecoderMethod = generatedExtensionDecoderFingerprint(
+        artworkField.type,
+    ).originalMethod
+    val nativeArtworkMethod = androidAutoPlaylistArtworkFingerprint(
+        artworkPayloadFields.map(FieldReference::getType).toSet(),
+    ).originalMethod
+    val nativeArtworkReadTypes = nativeArtworkMethod.instructions
+        .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
+        .mapNotNull { instruction -> instruction.getReference<FieldReference>()?.type }
+        .toSet()
+    val artworkUriMethod = nativeArtworkMethod.instructions
+        .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
+        .filter { method ->
+            method.returnType == "Landroid/net/Uri;" && method.parameterTypes.size == 1 &&
+                method.parameterTypes.single().toString() in nativeArtworkReadTypes
+        }
+        .single { method ->
+            artworkPayloadFields.any { field ->
+                field.type == method.parameterTypes.single().toString()
+            }
+        }
+    val artworkPayloadField = artworkPayloadFields.single { field ->
+        field.type == artworkUriMethod.parameterTypes.single().toString()
+    }
     val renderTextMethod = renderTextFingerprint(titleField.type).originalMethod
 
     val endpointContainerType = endpointMediaIdMethod.parameterTypes.single().toString()
@@ -587,7 +619,9 @@ private fun BytecodePatchContext.resolveRenderer(
         browseEndpointDecoderMethod = browseEndpointDecoderMethod,
         browseEndpointIdField = browseEndpointIdField,
         artworkField = artworkField,
-        artworkUrlsMethod = artworkUrlsMethod,
+        artworkPayloadField = artworkPayloadField,
+        artworkDecoderMethod = artworkDecoderMethod,
+        artworkUriMethod = artworkUriMethod,
         renderTextMethod = renderTextMethod,
         titleField = titleField,
         subtitleField = subtitleField,
@@ -962,15 +996,20 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
             )
         }
         addAccessMethod(
-            "patch_getArtworkUrls",
+            "patch_getArtwork",
             listOf(JAVA_OBJECT_CLASS),
-            JAVA_ITERABLE_CLASS,
+            "Landroid/net/Uri;",
             2,
             """
                 check-cast p1, ${renderer.responsiveRendererType}
                 iget-object p1, p1, ${renderer.artworkField}
                 if-eqz p1, :no_artwork
-                invoke-static { p1 }, ${renderer.artworkUrlsMethod}
+                invoke-static { p1 }, ${renderer.artworkDecoderMethod}
+                move-result-object p1
+                if-eqz p1, :no_artwork
+                check-cast p1, ${renderer.artworkPayloadField.definingClass}
+                iget-object p1, p1, ${renderer.artworkPayloadField}
+                invoke-static { p1 }, ${renderer.artworkUriMethod}
                 move-result-object p1
                 return-object p1
                 :no_artwork
