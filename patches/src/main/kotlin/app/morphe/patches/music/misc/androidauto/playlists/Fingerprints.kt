@@ -22,12 +22,15 @@ import app.morphe.util.getReference
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 
 private const val BROWSE_CONTENTS_EXTENSION_FIELD_NUMBER = 58_173_949L
 private const val BROWSE_SECTION_EXTENSION_FIELD_NUMBER = 58_174_010L
 private const val BROWSE_SECTION_PRESENT_FLAG = 1L
 private const val MUSIC_RESPONSIVE_RENDERER_EXTENSION_FIELD_NUMBER = 161_429_595L
+private const val PLAYLIST_HEADER_EXTENSION_FIELD_NUMBER = 65_153_809L
+private const val PLAYLIST_ENDPOINT_EXTENSION_FIELD_NUMBER = 52_666_186L
 
 internal val MEDIA_DESCRIPTION_CONSTRUCTOR_CALL = methodCall(
     definingClass = "Landroid/support/v4/media/MediaDescriptionCompat;",
@@ -263,21 +266,117 @@ internal fun browseEndpointDecoderFingerprint(
     parameters = listOf(endpointType),
 )
 
-internal object PlaylistPlaybackMediaIdFingerprint : Fingerprint(
+internal object NativeEndpointMediaIdFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
     returnType = "Ljava/lang/String;",
-    parameters = listOf("Ljava/lang/String;"),
+    parameters = listOf("L"),
+    custom = { method, _ ->
+        val endpointType = method.parameterTypes.single().toString()
+        val endpointStores = method.instructions
+            .filter { instruction -> instruction.opcode == Opcode.IPUT_OBJECT }
+            .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+            .filter { field -> field.type == endpointType }
+            .distinct()
+        endpointType != "Ljava/lang/String;" && endpointStores.size == 1 &&
+            endpointStores.single().definingClass.let { wrapperType ->
+                method.instructions.any { instruction ->
+                    instruction.getReference<MethodReference>()
+                        ?.let { reference ->
+                            reference.parameterTypes.map(CharSequence::toString) ==
+                                listOf(wrapperType) &&
+                                reference.returnType == "Ljava/lang/String;"
+                        } == true
+                }
+            }
+    },
+)
+
+internal fun playlistHeaderExtensionFingerprint(endpointType: String) = Fingerprint(
+    name = "<clinit>",
+    returnType = "V",
+    parameters = emptyList(),
+    filters = listOf(literal(PLAYLIST_HEADER_EXTENSION_FIELD_NUMBER)),
+    custom = { method, _ ->
+        val containingType = method.instructions
+            .filter { instruction -> instruction.opcode == Opcode.SGET_OBJECT }
+            .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+            .firstOrNull { field -> field.definingClass == field.type }
+            ?.type
+        containingType != null && containingType != endpointType
+    },
+)
+
+internal fun playlistEndpointExtensionFingerprint(endpointType: String) = Fingerprint(
+    name = "<clinit>",
+    returnType = "V",
+    parameters = emptyList(),
+    filters = listOf(literal(PLAYLIST_ENDPOINT_EXTENSION_FIELD_NUMBER)),
+    custom = { method, _ ->
+        method.instructions
+            .filter { instruction -> instruction.opcode == Opcode.SGET_OBJECT }
+            .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+            .any { field -> field.definingClass == field.type && field.type == endpointType }
+    },
+)
+
+internal fun playlistEndpointIdFieldFingerprint(
+    endpointType: String,
+    playlistEndpointType: String,
+) = Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
+    returnType = "Ljava/lang/String;",
+    parameters = listOf(endpointType),
+    custom = { method, _ ->
+        method.instructions.any { instruction ->
+            instruction.opcode == Opcode.IGET_OBJECT &&
+                instruction.getReference<FieldReference>()?.let { field ->
+                    field.definingClass == playlistEndpointType &&
+                        field.type == "Ljava/lang/String;"
+                } == true
+        }
+    },
+)
+
+internal fun playlistHeaderDecoderFingerprint(
+    containingType: String,
+    headerType: String,
+    descriptorField: FieldReference,
+) = Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
+    returnType = headerType,
+    parameters = listOf("Z", containingType),
     filters = listOf(
-        methodCall(
-            opcode = Opcode.INVOKE_STATIC,
-            parameters = listOf("Ljava/lang/String;", "Ljava/lang/String;", "Z", "Z"),
-            returnType = "L",
-        ),
-        methodCall(
-            opcode = Opcode.INVOKE_STATIC,
-            parameters = listOf("L"),
-            returnType = "Ljava/lang/String;",
-            location = MatchAfterWithin(3),
+        fieldAccess(
+            opcode = Opcode.SGET_OBJECT,
+            definingClass = descriptorField.definingClass,
+            name = descriptorField.name,
+            type = descriptorField.type,
         ),
     ),
+)
+
+internal fun playlistHeaderPlayEndpointFingerprint(
+    headerType: String,
+    endpointType: String,
+) = Fingerprint(
+    returnType = "V",
+    parameters = listOf("L"),
+    custom = { method, _ ->
+        method.implementation?.instructions?.toList()?.let { instructions ->
+            val endpointReads = instructions.mapIndexedNotNull { index, instruction ->
+                instruction.getReference<FieldReference>()?.takeIf { field ->
+                    instruction.opcode == Opcode.IGET_OBJECT &&
+                        field.definingClass == headerType && field.type == endpointType &&
+                        instructions.drop(index + 1).take(4).any { nearby ->
+                            nearby.opcode == Opcode.IPUT_OBJECT &&
+                                nearby.getReference<FieldReference>()?.let { target ->
+                                    target.definingClass != headerType && target.type == endpointType
+                                } == true
+                        }
+                }
+            }
+                .distinct()
+            endpointReads.size == 1
+        } == true
+    },
 )

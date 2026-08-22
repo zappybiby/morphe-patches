@@ -58,6 +58,7 @@ private const val MEDIA_DESCRIPTION_TITLE_REGISTER_OFFSET = 2
 private const val RESPONSIVE_RENDERER_ARTWORK_FIELD_NAME = "c"
 private const val RESPONSIVE_RENDERER_TITLE_FIELD_NAME = "g"
 private const val RESPONSIVE_RENDERER_SUBTITLE_FIELD_NAME = "h"
+private const val BROWSE_RESPONSE_HEADER_CONTENT_FIELD_NAME = "q"
 private const val JAVA_OBJECT_CLASS = "Ljava/lang/Object;"
 private const val JAVA_STRING_CLASS = "Ljava/lang/String;"
 private const val JAVA_CHAR_SEQUENCE_CLASS = "Ljava/lang/CharSequence;"
@@ -70,7 +71,7 @@ private const val LISTENABLE_FUTURE_CLASS =
 private data class RendererResolution(
     val responsiveRendererType: String,
     val endpointFields: List<FieldReference>,
-    val playlistMediaIdMethod: Method,
+    val endpointMediaIdMethod: Method,
     val browseEndpointDecoderMethod: Method,
     val browseEndpointIdField: FieldReference,
     val artworkField: FieldReference,
@@ -78,6 +79,22 @@ private data class RendererResolution(
     val renderTextMethod: Method,
     val titleField: FieldReference,
     val subtitleField: FieldReference,
+)
+
+private data class PlaylistPlaybackResolution(
+    val responsePayloadField: FieldReference,
+    val headerContentField: FieldReference,
+    val headerDecoderMethod: Method,
+    val playEndpointField: FieldReference,
+    val playlistEndpointDescriptorField: FieldReference,
+    val playlistEndpointType: String,
+    val playlistIdField: FieldReference,
+    val getExtensionMethod: Method,
+    val toBuilderMethod: Method,
+    val builderInstanceField: FieldReference,
+    val buildMethod: Method,
+    val endpointBuilderType: String,
+    val setExtensionMethod: Method,
 )
 
 private data class BrowseResolution(
@@ -97,6 +114,7 @@ private data class BrowseResponseResolution(
     val continuationDecoderMethod: Method,
     val continuationResponseDecoderMethod: Method,
     val continuationResponsePayloadMethod: Method,
+    val playlistPlayback: PlaylistPlaybackResolution,
 )
 
 private data class DeliveryResolution(
@@ -241,9 +259,10 @@ private fun BytecodePatchContext.injectNativePlaylistsNodeCapture() {
 }
 
 private fun BytecodePatchContext.resolveRuntimeHooks(): ResolvedRuntimeHooks {
-    val browseResponse = resolveBrowseResponse()
+    val endpointMediaIdMethod = NativeEndpointMediaIdFingerprint.originalMethod
+    val browseResponse = resolveBrowseResponse(endpointMediaIdMethod)
     val browse = resolveBrowse(browseResponse.continuationDecoderMethod)
-    val renderer = resolveRenderer(browse.endpointIdField)
+    val renderer = resolveRenderer(browse.endpointIdField, endpointMediaIdMethod)
     val delivery = resolveDelivery()
     val startup = resolveStartup(
         delivery.controllerType,
@@ -287,7 +306,9 @@ private fun BytecodePatchContext.resolveStartup(
     )
 }
 
-private fun BytecodePatchContext.resolveBrowseResponse(): BrowseResponseResolution {
+private fun BytecodePatchContext.resolveBrowseResponse(
+    endpointMediaIdMethod: Method,
+): BrowseResponseResolution {
     // Use YTM's own methods to turn the Browse response into sections and playlist rows.
     val responseContentsMethod = BrowseResponseContentsFingerprint.originalMethod
     val contentMapperType = BrowseResponseContentsFingerprint.instructionMatches.last()
@@ -326,6 +347,10 @@ private fun BytecodePatchContext.resolveBrowseResponse(): BrowseResponseResoluti
             method.parameterTypes.isEmpty() &&
             method.returnType == continuationResponsePayloadType
     }
+    val playlistPlayback = resolvePlaylistPlayback(
+        responseContentsMethod,
+        endpointMediaIdMethod,
+    )
 
     return BrowseResponseResolution(
         responseContentsMethod,
@@ -335,11 +360,187 @@ private fun BytecodePatchContext.resolveBrowseResponse(): BrowseResponseResoluti
         continuationDecoderMethod,
         continuationResponseDecoderMethod,
         continuationResponsePayloadMethod,
+        playlistPlayback,
+    )
+}
+
+private fun BytecodePatchContext.resolvePlaylistPlayback(
+    responseContentsMethod: Method,
+    endpointMediaIdMethod: Method,
+): PlaylistPlaybackResolution {
+    val endpointType = endpointMediaIdMethod.parameterTypes.single().toString()
+    val headerExtensionFingerprint = playlistHeaderExtensionFingerprint(endpointType)
+    val headerExtensionMethod = headerExtensionFingerprint.originalMethod
+    val headerType = headerExtensionMethod.instructions
+        .first { instruction -> instruction.opcode == Opcode.CONST_CLASS }
+        .getReference<TypeReference>()!!
+        .type
+    val containingType = headerExtensionMethod.instructions
+        .asSequence()
+        .filter { instruction -> instruction.opcode == Opcode.SGET_OBJECT }
+        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+        .first { field -> field.definingClass == field.type }
+        .type
+    val descriptorField = headerExtensionMethod.instructions
+        .first { instruction -> instruction.opcode == Opcode.SPUT_OBJECT }
+        .getReference<FieldReference>()!!
+    val headerDecoderMethod = playlistHeaderDecoderFingerprint(
+        containingType,
+        headerType,
+        descriptorField,
+    ).originalMethod
+    val playEndpointField = playlistHeaderPlayEndpointFingerprint(
+        headerType,
+        endpointType,
+    ).matchAll()
+        .flatMap { match ->
+            val instructions = match.originalMethod.instructions.toList()
+            instructions.mapIndexedNotNull { index, instruction ->
+                instruction.getReference<FieldReference>()?.takeIf { field ->
+                    instruction.opcode == Opcode.IGET_OBJECT &&
+                        field.definingClass == headerType && field.type == endpointType &&
+                        instructions.drop(index + 1).take(4).any { nearby ->
+                            nearby.opcode == Opcode.IPUT_OBJECT &&
+                                nearby.getReference<FieldReference>()?.let { target ->
+                                    target.definingClass != headerType && target.type == endpointType
+                                } == true
+                        }
+                }
+            }
+        }
+        .distinct()
+        .single()
+
+    val playlistEndpointExtensionMethod = playlistEndpointExtensionFingerprint(
+        endpointType,
+    ).originalMethod
+    val playlistEndpointType = playlistEndpointExtensionMethod.instructions
+        .first { instruction -> instruction.opcode == Opcode.CONST_CLASS }
+        .getReference<TypeReference>()!!
+        .type
+    val playlistEndpointDescriptorField = playlistEndpointExtensionMethod.instructions
+        .first { instruction -> instruction.opcode == Opcode.SPUT_OBJECT }
+        .getReference<FieldReference>()!!
+    val playlistIdField = playlistEndpointIdFieldFingerprint(
+        endpointType,
+        playlistEndpointType,
+    ).matchAll()
+        .flatMap { match ->
+            match.originalMethod.instructions.mapNotNull { instruction ->
+                instruction.getReference<FieldReference>()
+            }
+        }
+        .filter { field ->
+            field.definingClass == playlistEndpointType && field.type == JAVA_STRING_CLASS
+        }
+        .distinct()
+        .single()
+
+    fun methodsInHierarchy(startType: String) = sequence {
+        var type: String? = startType
+        while (type != null) {
+            val classDef = classDefByOrNull(type) ?: break
+            yieldAll(classDef.methods)
+            type = classDef.superclass
+        }
+    }
+
+    val toBuilderMethod = methodsInHierarchy(endpointType).single { method ->
+        method.name == "toBuilder" &&
+            !AccessFlags.STATIC.isSet(method.accessFlags) &&
+            method.parameterTypes.isEmpty() &&
+            classDefByOrNull(method.returnType)?.fields?.any { field ->
+                AccessFlags.PUBLIC.isSet(field.accessFlags) &&
+                    !AccessFlags.STATIC.isSet(field.accessFlags) &&
+                    field.type == method.definingClass
+            } == true
+    }
+    val builderType = toBuilderMethod.returnType
+    val builderInstanceField = classDefBy(builderType).fields.single { field ->
+        AccessFlags.PUBLIC.isSet(field.accessFlags) &&
+            !AccessFlags.STATIC.isSet(field.accessFlags) &&
+            field.type == toBuilderMethod.definingClass
+    }
+    val buildMethod = classDefBy(builderType).methods.single { method ->
+        method.name == "build" && method.parameterTypes.isEmpty() &&
+            method.returnType == builderInstanceField.type
+    }
+    fun isSubclassOf(type: String, parentType: String): Boolean {
+        var currentType: String? = type
+        while (currentType != null) {
+            if (currentType == parentType) return true
+            currentType = classDefByOrNull(currentType)?.superclass
+        }
+        return false
+    }
+    val endpointBuilderType = classDefBy(endpointType).methods
+        .single { method -> method.name == "dynamicMethod" }
+        .instructions
+        .asSequence()
+        .filter { instruction -> instruction.opcode == Opcode.NEW_INSTANCE }
+        .mapNotNull { instruction -> instruction.getReference<TypeReference>()?.type }
+        .single { type -> type != builderType && isSubclassOf(type, builderType) }
+    val extensionBuilderMethods = methodsInHierarchy(endpointBuilderType)
+        .filter { method ->
+            AccessFlags.PUBLIC.isSet(method.accessFlags) &&
+                !AccessFlags.STATIC.isSet(method.accessFlags)
+        }
+        .toList()
+    val getExtensionMethod = extensionBuilderMethods.single { getMethod ->
+        getMethod.returnType == JAVA_OBJECT_CLASS &&
+            getMethod.parameterTypes.size == 1 &&
+            extensionBuilderMethods.any { setMethod ->
+                setMethod.returnType == "V" &&
+                    setMethod.parameterTypes.map(CharSequence::toString) == listOf(
+                        getMethod.parameterTypes.single().toString(),
+                        JAVA_OBJECT_CLASS,
+                    )
+            }
+    }
+    val setExtensionMethod = extensionBuilderMethods.single { method ->
+        method.returnType == "V" &&
+            method.parameterTypes.map(CharSequence::toString) == listOf(
+                getExtensionMethod.parameterTypes.single().toString(),
+                JAVA_OBJECT_CLASS,
+            )
+    }
+
+    val responsePayloadField = responseContentsMethod.instructions
+        .asSequence()
+        .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
+        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+        .filter { field ->
+            field.definingClass == responseContentsMethod.definingClass &&
+                field.type != responseContentsMethod.returnType
+        }
+        .distinct()
+        .single()
+    val headerContentField = classDefBy(responsePayloadField.type).fields.single { field ->
+        !AccessFlags.STATIC.isSet(field.accessFlags) &&
+            field.name == BROWSE_RESPONSE_HEADER_CONTENT_FIELD_NAME &&
+            field.type == containingType
+    }
+
+    return PlaylistPlaybackResolution(
+        responsePayloadField,
+        headerContentField,
+        headerDecoderMethod,
+        playEndpointField,
+        playlistEndpointDescriptorField,
+        playlistEndpointType,
+        playlistIdField,
+        getExtensionMethod,
+        toBuilderMethod,
+        builderInstanceField,
+        buildMethod,
+        endpointBuilderType,
+        setExtensionMethod,
     )
 }
 
 private fun BytecodePatchContext.resolveRenderer(
     browseEndpointIdField: FieldReference,
+    endpointMediaIdMethod: Method,
 ): RendererResolution {
     val responsiveRendererType = MusicResponsiveRendererExtensionFingerprint
         .instructionMatches
@@ -365,13 +566,7 @@ private fun BytecodePatchContext.resolveRenderer(
     val artworkUrlsMethod = artworkUrlsFingerprint(artworkField.type).originalMethod
     val renderTextMethod = renderTextFingerprint(titleField.type).originalMethod
 
-    val playlistMediaIdMethod = PlaylistPlaybackMediaIdFingerprint.originalMethod
-    val endpointContainerType = PlaylistPlaybackMediaIdFingerprint.instructionMatches
-        .first()
-        .instruction
-        .getReference<MethodReference>()
-        ?.returnType
-        ?: throw PatchException("Could not resolve the playlist action type")
+    val endpointContainerType = endpointMediaIdMethod.parameterTypes.single().toString()
     val endpointFields = responsiveRendererFields
         .filter { field ->
             !AccessFlags.STATIC.isSet(field.accessFlags) && field.type == endpointContainerType
@@ -388,7 +583,7 @@ private fun BytecodePatchContext.resolveRenderer(
     return RendererResolution(
         responsiveRendererType = responsiveRendererType,
         endpointFields = endpointFields,
-        playlistMediaIdMethod = playlistMediaIdMethod,
+        endpointMediaIdMethod = endpointMediaIdMethod,
         browseEndpointDecoderMethod = browseEndpointDecoderMethod,
         browseEndpointIdField = browseEndpointIdField,
         artworkField = artworkField,
@@ -548,6 +743,7 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
     val browse = runtimeHooks.browse
     val response = runtimeHooks.browseResponse
     val delivery = runtimeHooks.delivery
+    val playlistPlayback = response.playlistPlayback
 
     // Make YTM's response decoders public so the injected access methods can call them.
     mutableClassDefBy(response.playlistRenderersMethod.definingClass).apply {
@@ -609,13 +805,45 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
             """,
         )
         addAccessMethod(
-            "patch_playlistMediaId",
-            listOf(JAVA_STRING_CLASS),
+            "patch_getPlaylistPlaybackMediaId",
+            listOf(JAVA_OBJECT_CLASS, JAVA_STRING_CLASS),
             JAVA_STRING_CLASS,
-            2,
+            6,
             """
-                invoke-static { p1 }, ${renderer.playlistMediaIdMethod}
+                check-cast p1, ${playlistPlayback.responsePayloadField.definingClass}
+                iget-object p1, p1, ${playlistPlayback.responsePayloadField}
+                iget-object p1, p1, ${playlistPlayback.headerContentField}
+                const/4 v0, 0x1
+                invoke-static { v0, p1 }, ${playlistPlayback.headerDecoderMethod}
                 move-result-object p1
+                if-eqz p1, :no_playback_endpoint
+                iget-object p1, p1, ${playlistPlayback.playEndpointField}
+                if-eqz p1, :no_playback_endpoint
+
+                invoke-virtual { p1 }, ${playlistPlayback.toBuilderMethod}
+                move-result-object v0
+                check-cast v0, ${playlistPlayback.endpointBuilderType}
+                sget-object v1, ${playlistPlayback.playlistEndpointDescriptorField}
+                invoke-virtual { v0, v1 }, ${playlistPlayback.getExtensionMethod}
+                move-result-object p1
+                check-cast p1, ${playlistPlayback.playlistEndpointType}
+                invoke-virtual { p1 }, ${playlistPlayback.toBuilderMethod}
+                move-result-object p1
+                iget-object v2, p1, ${playlistPlayback.builderInstanceField}
+                check-cast v2, ${playlistPlayback.playlistEndpointType}
+                iput-object p2, v2, ${playlistPlayback.playlistIdField}
+                invoke-virtual { p1 }, ${playlistPlayback.buildMethod}
+                move-result-object p1
+
+                invoke-virtual { v0, v1, p1 }, ${playlistPlayback.setExtensionMethod}
+                invoke-virtual { v0 }, ${playlistPlayback.buildMethod}
+                move-result-object p1
+                check-cast p1, ${renderer.endpointMediaIdMethod.parameterTypes.single()}
+                invoke-static { p1 }, ${renderer.endpointMediaIdMethod}
+                move-result-object p1
+                return-object p1
+                :no_playback_endpoint
+                const/4 p1, 0x0
                 return-object p1
             """,
         )
