@@ -426,12 +426,13 @@ private fun BytecodePatchContext.resolveDelivery(): DeliveryResolution {
                 fields[1].type == JAVA_STRING_CLASS
         }
 
+    // YTM may use a one-argument wrapper or call the two-argument delivery method directly.
     val resultDeliveryMethod = mediaIdValidationMethod.instructions.asSequence()
         .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
         .first { reference ->
             val parameters = reference.parameterTypes.map(CharSequence::toString)
             reference.definingClass == loadResultType && reference.returnType == "V" &&
-                parameters.size == 2 &&
+                parameters.size in 1..2 &&
                 parameters.firstOrNull() == "Ljava/util/List;" &&
                 parameters.drop(1).all { it.startsWith("L") || it.startsWith("[") }
         }
@@ -668,17 +669,26 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
             2,
             mediaIdInstructions,
         )
+        val extraDeliveryParameter = delivery.resultDeliveryMethod.parameterTypes.size == 2
         addAccessMethod(
             "patch_sendResult",
             listOf(JAVA_OBJECT_CLASS, JAVA_LIST_CLASS),
             "V",
-            4,
-            """
-                const/4 v0, 0x0
-                check-cast p1, ${delivery.loadResultType}
-                invoke-virtual { p1, p2, v0 }, ${delivery.resultDeliveryMethod}
-                return-void
-            """,
+            if (extraDeliveryParameter) 4 else 3,
+            if (extraDeliveryParameter) {
+                """
+                    const/4 v0, 0x0
+                    check-cast p1, ${delivery.loadResultType}
+                    invoke-virtual { p1, p2, v0 }, ${delivery.resultDeliveryMethod}
+                    return-void
+                """
+            } else {
+                """
+                    check-cast p1, ${delivery.loadResultType}
+                    invoke-virtual { p1, p2 }, ${delivery.resultDeliveryMethod}
+                    return-void
+                """
+            },
         )
     }
 }
