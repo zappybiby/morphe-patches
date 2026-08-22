@@ -88,15 +88,6 @@ private data class PlaylistPlaybackResolution(
     val headerContentField: FieldReference,
     val headerDecoderMethod: Method,
     val playEndpointField: FieldReference,
-    val playlistEndpointDescriptorField: FieldReference,
-    val playlistEndpointType: String,
-    val playlistIdField: FieldReference,
-    val getExtensionMethod: Method,
-    val toBuilderMethod: Method,
-    val builderInstanceField: FieldReference,
-    val buildMethod: Method,
-    val endpointBuilderType: String,
-    val setExtensionMethod: Method,
 )
 
 private data class BrowseResolution(
@@ -113,6 +104,7 @@ private data class BrowseResponseResolution(
     val contentSectionMethod: Method,
     val sectionItemMethods: List<Method>,
     val playlistRenderersMethod: Method,
+    val trackRenderersMethod: Method,
     val continuationDecoderMethod: Method,
     val continuationResponseDecoderMethod: Method,
     val continuationResponsePayloadMethod: Method,
@@ -329,6 +321,15 @@ private fun BytecodePatchContext.resolveBrowseResponse(
     ).matchAll(2..2)
         .map { match -> match.originalMethod }
     val playlistRenderersMethod = PlaylistRendererDecoderFingerprint.originalMethod
+    val responsiveRendererType = MusicResponsiveRendererExtensionFingerprint
+        .instructionMatches
+        .first()
+        .instruction
+        .getReference<TypeReference>()!!
+        .type
+    val trackRenderersMethod = trackRendererDecoderFingerprint(
+        responsiveRendererType,
+    ).originalMethod
     val playlistContainerType = playlistRenderersMethod.parameterTypes.single().toString()
     val continuationDecoderMethod = classDefBy(playlistRenderersMethod.definingClass).methods
         .single { method ->
@@ -359,6 +360,7 @@ private fun BytecodePatchContext.resolveBrowseResponse(
         contentSectionMethod,
         sectionItemMethods,
         playlistRenderersMethod,
+        trackRenderersMethod,
         continuationDecoderMethod,
         continuationResponseDecoderMethod,
         continuationResponsePayloadMethod,
@@ -413,100 +415,6 @@ private fun BytecodePatchContext.resolvePlaylistPlayback(
         .distinct()
         .single()
 
-    val playlistEndpointExtensionMethod = playlistEndpointExtensionFingerprint(
-        endpointType,
-    ).originalMethod
-    val playlistEndpointType = playlistEndpointExtensionMethod.instructions
-        .first { instruction -> instruction.opcode == Opcode.CONST_CLASS }
-        .getReference<TypeReference>()!!
-        .type
-    val playlistEndpointDescriptorField = playlistEndpointExtensionMethod.instructions
-        .first { instruction -> instruction.opcode == Opcode.SPUT_OBJECT }
-        .getReference<FieldReference>()!!
-    val playlistIdField = playlistEndpointIdFieldFingerprint(
-        endpointType,
-        playlistEndpointType,
-    ).matchAll()
-        .flatMap { match ->
-            match.originalMethod.instructions.mapNotNull { instruction ->
-                instruction.getReference<FieldReference>()
-            }
-        }
-        .filter { field ->
-            field.definingClass == playlistEndpointType && field.type == JAVA_STRING_CLASS
-        }
-        .distinct()
-        .single()
-
-    fun methodsInHierarchy(startType: String) = sequence {
-        var type: String? = startType
-        while (type != null) {
-            val classDef = classDefByOrNull(type) ?: break
-            yieldAll(classDef.methods)
-            type = classDef.superclass
-        }
-    }
-
-    val toBuilderMethod = methodsInHierarchy(endpointType).single { method ->
-        method.name == "toBuilder" &&
-            !AccessFlags.STATIC.isSet(method.accessFlags) &&
-            method.parameterTypes.isEmpty() &&
-            classDefByOrNull(method.returnType)?.fields?.any { field ->
-                AccessFlags.PUBLIC.isSet(field.accessFlags) &&
-                    !AccessFlags.STATIC.isSet(field.accessFlags) &&
-                    field.type == method.definingClass
-            } == true
-    }
-    val builderType = toBuilderMethod.returnType
-    val builderInstanceField = classDefBy(builderType).fields.single { field ->
-        AccessFlags.PUBLIC.isSet(field.accessFlags) &&
-            !AccessFlags.STATIC.isSet(field.accessFlags) &&
-            field.type == toBuilderMethod.definingClass
-    }
-    val buildMethod = classDefBy(builderType).methods.single { method ->
-        method.name == "build" && method.parameterTypes.isEmpty() &&
-            method.returnType == builderInstanceField.type
-    }
-    fun isSubclassOf(type: String, parentType: String): Boolean {
-        var currentType: String? = type
-        while (currentType != null) {
-            if (currentType == parentType) return true
-            currentType = classDefByOrNull(currentType)?.superclass
-        }
-        return false
-    }
-    val endpointBuilderType = classDefBy(endpointType).methods
-        .single { method -> method.name == "dynamicMethod" }
-        .instructions
-        .asSequence()
-        .filter { instruction -> instruction.opcode == Opcode.NEW_INSTANCE }
-        .mapNotNull { instruction -> instruction.getReference<TypeReference>()?.type }
-        .single { type -> type != builderType && isSubclassOf(type, builderType) }
-    val extensionBuilderMethods = methodsInHierarchy(endpointBuilderType)
-        .filter { method ->
-            AccessFlags.PUBLIC.isSet(method.accessFlags) &&
-                !AccessFlags.STATIC.isSet(method.accessFlags)
-        }
-        .toList()
-    val getExtensionMethod = extensionBuilderMethods.single { getMethod ->
-        getMethod.returnType == JAVA_OBJECT_CLASS &&
-            getMethod.parameterTypes.size == 1 &&
-            extensionBuilderMethods.any { setMethod ->
-                setMethod.returnType == "V" &&
-                    setMethod.parameterTypes.map(CharSequence::toString) == listOf(
-                        getMethod.parameterTypes.single().toString(),
-                        JAVA_OBJECT_CLASS,
-                    )
-            }
-    }
-    val setExtensionMethod = extensionBuilderMethods.single { method ->
-        method.returnType == "V" &&
-            method.parameterTypes.map(CharSequence::toString) == listOf(
-                getExtensionMethod.parameterTypes.single().toString(),
-                JAVA_OBJECT_CLASS,
-            )
-    }
-
     val responsePayloadField = responseContentsMethod.instructions
         .asSequence()
         .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
@@ -528,15 +436,6 @@ private fun BytecodePatchContext.resolvePlaylistPlayback(
         headerContentField,
         headerDecoderMethod,
         playEndpointField,
-        playlistEndpointDescriptorField,
-        playlistEndpointType,
-        playlistIdField,
-        getExtensionMethod,
-        toBuilderMethod,
-        builderInstanceField,
-        buildMethod,
-        endpointBuilderType,
-        setExtensionMethod,
     )
 }
 
@@ -780,13 +679,14 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
     val playlistPlayback = response.playlistPlayback
 
     // Make YTM's response decoders public so the injected access methods can call them.
-    mutableClassDefBy(response.playlistRenderersMethod.definingClass).apply {
-        listOf(response.playlistRenderersMethod, response.continuationDecoderMethod)
-            .forEach { method ->
-                findMutableMethodOf(method).apply {
-                    accessFlags = accessFlags.toPublicAccessFlags()
-                }
-            }
+    listOf(
+        response.playlistRenderersMethod,
+        response.trackRenderersMethod,
+        response.continuationDecoderMethod,
+    ).forEach { method ->
+        mutableClassDefBy(method.definingClass).findMutableMethodOf(method).apply {
+            accessFlags = accessFlags.toPublicAccessFlags()
+        }
     }
 
     // The native decoder does not read its receiver. Keep the same register layout by
@@ -840,9 +740,9 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
         )
         addAccessMethod(
             "patch_getPlaylistPlaybackMediaId",
-            listOf(JAVA_OBJECT_CLASS, JAVA_STRING_CLASS),
+            listOf(JAVA_OBJECT_CLASS),
             JAVA_STRING_CLASS,
-            6,
+            3,
             """
                 check-cast p1, ${playlistPlayback.responsePayloadField.definingClass}
                 iget-object p1, p1, ${playlistPlayback.responsePayloadField}
@@ -853,26 +753,6 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
                 if-eqz p1, :no_playback_endpoint
                 iget-object p1, p1, ${playlistPlayback.playEndpointField}
                 if-eqz p1, :no_playback_endpoint
-
-                invoke-virtual { p1 }, ${playlistPlayback.toBuilderMethod}
-                move-result-object v0
-                check-cast v0, ${playlistPlayback.endpointBuilderType}
-                sget-object v1, ${playlistPlayback.playlistEndpointDescriptorField}
-                invoke-virtual { v0, v1 }, ${playlistPlayback.getExtensionMethod}
-                move-result-object p1
-                check-cast p1, ${playlistPlayback.playlistEndpointType}
-                invoke-virtual { p1 }, ${playlistPlayback.toBuilderMethod}
-                move-result-object p1
-                iget-object v2, p1, ${playlistPlayback.builderInstanceField}
-                check-cast v2, ${playlistPlayback.playlistEndpointType}
-                iput-object p2, v2, ${playlistPlayback.playlistIdField}
-                invoke-virtual { p1 }, ${playlistPlayback.buildMethod}
-                move-result-object p1
-
-                invoke-virtual { v0, v1, p1 }, ${playlistPlayback.setExtensionMethod}
-                invoke-virtual { v0 }, ${playlistPlayback.buildMethod}
-                move-result-object p1
-                check-cast p1, ${renderer.endpointMediaIdMethod.parameterTypes.single()}
                 invoke-static { p1 }, ${renderer.endpointMediaIdMethod}
                 move-result-object p1
                 return-object p1
@@ -933,6 +813,26 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
                 move-result-object p1
                 return-object p1
                 :not_playlist_container
+                const/4 p1, 0x0
+                return-object p1
+            """,
+        )
+        val trackContainerType = response.trackRenderersMethod
+            .parameterTypes.first().toString()
+        addAccessMethod(
+            "patch_getTrackRenderers",
+            listOf(JAVA_OBJECT_CLASS),
+            JAVA_ITERABLE_CLASS,
+            3,
+            """
+                instance-of v0, p1, $trackContainerType
+                if-eqz v0, :not_track_container
+                check-cast p1, $trackContainerType
+                const/4 v0, 0x0
+                invoke-static { p1, v0 }, ${response.trackRenderersMethod}
+                move-result-object p1
+                return-object p1
+                :not_track_container
                 const/4 p1, 0x0
                 return-object p1
             """,
@@ -1027,6 +927,18 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
                 invoke-static { p1 }, ${renderer.browseEndpointDecoderMethod}
                 move-result-object p1
                 iget-object p1, p1, ${renderer.browseEndpointIdField}
+                return-object p1
+            """,
+        )
+        addAccessMethod(
+            "patch_getEndpointMediaId",
+            listOf(JAVA_OBJECT_CLASS),
+            JAVA_STRING_CLASS,
+            2,
+            """
+                check-cast p1, ${renderer.endpointMediaIdMethod.parameterTypes.single()}
+                invoke-static { p1 }, ${renderer.endpointMediaIdMethod}
+                move-result-object p1
                 return-object p1
             """,
         )

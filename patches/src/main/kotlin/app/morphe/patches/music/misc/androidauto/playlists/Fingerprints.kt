@@ -30,7 +30,6 @@ private const val BROWSE_SECTION_EXTENSION_FIELD_NUMBER = 58_174_010L
 private const val BROWSE_SECTION_PRESENT_FLAG = 1L
 private const val MUSIC_RESPONSIVE_RENDERER_EXTENSION_FIELD_NUMBER = 161_429_595L
 private const val PLAYLIST_HEADER_EXTENSION_FIELD_NUMBER = 65_153_809L
-private const val PLAYLIST_ENDPOINT_EXTENSION_FIELD_NUMBER = 52_666_186L
 private const val PLAYLIST_ARTWORK_EXTENSION_FIELD_NUMBER = 164_480_666L
 
 internal val MEDIA_DESCRIPTION_CONSTRUCTOR_CALL = methodCall(
@@ -234,6 +233,19 @@ internal object PlaylistRendererDecoderFingerprint : Fingerprint(
     ),
 )
 
+internal fun trackRendererDecoderFingerprint(responsiveRendererType: String) = Fingerprint(
+    accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.STATIC),
+    returnType = "Ljava/util/List;",
+    parameters = listOf("L", "Z"),
+    filters = listOf(opcode(Opcode.CHECK_CAST)),
+    custom = { method, _ ->
+        method.instructions.any { instruction ->
+            instruction.opcode == Opcode.CHECK_CAST &&
+                instruction.getReference<TypeReference>()?.type == responsiveRendererType
+        }
+    },
+)
+
 internal object PlaylistContinuationResponseDecoderFingerprint : Fingerprint(
     classFingerprint = PlaylistRendererDecoderClassFingerprint,
     accessFlags = listOf(
@@ -347,37 +359,6 @@ internal fun playlistHeaderExtensionFingerprint(endpointType: String) = Fingerpr
             .firstOrNull { field -> field.definingClass == field.type }
             ?.type
         containingType != null && containingType != endpointType
-    },
-)
-
-internal fun playlistEndpointExtensionFingerprint(endpointType: String) = Fingerprint(
-    name = "<clinit>",
-    returnType = "V",
-    parameters = emptyList(),
-    filters = listOf(literal(PLAYLIST_ENDPOINT_EXTENSION_FIELD_NUMBER)),
-    custom = { method, _ ->
-        method.instructions
-            .filter { instruction -> instruction.opcode == Opcode.SGET_OBJECT }
-            .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
-            .any { field -> field.definingClass == field.type && field.type == endpointType }
-    },
-)
-
-internal fun playlistEndpointIdFieldFingerprint(
-    endpointType: String,
-    playlistEndpointType: String,
-) = Fingerprint(
-    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
-    returnType = "Ljava/lang/String;",
-    parameters = listOf(endpointType),
-    custom = { method, _ ->
-        method.instructions.any { instruction ->
-            instruction.opcode == Opcode.IGET_OBJECT &&
-                instruction.getReference<FieldReference>()?.let { field ->
-                    field.definingClass == playlistEndpointType &&
-                        field.type == "Ljava/lang/String;"
-                } == true
-        }
     },
 )
 
