@@ -230,6 +230,18 @@ internal object PlaylistRendererDecoderFingerprint : Fingerprint(
     ),
 )
 
+internal object PlaylistContinuationResponseDecoderFingerprint : Fingerprint(
+    classFingerprint = PlaylistRendererDecoderClassFingerprint,
+    accessFlags = listOf(
+        AccessFlags.PROTECTED,
+        AccessFlags.FINAL,
+        AccessFlags.BRIDGE,
+        AccessFlags.SYNTHETIC,
+    ),
+    returnType = "Ljava/lang/Object;",
+    parameters = listOf("L"),
+)
+
 internal fun artworkUrlsFingerprint(artworkType: String) = Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
     returnType = "Ljava/util/List;",

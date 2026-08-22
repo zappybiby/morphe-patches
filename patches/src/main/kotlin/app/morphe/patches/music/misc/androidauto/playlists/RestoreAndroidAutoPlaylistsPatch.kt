@@ -19,6 +19,7 @@ import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMuta
 import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
+import app.morphe.util.cloneMutable
 import app.morphe.util.findFreeRegister
 import app.morphe.util.findInstructionIndicesReversedOrThrow
 import app.morphe.util.findMutableMethodOf
@@ -81,6 +82,7 @@ private data class RendererResolution(
 
 private data class BrowseResolution(
     val builderFactoryMethod: MethodReference,
+    val continuationBuilderMethod: Method,
     val requestMethod: Method,
     val clientDataSetterMethod: Method,
     val idSetterMethod: Method,
@@ -92,6 +94,9 @@ private data class BrowseResponseResolution(
     val contentSectionMethod: Method,
     val sectionItemMethods: List<Method>,
     val playlistRenderersMethod: Method,
+    val continuationDecoderMethod: Method,
+    val continuationResponseDecoderMethod: Method,
+    val continuationResponsePayloadMethod: Method,
 )
 
 private data class DeliveryResolution(
@@ -236,9 +241,9 @@ private fun BytecodePatchContext.injectNativePlaylistsNodeCapture() {
 }
 
 private fun BytecodePatchContext.resolveRuntimeHooks(): ResolvedRuntimeHooks {
-    val browse = resolveBrowse()
-    val renderer = resolveRenderer(browse.endpointIdField)
     val browseResponse = resolveBrowseResponse()
+    val browse = resolveBrowse(browseResponse.continuationDecoderMethod)
+    val renderer = resolveRenderer(browse.endpointIdField)
     val delivery = resolveDelivery()
     val startup = resolveStartup(
         delivery.controllerType,
@@ -301,12 +306,35 @@ private fun BytecodePatchContext.resolveBrowseResponse(): BrowseResponseResoluti
     ).matchAll(2..2)
         .map { match -> match.originalMethod }
     val playlistRenderersMethod = PlaylistRendererDecoderFingerprint.originalMethod
+    val playlistContainerType = playlistRenderersMethod.parameterTypes.single().toString()
+    val continuationDecoderMethod = classDefBy(playlistRenderersMethod.definingClass).methods
+        .single { method ->
+            method != playlistRenderersMethod &&
+                AccessFlags.PRIVATE.isSet(method.accessFlags) &&
+                AccessFlags.STATIC.isSet(method.accessFlags) &&
+                method.returnType == JAVA_LIST_CLASS &&
+                method.parameterTypes.map(CharSequence::toString) == listOf(playlistContainerType)
+        }
+    val continuationResponseDecoderMethod =
+        PlaylistContinuationResponseDecoderFingerprint.originalMethod
+    val continuationResponsePayloadType = continuationResponseDecoderMethod
+        .parameterTypes.single().toString()
+    val continuationResponsePayloadMethod = classDefBy(
+        responseContentsMethod.definingClass,
+    ).methods.single { method ->
+        !AccessFlags.STATIC.isSet(method.accessFlags) &&
+            method.parameterTypes.isEmpty() &&
+            method.returnType == continuationResponsePayloadType
+    }
 
     return BrowseResponseResolution(
         responseContentsMethod,
         contentSectionMethod,
         sectionItemMethods,
         playlistRenderersMethod,
+        continuationDecoderMethod,
+        continuationResponseDecoderMethod,
+        continuationResponsePayloadMethod,
     )
 }
 
@@ -371,7 +399,9 @@ private fun BytecodePatchContext.resolveRenderer(
     )
 }
 
-private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
+private fun BytecodePatchContext.resolveBrowse(
+    continuationDecoderMethod: Method,
+): BrowseResolution {
     // Resolve the obfuscated Browse service from the methods that build and send its requests.
     val requestBuilderMethod = BrowseRequestBuilderFingerprint.originalMethod
     val builderType = requestBuilderMethod.returnType
@@ -381,6 +411,14 @@ private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
             reference.parameterTypes.isEmpty() && reference.returnType == builderType
         }
     val serviceType = builderFactoryMethod.definingClass
+    val continuationTypes = continuationDecoderMethod.instructions.asSequence()
+        .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
+        .map { reference -> reference.returnType }
+        .toSet()
+    val continuationBuilderMethod = classDefBy(serviceType).methods.single { method ->
+        method.returnType == builderType &&
+            method.parameterTypes.singleOrNull()?.toString() in continuationTypes
+    }
     val requestFingerprint = authenticatedBrowseRequestFingerprint(serviceType, builderType)
     val requestMethod = requestFingerprint.originalMethod
     val browseBuilderIdField = requestFingerprint.instructionMatches.single()
@@ -406,6 +444,7 @@ private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
 
     return BrowseResolution(
         builderFactoryMethod = builderFactoryMethod,
+        continuationBuilderMethod = continuationBuilderMethod,
         requestMethod = requestMethod,
         clientDataSetterMethod = clientDataSetterMethod,
         idSetterMethod = idSetterMethod,
@@ -510,10 +549,29 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
     val response = runtimeHooks.browseResponse
     val delivery = runtimeHooks.delivery
 
-    // Make YTM's playlist-row decoder public so the injected Java code can call it.
-    mutableClassDefBy(response.playlistRenderersMethod.definingClass)
-        .findMutableMethodOf(response.playlistRenderersMethod)
-        .apply { accessFlags = accessFlags.toPublicAccessFlags() }
+    // Make YTM's response decoders public so the injected access methods can call them.
+    mutableClassDefBy(response.playlistRenderersMethod.definingClass).apply {
+        listOf(response.playlistRenderersMethod, response.continuationDecoderMethod)
+            .forEach { method ->
+                findMutableMethodOf(method).apply {
+                    accessFlags = accessFlags.toPublicAccessFlags()
+                }
+            }
+    }
+
+    // The native decoder does not read its receiver. Keep the same register layout by
+    // copying it as a static method with an unused first parameter.
+    val continuationResponseDecoder = response.continuationResponseDecoderMethod.let { method ->
+        method.cloneMutable(
+            name = "patch_decodeContinuationResponse",
+            accessFlags = AccessFlags.PUBLIC.value or AccessFlags.STATIC.value,
+            parameters = listOf(
+                ImmutableMethodParameter(method.definingClass, null, null),
+            ) + method.parameters,
+        ).also { copiedMethod ->
+            mutableClassDefBy(method.definingClass).methods.add(copiedMethod)
+        }
+    }
 
     mutableClassDefBy(browse.builderFactoryMethod.definingClass).apply {
         interfaces.add(ANDROID_AUTO_PLAYLIST_ACCESS_INTERFACE)
@@ -534,6 +592,22 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
                 return-object v0
             """,
         )
+        val continuationType = browse.continuationBuilderMethod
+            .parameterTypes.single().toString()
+        addAccessMethod(
+            "patch_requestContinuation",
+            listOf(JAVA_OBJECT_CLASS, JAVA_EXECUTOR_CLASS),
+            LISTENABLE_FUTURE_CLASS,
+            3,
+            """
+                check-cast p1, $continuationType
+                invoke-virtual { p0, p1 }, ${browse.continuationBuilderMethod}
+                move-result-object p1
+                invoke-virtual { p0, p1, p2 }, ${browse.requestMethod}
+                move-result-object p1
+                return-object p1
+            """,
+        )
         addAccessMethod(
             "patch_playlistMediaId",
             listOf(JAVA_STRING_CLASS),
@@ -546,6 +620,21 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
             """,
         )
         addObjectMethodAccess("patch_getContents", response.contentsMethod, JAVA_ITERABLE_CLASS)
+        addAccessMethod(
+            "patch_getContinuationContent",
+            listOf(JAVA_OBJECT_CLASS),
+            JAVA_OBJECT_CLASS,
+            3,
+            """
+                check-cast p1, ${response.continuationResponsePayloadMethod.definingClass}
+                invoke-virtual { p1 }, ${response.continuationResponsePayloadMethod}
+                move-result-object p1
+                const/4 v0, 0x0
+                invoke-static { v0, p1 }, $continuationResponseDecoder
+                move-result-object p1
+                return-object p1
+            """,
+        )
         addObjectMethodAccess("patch_getSection", response.contentSectionMethod, JAVA_OBJECT_CLASS)
 
         val sectionItemInstructions = buildString {
@@ -582,6 +671,23 @@ private fun BytecodePatchContext.injectRuntimeAccess(runtimeHooks: ResolvedRunti
                 move-result-object p1
                 return-object p1
                 :not_playlist_container
+                const/4 p1, 0x0
+                return-object p1
+            """,
+        )
+        addAccessMethod(
+            "patch_getContinuations",
+            listOf(JAVA_OBJECT_CLASS),
+            JAVA_ITERABLE_CLASS,
+            3,
+            """
+                instance-of v0, p1, $playlistContainerType
+                if-eqz v0, :no_continuations
+                check-cast p1, $playlistContainerType
+                invoke-static { p1 }, ${response.continuationDecoderMethod}
+                move-result-object p1
+                return-object p1
+                :no_continuations
                 const/4 p1, 0x0
                 return-object p1
             """,
