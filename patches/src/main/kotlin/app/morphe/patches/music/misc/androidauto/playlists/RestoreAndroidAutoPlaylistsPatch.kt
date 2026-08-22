@@ -391,8 +391,10 @@ private fun BytecodePatchContext.resolveBrowse(): BrowseResolution {
         classDef.superclass?.let { superclass -> classDefByOrNull(superclass) }
     }.flatMap { classDef -> classDef.methods.asSequence() }
     val clientDataSetterMethod = builderMethods
+        // YTM 9.32/9.33: use the protected setter because these versions also expose a public wrapper.
         .first { method ->
-            method.returnType == "V" &&
+            AccessFlags.PROTECTED.isSet(method.accessFlags) &&
+                method.returnType == "V" &&
                 method.parameterTypes.map(CharSequence::toString) == listOf("[B")
         }
     val idSetterMethod = browseIdSetterFingerprint(browseBuilderIdField).originalMethod
