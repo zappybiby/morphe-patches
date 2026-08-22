@@ -214,23 +214,25 @@ private fun BytecodePatchContext.injectNativePlaylistsNodeCapture() {
     val androidAutoMediaItemMapper =
         AndroidAutoMediaItemMapperFingerprint.method
 
-    val constructorIndex = androidAutoMediaItemMapper
+    androidAutoMediaItemMapper
         .findInstructionIndicesReversedOrThrow(MEDIA_DESCRIPTION_CONSTRUCTOR_CALL)
-        .last()
-    val constructor = androidAutoMediaItemMapper.getInstruction<RegisterRangeInstruction>(
-        constructorIndex,
-    )
-    val nativeNodeMediaIdRegister =
-        constructor.startRegister + MEDIA_DESCRIPTION_MEDIA_ID_REGISTER_OFFSET
-    val nativeNodeTitleRegister =
-        constructor.startRegister + MEDIA_DESCRIPTION_TITLE_REGISTER_OFFSET
+        .forEach { constructorIndex ->
+            val constructor =
+                androidAutoMediaItemMapper.getInstruction<RegisterRangeInstruction>(
+                    constructorIndex,
+                )
+            val nativeNodeMediaIdRegister =
+                constructor.startRegister + MEDIA_DESCRIPTION_MEDIA_ID_REGISTER_OFFSET
+            val nativeNodeTitleRegister =
+                constructor.startRegister + MEDIA_DESCRIPTION_TITLE_REGISTER_OFFSET
 
-    androidAutoMediaItemMapper.addInstructions(
-        constructorIndex,
-        """
-            invoke-static/range { v$nativeNodeMediaIdRegister .. v$nativeNodeTitleRegister }, $EXTENSION_CLASS->rememberNativePlaylistsMediaId(Ljava/lang/String;Ljava/lang/CharSequence;)V
-        """,
-    )
+            androidAutoMediaItemMapper.addInstructions(
+                constructorIndex,
+                """
+                    invoke-static/range { v$nativeNodeMediaIdRegister .. v$nativeNodeTitleRegister }, $EXTENSION_CLASS->rememberNativePlaylistsMediaId(Ljava/lang/String;Ljava/lang/CharSequence;)V
+                """,
+            )
+        }
 }
 
 private fun BytecodePatchContext.resolveRuntimeHooks(): ResolvedRuntimeHooks {
