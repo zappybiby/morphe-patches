@@ -77,16 +77,39 @@ internal fun androidAutoLoadChildrenFingerprint(
     custom = { method, _ -> !AccessFlags.STATIC.isSet(method.accessFlags) },
 )
 
-internal fun androidAutoControllerProviderFingerprint(controllerType: String) = Fingerprint(
-    returnType = "Ljava/lang/Object;",
+internal fun androidAutoServiceLoadChildrenFingerprint(loadResultType: String) = Fingerprint(
+    returnType = "V",
+    parameters = listOf("Ljava/lang/String;", "L", "Landroid/os/Bundle;"),
+    custom = { method, _ ->
+        method.implementation?.instructions?.any { instruction ->
+            instruction.getReference<TypeReference>()?.type == loadResultType ||
+                instruction.getReference<MethodReference>()?.returnType == loadResultType
+        } == true
+    },
+)
+
+internal fun androidAutoServiceInjectionFingerprint(
+    serviceType: String,
+    browseOwnerType: String,
+) = Fingerprint(
+    name = "onCreate",
+    returnType = "V",
+    parameters = emptyList(),
     filters = listOf(
         methodCall(
-            definingClass = controllerType,
-            name = "<init>",
-            returnType = "V",
+            name = "generatedComponent",
+            parameters = emptyList(),
+            returnType = "Ljava/lang/Object;",
+        ),
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            type = browseOwnerType,
+        ),
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = serviceType,
         ),
     ),
-    custom = { method, _ -> !AccessFlags.STATIC.isSet(method.accessFlags) },
 )
 
 internal fun browseServiceProviderAccessFingerprint(serviceType: String) = Fingerprint(

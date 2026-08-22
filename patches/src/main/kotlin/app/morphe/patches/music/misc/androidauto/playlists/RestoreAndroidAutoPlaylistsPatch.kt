@@ -30,10 +30,9 @@ import app.morphe.util.toPublicAccessFlags
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.Method
-import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
-import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
@@ -117,14 +116,9 @@ private data class DeliveryResolution(
     val resultDeliveryMethod: MethodReference,
 )
 
-private data class BrowseProvider(
-    val field: FieldReference,
-    val getter: MethodReference,
-)
-
 private data class StartupResolution(
-    val androidAutoProviderMethod: Method,
-    val browseProviderPath: List<FieldReference>,
+    val serviceInjectionMethod: Method,
+    val browseProviderField: FieldReference,
     val browseProviderGetter: MethodReference,
 )
 
@@ -135,27 +129,6 @@ private data class ResolvedRuntimeHooks(
     val delivery: DeliveryResolution,
     val startup: StartupResolution,
 )
-
-private fun Instruction.receiverRegister() = when (this) {
-    is FiveRegisterInstruction -> registerC.takeIf { registerCount > 0 }
-    is RegisterRangeInstruction -> startRegister.takeIf { registerCount > 0 }
-    else -> null
-}
-
-private fun BytecodePatchContext.findBrowseProviderPath(
-    startType: String,
-    provider: BrowseProvider,
-): List<FieldReference>? {
-    val rootField = classDefByOrNull(startType)?.fields?.singleOrNull { field ->
-        !AccessFlags.STATIC.isSet(field.accessFlags) &&
-            classDefByOrNull(field.type)?.fields?.any { it.type == provider.field.definingClass } == true
-    } ?: return null
-    val componentField = classDefByOrNull(rootField.type)?.fields?.singleOrNull { field ->
-        !AccessFlags.STATIC.isSet(field.accessFlags) && field.type == provider.field.definingClass
-    } ?: return null
-
-    return listOf(rootField, componentField, provider.field)
-}
 
 @Suppress("unused")
 val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
@@ -206,8 +179,8 @@ private fun BytecodePatchContext.resolveRuntimeHooks(): ResolvedRuntimeHooks {
     val renderer = resolveRenderer(browse.endpointIdField, endpointMediaIdMethod)
     val delivery = resolveDelivery()
     val startup = resolveStartup(
-        delivery.controllerType,
         browse.builderFactoryMethod.definingClass,
+        delivery.loadResultType,
     )
 
     return ResolvedRuntimeHooks(
@@ -220,28 +193,31 @@ private fun BytecodePatchContext.resolveRuntimeHooks(): ResolvedRuntimeHooks {
 }
 
 private fun BytecodePatchContext.resolveStartup(
-    androidAutoControllerType: String,
     browseServiceType: String,
+    loadResultType: String,
 ): StartupResolution {
-    val androidAutoProviderMethod =
-        androidAutoControllerProviderFingerprint(androidAutoControllerType).originalMethod
-    val providerPaths = browseServiceProviderAccessFingerprint(browseServiceType)
+    val musicBrowserServiceType = androidAutoServiceLoadChildrenFingerprint(
+        loadResultType,
+    ).originalMethod.definingClass
+    val providers = browseServiceProviderAccessFingerprint(browseServiceType)
         .matchAll()
         .map { match ->
             val field = match.instructionMatches[0].instruction.getReference<FieldReference>()!!
             val getter = match.instructionMatches[1].instruction.getReference<MethodReference>()!!
-            BrowseProvider(field, getter)
+            field to getter
         }
-        .distinctBy { provider -> provider.field }
-        .mapNotNull { provider ->
-            findBrowseProviderPath(androidAutoProviderMethod.definingClass, provider)
-                ?.let { path -> path to provider.getter }
-        }
-    val (browseProviderPath, browseProviderGetter) = providerPaths.single()
+        .distinctBy { (field, _) -> field }
+    val (serviceInjectionMethod, provider) = providers.mapNotNull { provider ->
+        androidAutoServiceInjectionFingerprint(
+            musicBrowserServiceType,
+            provider.first.definingClass,
+        ).matchOrNull()?.originalMethod?.let { method -> method to provider }
+    }.single()
+    val (browseProviderField, browseProviderGetter) = provider
 
     return StartupResolution(
-        androidAutoProviderMethod,
-        browseProviderPath,
+        serviceInjectionMethod,
+        browseProviderField,
         browseProviderGetter,
     )
 }
@@ -930,60 +906,35 @@ private fun BytecodePatchContext.injectRuntimeHooks(runtimeHooks: ResolvedRuntim
     injectRuntimeAccess(runtimeHooks)
 
     val startup = runtimeHooks.startup
-    val androidAutoProviderMethod = mutableClassDefBy(
-        startup.androidAutoProviderMethod.definingClass,
-    ).findMutableMethodOf(startup.androidAutoProviderMethod)
-    val controllerConstructorIndex = androidAutoProviderMethod.indexOfFirstInstructionOrThrow {
-        getReference<MethodReference>()?.let { reference ->
-            reference.definingClass == runtimeHooks.delivery.controllerType &&
-                reference.name == "<init>"
-        } == true
+    val serviceInjectionMethod = mutableClassDefBy(
+        startup.serviceInjectionMethod.definingClass,
+    ).findMutableMethodOf(startup.serviceInjectionMethod)
+    val browseOwnerIndex = serviceInjectionMethod.indexOfFirstInstructionOrThrow {
+        opcode == Opcode.IGET_OBJECT &&
+            getReference<FieldReference>()?.type == startup.browseProviderField.definingClass
     }
-    val controllerRegister = androidAutoProviderMethod
-        .getInstruction<Instruction>(controllerConstructorIndex)
-        .receiverRegister()
-        ?: throw PatchException("Could not resolve the Android Auto controller register")
-    val controllerReturnIndex = androidAutoProviderMethod.indexOfFirstInstructionOrThrow(
-        controllerConstructorIndex,
-    ) {
-        opcode == Opcode.RETURN_OBJECT &&
-            (this as? OneRegisterInstruction)?.registerA == controllerRegister
-    }
-    val providerRegister = androidAutoProviderMethod.findFreeRegister(
-        controllerReturnIndex,
-        androidAutoProviderMethod.p0Register,
+    val browseOwnerRegister = serviceInjectionMethod
+        .getInstruction<TwoRegisterInstruction>(browseOwnerIndex)
+        .registerA
+    val providerRegister = serviceInjectionMethod.findFreeRegister(
+        browseOwnerIndex + 1,
+        serviceInjectionMethod.p0Register,
     )
     if (providerRegister >= FOUR_BIT_REGISTER_LIMIT) {
-        throw PatchException("Android Auto provider has no free 4-bit register")
+        throw PatchException("Android Auto service injection has no free 4-bit register")
     }
 
-    val browseProviderTraversal = buildString {
-        appendLine("move-object/from16 v$providerRegister, p0")
-        startup.browseProviderPath.forEach { field ->
-            appendLine("iget-object v$providerRegister, v$providerRegister, $field")
-            appendLine("if-eqz v$providerRegister, :skip_playlist_initialization")
-        }
-        appendLine(
-            "invoke-interface/range { v$providerRegister .. v$providerRegister }, " +
-                startup.browseProviderGetter,
-        )
-        appendLine("move-result-object v$providerRegister")
-        appendLine("if-eqz v$providerRegister, :skip_playlist_initialization")
-        append("check-cast v$providerRegister, $ANDROID_AUTO_PLAYLIST_ACCESS_INTERFACE")
-    }
-
-    // Android Auto creates its controller without otherwise requesting the authenticated Browse
-    // service. Read that service from the same Dagger provider while the controller is created.
-    androidAutoProviderMethod.addInstructionsWithLabels(
-        controllerReturnIndex,
+    // MusicBrowserService starts after application initialization and already holds the signed-in
+    // component in this register. Resolve Browse alongside YTM's own service dependencies.
+    serviceInjectionMethod.addInstructions(
+        browseOwnerIndex + 1,
         """
-            $browseProviderTraversal
+            iget-object v$providerRegister, v$browseOwnerRegister, ${startup.browseProviderField}
+            invoke-interface/range { v$providerRegister .. v$providerRegister }, ${startup.browseProviderGetter}
+            move-result-object v$providerRegister
+            check-cast v$providerRegister, $ANDROID_AUTO_PLAYLIST_ACCESS_INTERFACE
             invoke-static/range { v$providerRegister .. v$providerRegister }, $EXTENSION_CLASS->initialize($ANDROID_AUTO_PLAYLIST_ACCESS_INTERFACE)V
         """,
-        ExternalLabel(
-            "skip_playlist_initialization",
-            androidAutoProviderMethod.getInstruction<Instruction>(controllerReturnIndex),
-        ),
     )
 
     val androidAutoLoadChildrenMethod = androidAutoLoadChildrenFingerprint(
