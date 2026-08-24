@@ -1,6 +1,6 @@
 /*
  * Copyright 2026 Morphe.
- * https://github.com/MorpheApp/morphe-patches
+ * https://github.com/MorpheApp/morphe-patches/pull/2489
  *
  * See the included NOTICE file for GPLv3 Section 7 terms that apply to this code.
  */
@@ -10,6 +10,7 @@ package app.morphe.patches.music.misc.androidauto.playlists
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
 import app.morphe.patcher.InstructionLocation.MatchAfterWithin
+import app.morphe.patcher.checkCast
 import app.morphe.patcher.extensions.InstructionExtensions.instructions
 import app.morphe.patcher.fieldAccess
 import app.morphe.patcher.literal
@@ -22,12 +23,17 @@ import app.morphe.util.getReference
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 
-private const val BROWSE_CONTENTS_EXTENSION_FIELD_NUMBER = 58_173_949L
-private const val BROWSE_SECTION_EXTENSION_FIELD_NUMBER = 58_174_010L
-private const val BROWSE_SECTION_PRESENT_FLAG = 1L
-private const val MUSIC_RESPONSIVE_RENDERER_EXTENSION_FIELD_NUMBER = 161_429_595L
+private const val SINGLE_COLUMN_BROWSE_RESULTS_FIELD_NUMBER = 58_173_949L
+private const val TAB_RENDERER_FIELD_NUMBER = 58_174_010L
+private const val TAB_CONTENT_PRESENT_FLAG = 1L
+private const val MUSIC_ITEM_FIELD_NUMBER = 161_429_595L
+private const val BUTTON_RENDERER_EXTENSION_FIELD_NUMBER = 65_153_809L
+private const val MUSIC_THUMBNAIL_FIELD_NUMBER = 164_480_666L
+
+// Android Auto media-item creation and loadChildren
 
 internal val MEDIA_DESCRIPTION_CONSTRUCTOR_CALL = methodCall(
     definingClass = "Landroid/support/v4/media/MediaDescriptionCompat;",
@@ -45,57 +51,85 @@ internal val MEDIA_DESCRIPTION_CONSTRUCTOR_CALL = methodCall(
     returnType = "V",
 )
 
-internal object AndroidAutoMediaItemMapperFingerprint : Fingerprint(
+internal object MediaItemFactoryFingerprint : Fingerprint(
     returnType = "Lj$/util/Optional;",
     parameters = listOf("L", "Ljava/util/Set;", "L"),
     filters = listOf(MEDIA_DESCRIPTION_CONSTRUCTOR_CALL),
-    // Three MediaDescriptionCompat constructor calls cover items that open, play, or do both.
     custom = { method, _ ->
         method.findInstructionIndicesReversed(MEDIA_DESCRIPTION_CONSTRUCTOR_CALL).size == 3
     },
 )
 
-internal object AndroidAutoMediaIdValidationFingerprint : Fingerprint(
+internal object InvalidParentMediaIdFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC, AccessFlags.FINAL),
     returnType = "V",
     parameters = listOf("L", "Z"),
     strings = listOf("Invalid media id: ")
 )
 
-internal fun androidAutoLoadChildrenFingerprint(
-    controllerType: String,
-    loadResultType: String,
+internal fun contentSupplierLoadChildrenFingerprint(
+    contentSupplierType: String,
+    loadChildrenResultType: String,
 ) = Fingerprint(
-    definingClass = controllerType,
+    definingClass = contentSupplierType,
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "V",
-    parameters = listOf(loadResultType),
+    parameters = listOf(loadChildrenResultType),
     custom = { method, _ -> !AccessFlags.STATIC.isSet(method.accessFlags) },
 )
 
-internal fun androidAutoControllerProviderFingerprint(controllerType: String) = Fingerprint(
-    returnType = "Ljava/lang/Object;",
-    filters = listOf(
-        methodCall(
-            definingClass = controllerType,
-            name = "<init>",
-            returnType = "V",
-        ),
-    ),
-    custom = { method, _ -> !AccessFlags.STATIC.isSet(method.accessFlags) },
-)
-
-internal fun browseServiceProviderAccessFingerprint(serviceType: String) = Fingerprint(
-    filters = listOf(opcode(Opcode.CHECK_CAST)),
+internal fun musicBrowserServiceLoadChildrenFingerprint(loadChildrenResultType: String) = Fingerprint(
+    returnType = "V",
+    parameters = listOf("Ljava/lang/String;", "L", "Landroid/os/Bundle;"),
     custom = { method, _ ->
         method.implementation?.instructions?.any { instruction ->
-            instruction.opcode == Opcode.CHECK_CAST &&
-                instruction.getReference<TypeReference>()?.type == serviceType
+            instruction.getReference<TypeReference>()?.type == loadChildrenResultType ||
+                instruction.getReference<MethodReference>()?.returnType == loadChildrenResultType
         } == true
     },
 )
 
-internal object BrowseRequestBuilderFingerprint : Fingerprint(
+internal fun musicBrowserServiceOnCreateFingerprint(
+    musicBrowserServiceType: String,
+    componentType: String,
+) = Fingerprint(
+    name = "onCreate",
+    returnType = "V",
+    parameters = emptyList(),
+    filters = listOf(
+        methodCall(
+            name = "generatedComponent",
+            parameters = emptyList(),
+            returnType = "Ljava/lang/Object;",
+        ),
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            type = componentType,
+        ),
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = musicBrowserServiceType,
+        ),
+    ),
+)
+
+internal fun browseServiceProviderFingerprint(browseServiceType: String) = Fingerprint(
+    filters = listOf(
+        fieldAccess(opcode = Opcode.IGET_OBJECT),
+        methodCall(
+            parameters = emptyList(),
+            returnType = "Ljava/lang/Object;",
+            opcodes = listOf(Opcode.INVOKE_INTERFACE, Opcode.INVOKE_INTERFACE_RANGE),
+            location = MatchAfterImmediately(),
+        ),
+        opcode(Opcode.MOVE_RESULT_OBJECT, location = MatchAfterImmediately()),
+        checkCast(browseServiceType, location = MatchAfterImmediately()),
+    ),
+)
+
+// Browse requests
+
+internal object BrowseEndpointRequestFingerprint : Fingerprint(
     returnType = "L",
     parameters = listOf("L"),
     filters = listOf(
@@ -105,22 +139,22 @@ internal object BrowseRequestBuilderFingerprint : Fingerprint(
         ),
         string("FEmusic_home", location = MatchAfterImmediately()),
     ),
-    // FEmusic_home also appears in a lambda that returns Object, so ignore that match.
+    // An Object-returning lambda also references FEmusic_home, but does not build the request.
     custom = { method, _ -> method.returnType != "Ljava/lang/Object;" }
 )
 
-internal fun authenticatedBrowseRequestFingerprint(
-    serviceType: String,
-    builderType: String,
+internal fun browseRequestFingerprint(
+    browseServiceType: String,
+    requestBuilderType: String,
 ) = Fingerprint(
-    definingClass = serviceType,
+    definingClass = browseServiceType,
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "Lcom/google/common/util/concurrent/ListenableFuture;",
-    parameters = listOf(builderType, "Ljava/util/concurrent/Executor;"),
+    parameters = listOf(requestBuilderType, "Ljava/util/concurrent/Executor;"),
     filters = listOf(
         fieldAccess(
             opcode = Opcode.IGET_OBJECT,
-            definingClass = builderType,
+            definingClass = requestBuilderType,
             type = "Ljava/lang/String;",
         ),
     ),
@@ -141,7 +175,10 @@ internal fun browseIdSetterFingerprint(field: FieldReference) = Fingerprint(
     ),
 )
 
-internal object BrowseResponseContentsFingerprint : Fingerprint(
+// Browse responses
+
+// Library tabs come from extension 58173949 in the FEmusic_library_landing response.
+internal object BrowseTabsFingerprint : Fingerprint(
     accessFlags = listOf(
         AccessFlags.PUBLIC,
         AccessFlags.FINAL,
@@ -150,7 +187,7 @@ internal object BrowseResponseContentsFingerprint : Fingerprint(
     returnType = "L",
     parameters = emptyList(),
     filters = listOf(
-        literal(BROWSE_CONTENTS_EXTENSION_FIELD_NUMBER),
+        literal(SINGLE_COLUMN_BROWSE_RESULTS_FIELD_NUMBER),
         methodCall(
             definingClass = "Lj$/util/stream/Stream;",
             name = "filter",
@@ -161,7 +198,7 @@ internal object BrowseResponseContentsFingerprint : Fingerprint(
     ),
 )
 
-internal fun browseContentMapperFingerprint(mapperType: String) = Fingerprint(
+internal fun browseTabMapperFingerprint(mapperType: String) = Fingerprint(
     definingClass = mapperType,
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "Ljava/lang/Object;",
@@ -169,25 +206,25 @@ internal fun browseContentMapperFingerprint(mapperType: String) = Fingerprint(
     filters = listOf(
         newInstance("L"),
         literal(
-            BROWSE_SECTION_EXTENSION_FIELD_NUMBER,
+            TAB_RENDERER_FIELD_NUMBER,
             location = MatchAfterWithin(3),
         ),
     ),
 )
 
-internal fun browseContentSectionFingerprint(contentType: String) = Fingerprint(
-    definingClass = contentType,
+internal fun sectionListFingerprint(tabType: String) = Fingerprint(
+    definingClass = tabType,
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "L",
     parameters = emptyList(),
-    filters = listOf(literal(BROWSE_SECTION_PRESENT_FLAG)),
+    filters = listOf(literal(TAB_CONTENT_PRESENT_FLAG)),
 )
 
-internal fun browseSectionItemsFingerprint(
-    sectionType: String,
+internal fun sectionItemsFingerprint(
+    sectionListType: String,
     returnType: String,
 ) = Fingerprint(
-    definingClass = sectionType,
+    definingClass = sectionListType,
     accessFlags = listOf(
         AccessFlags.PUBLIC,
         AccessFlags.FINAL,
@@ -197,41 +234,56 @@ internal fun browseSectionItemsFingerprint(
     parameters = emptyList(),
 )
 
-internal object MusicResponsiveRendererExtensionFingerprint : Fingerprint(
+// Library and playlist rows
+
+// FEmusic_library_landing playlists and loaded playlist tracks both use extension 161429595.
+internal object MusicItemExtensionFingerprint : Fingerprint(
     name = "<clinit>",
     returnType = "V",
     parameters = emptyList(),
     filters = listOf(
         opcode(Opcode.CONST_CLASS),
         literal(
-            MUSIC_RESPONSIVE_RENDERER_EXTENSION_FIELD_NUMBER,
+            MUSIC_ITEM_FIELD_NUMBER,
             location = MatchAfterWithin(2),
         ),
     ),
 )
 
-// handleMusicReloadShelfEvent identifies the class that decodes playlist rows.
-internal object PlaylistRendererDecoderClassFingerprint : Fingerprint(
+internal object MusicReloadShelfEventFingerprint : Fingerprint(
     name = "handleMusicReloadShelfEvent",
     accessFlags = listOf(AccessFlags.PUBLIC),
     returnType = "V",
     parameters = listOf("L"),
 )
 
-internal object PlaylistRendererDecoderFingerprint : Fingerprint(
-    classFingerprint = PlaylistRendererDecoderClassFingerprint,
+// GridRenderer uses presence bits 0x1000 and 0x40000 for extension-161429595 rows.
+internal object GridItemsFingerprint : Fingerprint(
+    classFingerprint = MusicReloadShelfEventFingerprint,
     accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.STATIC),
     returnType = "Ljava/util/List;",
     parameters = listOf("L"),
     filters = listOf(
-        // Flags 0x1000 and 0x40000 identify the playlist-row decoder; the other List decoder uses 0x1 and 0x2.
         literal(0x1000L),
         literal(0x40000L),
     ),
 )
 
-internal object PlaylistContinuationResponseDecoderFingerprint : Fingerprint(
-    classFingerprint = PlaylistRendererDecoderClassFingerprint,
+internal fun playlistItemsFingerprint(musicItemType: String) = Fingerprint(
+    accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.STATIC),
+    returnType = "Ljava/util/List;",
+    parameters = listOf("L", "Z"),
+    filters = listOf(opcode(Opcode.CHECK_CAST)),
+    custom = { method, _ ->
+        method.instructions.any { instruction ->
+            instruction.opcode == Opcode.CHECK_CAST &&
+                instruction.getReference<TypeReference>()?.type == musicItemType
+        }
+    },
+)
+
+internal object GridDecoderFingerprint : Fingerprint(
+    classFingerprint = MusicReloadShelfEventFingerprint,
     accessFlags = listOf(
         AccessFlags.PROTECTED,
         AccessFlags.FINAL,
@@ -242,10 +294,55 @@ internal object PlaylistContinuationResponseDecoderFingerprint : Fingerprint(
     parameters = listOf("L"),
 )
 
-internal fun artworkUrlsFingerprint(artworkType: String) = Fingerprint(
+// Field c on playlist and track rows contains thumbnail extension 164480666.
+internal object MusicThumbnailExtensionFingerprint : Fingerprint(
+    name = "<clinit>",
+    returnType = "V",
+    parameters = emptyList(),
+    filters = listOf(
+        opcode(Opcode.CONST_CLASS),
+        literal(
+            MUSIC_THUMBNAIL_FIELD_NUMBER,
+            location = MatchAfterWithin(2),
+        ),
+    ),
+)
+
+internal fun musicThumbnailDecoderFingerprint(artworkType: String) = Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
-    returnType = "Ljava/util/List;",
+    returnType = "Lcom/google/protobuf/MessageLite;",
     parameters = listOf(artworkType),
+    filters = listOf(
+        methodCall(
+            definingClass = "Lcom/google/protobuf/ExtensionRegistryLite;",
+            name = "getGeneratedRegistry",
+            parameters = emptyList(),
+            returnType = "Lcom/google/protobuf/ExtensionRegistryLite;",
+        ),
+    ),
+)
+
+internal fun androidAutoArtworkFingerprint(
+    payloadFieldTypes: Set<String>,
+) = Fingerprint(
+    filters = listOf(MEDIA_DESCRIPTION_CONSTRUCTOR_CALL),
+    // Before building MediaDescriptionCompat, YTM converts the decoded thumbnail to its artwork Uri.
+    custom = { method, _ ->
+        if (method.parameterTypes.size != 1) return@Fingerprint false
+        val instructions = method.implementation?.instructions ?: return@Fingerprint false
+        val readFieldTypes = instructions
+            .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
+            .mapNotNull { instruction -> instruction.getReference<FieldReference>()?.type }
+            .toSet()
+        instructions.any { instruction ->
+            val reference = instruction.getReference<MethodReference>()
+                ?: return@any false
+            val parameterType = reference.parameterTypes.singleOrNull()?.toString()
+                ?: return@any false
+            reference.returnType == "Landroid/net/Uri;" &&
+                parameterType in payloadFieldTypes && parameterType in readFieldTypes
+        }
+    },
 )
 
 internal fun renderTextFingerprint(textType: String) = Fingerprint(
@@ -263,21 +360,104 @@ internal fun browseEndpointDecoderFingerprint(
     parameters = listOf(endpointType),
 )
 
-internal object PlaylistPlaybackMediaIdFingerprint : Fingerprint(
+internal object EndpointMediaIdFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
     returnType = "Ljava/lang/String;",
-    parameters = listOf("Ljava/lang/String;"),
+    parameters = listOf("L"),
+    // MediaItemData.createMediaId serializes the row command as Android Auto's media ID.
+    custom = endpointMediaId@{ method, _ ->
+        val endpointType = method.parameterTypes.single().toString()
+        if (endpointType == "Ljava/lang/String;") return@endpointMediaId false
+        val endpointStores = method.instructions
+            .filter { instruction -> instruction.opcode == Opcode.IPUT_OBJECT }
+            .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+            .filter { field -> field.type == endpointType }
+            .distinct()
+        val wrapperType = endpointStores.singleOrNull()?.definingClass
+            ?: return@endpointMediaId false
+        method.instructions.any { instruction ->
+            val reference = instruction.getReference<MethodReference>()
+                ?: return@any false
+            reference.parameterTypes.map(CharSequence::toString) == listOf(wrapperType) &&
+                reference.returnType == "Ljava/lang/String;"
+        }
+    },
+)
+
+// Playlist playback
+
+internal fun buttonRendererExtensionFingerprint(endpointType: String) = Fingerprint(
+    name = "<clinit>",
+    returnType = "V",
+    parameters = emptyList(),
+    filters = listOf(literal(BUTTON_RENDERER_EXTENSION_FIELD_NUMBER)),
+    // Extension 65153809 is ButtonRenderer in response.q and FeedbackEndpoint in a command.
+    custom = { method, _ ->
+        val containingType = method.instructions
+            .filter { instruction -> instruction.opcode == Opcode.SGET_OBJECT }
+            .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+            .firstOrNull { field -> field.definingClass == field.type }
+            ?.type
+        containingType != null && containingType != endpointType
+    },
+)
+
+internal fun buttonRendererDecoderFingerprint(
+    containingType: String,
+    buttonRendererType: String,
+    descriptorField: FieldReference,
+) = Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
+    returnType = buttonRendererType,
+    parameters = listOf("Z", containingType),
     filters = listOf(
-        methodCall(
-            opcode = Opcode.INVOKE_STATIC,
-            parameters = listOf("Ljava/lang/String;", "Ljava/lang/String;", "Z", "Z"),
-            returnType = "L",
-        ),
-        methodCall(
-            opcode = Opcode.INVOKE_STATIC,
-            parameters = listOf("L"),
-            returnType = "Ljava/lang/String;",
-            location = MatchAfterWithin(3),
+        fieldAccess(
+            opcode = Opcode.SGET_OBJECT,
+            definingClass = descriptorField.definingClass,
+            name = descriptorField.name,
+            type = descriptorField.type,
         ),
     ),
+)
+
+internal fun buttonRendererEndpointCopyFingerprint(
+    buttonRendererType: String,
+    endpointType: String,
+) = Fingerprint(
+    returnType = "V",
+    parameters = listOf("L"),
+    filters = listOf(
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            definingClass = buttonRendererType,
+            type = endpointType,
+        ),
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            type = endpointType,
+            location = MatchAfterWithin(4),
+        ),
+    ),
+    // The live-chat ImageButton copies its click command from ButtonRenderer.
+    custom = { method, _ ->
+        val instructions = method.implementation?.instructions?.toList()
+            ?: return@Fingerprint false
+        val copiedEndpointFields = instructions.mapIndexedNotNull { index, instruction ->
+            val field = instruction.getReference<FieldReference>()
+                ?: return@mapIndexedNotNull null
+            if (instruction.opcode != Opcode.IGET_OBJECT ||
+                field.definingClass != buttonRendererType || field.type != endpointType
+            ) {
+                return@mapIndexedNotNull null
+            }
+            val copiedToCommand = instructions.drop(index + 1).take(4).any { nearby ->
+                val target = nearby.getReference<FieldReference>()
+                    ?: return@any false
+                nearby.opcode == Opcode.IPUT_OBJECT &&
+                    target.definingClass != buttonRendererType && target.type == endpointType
+            }
+            field.takeIf { copiedToCommand }
+        }.distinct()
+        copiedEndpointFields.size == 1
+    },
 )
