@@ -5,7 +5,7 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
 apply<app.morphe.patches.gradle.PatchesPlugin>()
 
 group = "app.morphe"
-version = "0.2.0"
+version = "0.2.1"
 
 extensions.configure<PatchesExtension>("patches") {
     about {

@@ -1,3 +1,12 @@
+## [0.2.1](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.2.1) (2026-08-24)
+
+### Changes
+
+* **YouTube Music:** Restore native artwork for populated Android Auto playlists
+* **YouTube Music:** Play Liked Music from its first track row
+* **YouTube Music 9.15.51:** Fix Playlists discovery, result delivery, and playback
+* **YouTube Music 9.32.51 and 9.33.52:** Fix Library requests
+
 ## [0.2.0](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.2.0) (2026-08-21)
 
 ### Changes
