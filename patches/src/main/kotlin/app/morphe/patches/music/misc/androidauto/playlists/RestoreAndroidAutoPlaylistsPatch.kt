@@ -600,9 +600,7 @@ private fun MutableClass.addPlaylistBrowseIdGetter(
             if-eqz v1, :try_for_browse_id
             invoke-static { v1 }, $actionToBrowseEndpointMethod
             move-result-object v1
-            if-eqz v1, :try_for_browse_id
             iget-object v1, v1, $browseEndpointBrowseIdField
-            if-eqz v1, :try_for_browse_id
             const-string v2, "$PLAYLIST_BROWSE_ID_PREFIX"
             invoke-virtual { v1, v2 }, Ljava/lang/String;->startsWith(Ljava/lang/String;)Z
             move-result v2
@@ -614,9 +612,7 @@ private fun MutableClass.addPlaylistBrowseIdGetter(
             if-eqz v1, :return_browse_id
             invoke-static { v1 }, $actionToBrowseEndpointMethod
             move-result-object v1
-            if-eqz v1, :return_browse_id
             iget-object v1, v1, $browseEndpointBrowseIdField
-            if-eqz v1, :return_browse_id
             const-string v2, "$PLAYLIST_BROWSE_ID_PREFIX"
             invoke-virtual { v1, v2 }, Ljava/lang/String;->startsWith(Ljava/lang/String;)Z
             move-result v2
@@ -645,7 +641,7 @@ private fun MutableClass.addPlayableMediaIdGetter(
         name = "patch_getPlayableMediaId",
         parameters = emptyList(),
         returnType = "Ljava/lang/String;",
-        registerCount = 3,
+        registerCount = 2,
         instructions = """
             # YTM's row-action selector reads field i and only uses k when i is absent.
             iget-object v0, p0, $actionFieldI
@@ -653,10 +649,7 @@ private fun MutableClass.addPlayableMediaIdGetter(
             invoke-static { v0 }, $createPlayableMediaIdMethod
             move-result-object v0
             check-cast v0, Ljava/lang/String;
-            if-eqz v0, :try_for_playable_id
-            invoke-virtual { v0 }, Ljava/lang/String;->isEmpty()Z
-            move-result v1
-            if-eqz v1, :return_playable_media_id
+            goto :return_playable_media_id
 
             :try_for_playable_id
             iget-object v0, p0, $actionFieldK

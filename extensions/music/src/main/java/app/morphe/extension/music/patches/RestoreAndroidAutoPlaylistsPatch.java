@@ -82,14 +82,14 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     public interface GridRenderer {
         // The phone Library grid mixes playlists with artists, podcasts, and other content.
-        @Nullable Iterable<?> patch_getRows();
+        @NonNull Iterable<?> patch_getRows();
         // NEXT requests another batch; RELOAD replaces the current grid.
-        @Nullable Iterable<?> patch_getContinuationActions();
+        @NonNull Iterable<?> patch_getContinuationActions();
     }
 
     // Protobuf field 175617300 contains the songs below an opened playlist's header.
     public interface OpenedPlaylistSongs {
-        @Nullable Iterable<PlaylistOrTrack> patch_getSongs();
+        @NonNull Iterable<PlaylistOrTrack> patch_getSongs();
     }
 
     // Carries the requested Playlists folder ID and the playlist list returned to Android Auto.
@@ -234,9 +234,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     private static void collectPlaylistsFromGrid(
             GridRenderer gridRenderer, PhonePlaylistsState state) {
-        Iterable<?> gridRows = gridRenderer.patch_getRows();
-        if (gridRows == null) return;
-        for (Object gridRow : gridRows) {
+        for (Object gridRow : gridRenderer.patch_getRows()) {
             if (!(gridRow instanceof PlaylistOrTrack)) continue;
             try {
                 addPhonePlaylist((PlaylistOrTrack) gridRow, state);
@@ -248,10 +246,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
 
     @Nullable
     private static Object firstContinuationAction(GridRenderer gridRenderer) {
-        // Library pagination returns one NEXT action, or none after the last batch.
-        Iterable<?> continuationActions = gridRenderer.patch_getContinuationActions();
-        if (continuationActions == null) return null;
-        Iterator<?> actions = continuationActions.iterator();
+        Iterator<?> actions = gridRenderer.patch_getContinuationActions().iterator();
         return actions.hasNext() ? actions.next() : null;
     }
 
@@ -300,8 +295,8 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                         String playableMediaId = LIKED_MUSIC_BROWSE_ID.equals(
                                 phonePlaylist.playlistBrowseId)
                                 ? findFirstPlayableSongMediaId(playlistResponse)
-                                : playlistResponse.patch_getPlayButtonMediaId();
-                        if (playableMediaId != null && !playableMediaId.isEmpty()) {
+                                : playlistResponse.patch_getPlayableMediaId();
+                        if (playableMediaId != null) {
                             androidAutoPlaylists[playlistIndex] = createAndroidAutoPlaylist(
                                     playableMediaId, phonePlaylist.title, phonePlaylist.subtitle,
                                     phonePlaylist.artworkUri);
@@ -355,14 +350,10 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             if (sectionList == null) continue;
             for (Object sectionContent : sectionList.patch_getContents()) {
                 if (!(sectionContent instanceof OpenedPlaylistSongs)) continue;
-                Iterable<PlaylistOrTrack> songs =
-                        ((OpenedPlaylistSongs) sectionContent).patch_getSongs();
-                if (songs == null) continue;
-                for (PlaylistOrTrack song : songs) {
+                for (PlaylistOrTrack song :
+                        ((OpenedPlaylistSongs) sectionContent).patch_getSongs()) {
                     String playableMediaId = song.patch_getPlayableMediaId();
-                    if (playableMediaId != null && !playableMediaId.isEmpty()) {
-                        return playableMediaId;
-                    }
+                    if (playableMediaId != null) return playableMediaId;
                 }
             }
         }
