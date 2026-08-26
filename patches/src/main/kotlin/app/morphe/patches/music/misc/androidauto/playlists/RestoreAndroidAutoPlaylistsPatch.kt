@@ -69,9 +69,6 @@ private const val TITLE_FIELD_NAME = "g"
 private const val SUBTITLE_FIELD_NAME = "h"
 private const val PLAYLIST_BROWSE_ID_PREFIX = "VL"
 private const val PLAYLIST_HEADER_FIELD_NAME = "q"
-private const val LISTENABLE_FUTURE_CLASS =
-    "Lcom/google/common/util/concurrent/ListenableFuture;"
-
 @Suppress("unused")
 val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
     name = "Restore playlists in Android Auto",
@@ -254,9 +251,10 @@ private fun BytecodePatchContext.addBrowseResponseInterface(
         createPlayableMediaIdMethod,
     )
     browseResponseClass.addInterfaceMethod(
-        name = "patch_getTabs",
-        parameters = emptyList(),
-        returnType = "Ljava/lang/Iterable;",
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_BROWSE_RESPONSE_INTERFACE,
+            "patch_getTabs",
+        ),
         registerCount = 1,
         instructions = """
             invoke-virtual { p0 }, $getTabsMethod
@@ -265,9 +263,10 @@ private fun BytecodePatchContext.addBrowseResponseInterface(
         """,
     )
     browseResponseClass.addInterfaceMethod(
-        name = "patch_getMorePlaylists",
-        parameters = emptyList(),
-        returnType = EXTENSION_GRID_RENDERER_INTERFACE,
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_BROWSE_RESPONSE_INTERFACE,
+            "patch_getMorePlaylists",
+        ),
         registerCount = 2,
         instructions = """
             invoke-virtual { p0 }, $getPaginationResponseMethod
@@ -288,9 +287,10 @@ private fun BytecodePatchContext.addBrowseTabInterface(
     val browseTabClass = mutableClassDefBy(getSectionListMethod.definingClass)
     browseTabClass.interfaces.add(EXTENSION_BROWSE_TAB_INTERFACE)
     browseTabClass.addInterfaceMethod(
-        name = "patch_getSectionList",
-        parameters = emptyList(),
-        returnType = EXTENSION_SECTION_LIST_INTERFACE,
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_BROWSE_TAB_INTERFACE,
+            "patch_getSectionList",
+        ),
         registerCount = 1,
         instructions = """
             invoke-virtual { p0 }, $getSectionListMethod
@@ -307,9 +307,10 @@ private fun BytecodePatchContext.addSectionListInterface(
     val sectionListClass = mutableClassDefBy(getSectionContentsMethod.definingClass)
     sectionListClass.interfaces.add(EXTENSION_SECTION_LIST_INTERFACE)
     sectionListClass.addInterfaceMethod(
-        name = "patch_getContents",
-        parameters = emptyList(),
-        returnType = "Ljava/lang/Iterable;",
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_SECTION_LIST_INTERFACE,
+            "patch_getContents",
+        ),
         registerCount = 1,
         instructions = """
             invoke-virtual { p0 }, $getSectionContentsMethod
@@ -327,9 +328,10 @@ private fun BytecodePatchContext.addGridRendererInterface(
     val gridRendererClass = mutableClassDefBy(gridRendererType)
     gridRendererClass.interfaces.add(EXTENSION_GRID_RENDERER_INTERFACE)
     gridRendererClass.addInterfaceMethod(
-        name = "patch_getRows",
-        parameters = emptyList(),
-        returnType = "Ljava/lang/Iterable;",
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_GRID_RENDERER_INTERFACE,
+            "patch_getRows",
+        ),
         registerCount = 1,
         instructions = """
             invoke-static { p0 }, $getRowsMethod
@@ -338,9 +340,10 @@ private fun BytecodePatchContext.addGridRendererInterface(
         """,
     )
     gridRendererClass.addInterfaceMethod(
-        name = "patch_getContinuationActions",
-        parameters = emptyList(),
-        returnType = "Ljava/lang/Iterable;",
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_GRID_RENDERER_INTERFACE,
+            "patch_getContinuationActions",
+        ),
         registerCount = 1,
         instructions = """
             invoke-static { p0 }, $getContinuationActionsMethod
@@ -357,9 +360,10 @@ private fun BytecodePatchContext.addOpenedPlaylistSongsInterface(
     val openedPlaylistSongsClass = mutableClassDefBy(openedPlaylistSongsType)
     openedPlaylistSongsClass.interfaces.add(EXTENSION_OPENED_PLAYLIST_SONGS_INTERFACE)
     openedPlaylistSongsClass.addInterfaceMethod(
-        name = "patch_getSongs",
-        parameters = emptyList(),
-        returnType = "Ljava/lang/Iterable;",
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_OPENED_PLAYLIST_SONGS_INTERFACE,
+            "patch_getSongs",
+        ),
         registerCount = 2,
         instructions = """
             const/4 v0, 0x0
@@ -430,9 +434,10 @@ private fun BytecodePatchContext.addOpenedPlaylistPlayableMediaIdGetter(
         } ?: throw PatchException("Could not resolve the playlist header content field")
 
     browseResponseClass.addInterfaceMethod(
-        name = "patch_getPlayableMediaId",
-        parameters = emptyList(),
-        returnType = "Ljava/lang/String;",
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_BROWSE_RESPONSE_INTERFACE,
+            "patch_getPlayableMediaId",
+        ),
         registerCount = 2,
         instructions = """
             iget-object p0, p0, $browseResponseProtoField
@@ -553,27 +558,30 @@ private fun BytecodePatchContext.patchPlaylistOrTrack() {
     val playlistOrTrackClass = mutableClassDefBy(playlistOrTrackType)
     playlistOrTrackClass.interfaces.add(EXTENSION_PLAYLIST_OR_TRACK_INTERFACE)
     playlistOrTrackClass.addPlaylistBrowseIdGetter(
+        extensionInterfaceMethod(EXTENSION_PLAYLIST_OR_TRACK_INTERFACE, "patch_getPlaylistBrowseId"),
         actionFieldI,
         actionFieldK,
         actionToBrowseEndpointMethod,
         browseEndpointBrowseIdField,
     )
     playlistOrTrackClass.addPlayableMediaIdGetter(
+        extensionInterfaceMethod(EXTENSION_PLAYLIST_OR_TRACK_INTERFACE, "patch_getPlayableMediaId"),
         actionFieldI,
         actionFieldK,
         createPlayableMediaIdMethod,
     )
     playlistOrTrackClass.addTextGetter(
-        "patch_getTitle",
+        extensionInterfaceMethod(EXTENSION_PLAYLIST_OR_TRACK_INTERFACE, "patch_getTitle"),
         titleField,
         formatTextMethod,
     )
     playlistOrTrackClass.addTextGetter(
-        "patch_getSubtitle",
+        extensionInterfaceMethod(EXTENSION_PLAYLIST_OR_TRACK_INTERFACE, "patch_getSubtitle"),
         subtitleField,
         formatTextMethod,
     )
     playlistOrTrackClass.addArtworkUriGetter(
+        extensionInterfaceMethod(EXTENSION_PLAYLIST_OR_TRACK_INTERFACE, "patch_getArtworkUri"),
         artworkContainerField,
         decodeArtworkPayloadMethod,
         thumbnailField,
@@ -582,15 +590,14 @@ private fun BytecodePatchContext.patchPlaylistOrTrack() {
 }
 
 private fun MutableClass.addPlaylistBrowseIdGetter(
+    interfaceMethod: Method,
     actionFieldI: FieldReference,
     actionFieldK: FieldReference,
     actionToBrowseEndpointMethod: Method,
     browseEndpointBrowseIdField: FieldReference,
 ) {
     addInterfaceMethod(
-        name = "patch_getPlaylistBrowseId",
-        parameters = emptyList(),
-        returnType = "Ljava/lang/String;",
+        interfaceMethod = interfaceMethod,
         registerCount = 4,
         instructions = """
             # Accept a VL Browse ID from either field, but reject conflicting IDs.
@@ -633,14 +640,13 @@ private fun MutableClass.addPlaylistBrowseIdGetter(
 }
 
 private fun MutableClass.addPlayableMediaIdGetter(
+    interfaceMethod: Method,
     actionFieldI: FieldReference,
     actionFieldK: FieldReference,
     createPlayableMediaIdMethod: Method,
 ) {
     addInterfaceMethod(
-        name = "patch_getPlayableMediaId",
-        parameters = emptyList(),
-        returnType = "Ljava/lang/String;",
+        interfaceMethod = interfaceMethod,
         registerCount = 2,
         instructions = """
             # YTM's row-action selector reads field i and only uses k when i is absent.
@@ -669,14 +675,12 @@ private fun MutableClass.addPlayableMediaIdGetter(
 }
 
 private fun MutableClass.addTextGetter(
-    name: String,
+    interfaceMethod: Method,
     textField: FieldReference,
     formatTextMethod: Method,
 ) {
     addInterfaceMethod(
-        name = name,
-        parameters = emptyList(),
-        returnType = "Ljava/lang/CharSequence;",
+        interfaceMethod = interfaceMethod,
         registerCount = 3,
         instructions = """
             iget-object v0, p0, $textField
@@ -690,15 +694,14 @@ private fun MutableClass.addTextGetter(
 }
 
 private fun MutableClass.addArtworkUriGetter(
+    interfaceMethod: Method,
     artworkContainerField: FieldReference,
     decodeArtworkPayloadMethod: Method,
     thumbnailField: FieldReference,
     createArtworkUriMethod: MethodReference,
 ) {
     addInterfaceMethod(
-        name = "patch_getArtworkUri",
-        parameters = emptyList(),
-        returnType = "Landroid/net/Uri;",
+        interfaceMethod = interfaceMethod,
         registerCount = 2,
         instructions = """
             iget-object v0, p0, $artworkContainerField
@@ -775,9 +778,10 @@ private fun BytecodePatchContext.patchPhoneBrowseRequests() {
     val phoneBrowseRequestsClass = mutableClassDefBy(phoneBrowseRequestsType)
     phoneBrowseRequestsClass.interfaces.add(EXTENSION_PHONE_BROWSE_REQUESTS_INTERFACE)
     phoneBrowseRequestsClass.addInterfaceMethod(
-        name = "patch_requestBrowse",
-        parameters = listOf("Ljava/lang/String;", "Ljava/util/concurrent/Executor;"),
-        returnType = LISTENABLE_FUTURE_CLASS,
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_PHONE_BROWSE_REQUESTS_INTERFACE,
+            "patch_requestBrowse",
+        ),
         registerCount = 5,
         instructions = """
             invoke-virtual { p0 }, $createBrowseRequestMethod
@@ -795,9 +799,10 @@ private fun BytecodePatchContext.patchPhoneBrowseRequests() {
     val continuationActionType = createPaginationRequestMethod
         .parameterTypes.single().toString()
     phoneBrowseRequestsClass.addInterfaceMethod(
-        name = "patch_requestMorePlaylists",
-        parameters = listOf("Ljava/lang/Object;", "Ljava/util/concurrent/Executor;"),
-        returnType = LISTENABLE_FUTURE_CLASS,
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_PHONE_BROWSE_REQUESTS_INTERFACE,
+            "patch_requestMorePlaylists",
+        ),
         registerCount = 3,
         instructions = """
             check-cast p1, $continuationActionType
@@ -852,9 +857,10 @@ private fun BytecodePatchContext.addAndroidAutoPlaylistsRequestInterface(
 
     androidAutoRequestClass.interfaces.add(EXTENSION_ANDROID_AUTO_PLAYLISTS_REQUEST_INTERFACE)
     androidAutoRequestClass.addInterfaceMethod(
-        name = "patch_getRequestedMediaId",
-        parameters = emptyList(),
-        returnType = "Ljava/lang/String;",
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_ANDROID_AUTO_PLAYLISTS_REQUEST_INTERFACE,
+            "patch_getRequestedMediaId",
+        ),
         registerCount = 1,
         instructions = """
             iget-object p0, p0, $requestedMediaIdHolderField
@@ -865,9 +871,10 @@ private fun BytecodePatchContext.addAndroidAutoPlaylistsRequestInterface(
     // On YTM 9.15.51, b(List) forwards to c(List, null).
     val usesTwoArgumentDeliveryMethod = deliverAndroidAutoMediaItemsMethod.parameterTypes.size == 2
     androidAutoRequestClass.addInterfaceMethod(
-        name = "patch_deliverAndroidAutoPlaylists",
-        parameters = listOf("Ljava/util/List;"),
-        returnType = "V",
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_ANDROID_AUTO_PLAYLISTS_REQUEST_INTERFACE,
+            "patch_deliverAndroidAutoPlaylists",
+        ),
         registerCount = if (usesTwoArgumentDeliveryMethod) 3 else 2,
         instructions = if (usesTwoArgumentDeliveryMethod) {
             """
@@ -884,19 +891,25 @@ private fun BytecodePatchContext.addAndroidAutoPlaylistsRequestInterface(
     )
 }
 
-private fun MutableClass.addInterfaceMethod(
+private fun BytecodePatchContext.extensionInterfaceMethod(
+    interfaceType: String,
     name: String,
-    parameters: List<String>,
-    returnType: String,
+) = classDefBy(interfaceType).methods.singleOrNull { method -> method.name == name }
+    ?: throw PatchException("Could not resolve $name in $interfaceType")
+
+private fun MutableClass.addInterfaceMethod(
+    interfaceMethod: Method,
     registerCount: Int,
     instructions: String,
 ) {
     methods.add(
         ImmutableMethod(
             type,
-            name,
-            parameters.map { parameter -> ImmutableMethodParameter(parameter, null, null) },
-            returnType,
+            interfaceMethod.name,
+            interfaceMethod.parameters.map { parameter ->
+                ImmutableMethodParameter(parameter.type, null, null)
+            },
+            interfaceMethod.returnType,
             AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
             null,
             null,
