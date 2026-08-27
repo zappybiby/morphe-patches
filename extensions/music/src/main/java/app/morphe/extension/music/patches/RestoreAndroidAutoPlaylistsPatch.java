@@ -17,7 +17,6 @@ import androidx.annotation.Nullable;
 import com.google.common.util.concurrent.ListenableFuture;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -47,6 +46,9 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final String LIKED_MUSIC_BROWSE_ID = "VLLM";
     private static final String EPISODES_FOR_LATER_BROWSE_ID = "VLSE";
     private static final String PLAYLISTS_TITLE_RESOURCE_NAME = "library_playlists_shelf_title";
+    // Resolving 33 playlists took over one minute; stalled Browse futures remained pending for two minutes.
+    // Return the resolved playlists after two minutes instead of retrying the requests.
+    private static final int ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS = 120_000;
     private static final Executor BACKGROUND_EXECUTOR = Utils::runOnBackgroundThread;
     // A playlist named Playlists starts playback; Android Auto's Playlists folder opens the list.
     private static final Set<String> PLAYLISTS_TITLE_MATCH_MEDIA_IDS =
@@ -133,6 +135,9 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             if (phoneRequests == null) return false;
             if (!isAndroidAutoPlaylistsRequest(androidAutoRequest)) return false;
             PhonePlaylistsState state = new PhonePlaylistsState(phoneRequests);
+            Utils.runOnMainThreadDelayed(
+                    () -> deliverAndroidAutoPlaylists(androidAutoRequest, state),
+                    ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS);
             requestPhoneLibrary(androidAutoRequest, state);
             return true;
         } catch (RuntimeException ex) {
@@ -186,19 +191,30 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
                 Logger.printException(() -> "YTM Library request interrupted", ex);
-                deliverAndroidAutoPlaylists(androidAutoRequest, Collections.emptyList());
+                deliverAndroidAutoPlaylists(androidAutoRequest, state);
             } catch (ExecutionException | RuntimeException ex) {
                 Logger.printException(() -> "YTM Library request failed", ex);
-                deliverAndroidAutoPlaylists(androidAutoRequest, Collections.emptyList());
+                deliverAndroidAutoPlaylists(androidAutoRequest, state);
             }
         }, BACKGROUND_EXECUTOR);
     }
 
     private static void deliverAndroidAutoPlaylists(
             AndroidAutoPlaylistsRequest androidAutoRequest,
-            List<MediaBrowserCompat.MediaItem> androidAutoPlaylists) {
+            PhonePlaylistsState state) {
+        List<MediaBrowserCompat.MediaItem> playableAndroidAutoPlaylists;
+        synchronized (state) {
+            if (state.androidAutoResultDelivered) return;
+            state.androidAutoResultDelivered = true;
+            playableAndroidAutoPlaylists = new ArrayList<>(state.androidAutoPlaylists.length);
+            for (MediaBrowserCompat.MediaItem androidAutoPlaylist : state.androidAutoPlaylists) {
+                if (androidAutoPlaylist != null) {
+                    playableAndroidAutoPlaylists.add(androidAutoPlaylist);
+                }
+            }
+        }
         try {
-            androidAutoRequest.patch_deliverAndroidAutoPlaylists(androidAutoPlaylists);
+            androidAutoRequest.patch_deliverAndroidAutoPlaylists(playableAndroidAutoPlaylists);
         } catch (RuntimeException ex) {
             Logger.printException(() -> "Could not deliver Android Auto playlists", ex);
         }
@@ -273,13 +289,17 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             AndroidAutoPlaylistsRequest androidAutoRequest, PhonePlaylistsState state) {
         List<PhonePlaylist> phonePlaylists = state.phonePlaylists;
         if (phonePlaylists.isEmpty()) {
-            deliverAndroidAutoPlaylists(androidAutoRequest, Collections.emptyList());
+            deliverAndroidAutoPlaylists(androidAutoRequest, state);
             return;
         }
 
-        // Request playlists in parallel. Keep Library order and omit failures or missing Play actions.
+        // YTM runs these Browse requests through its own executor and Cronet; no extra queue is
+        // needed here. Keep Library order and omit failures or missing Play actions.
         MediaBrowserCompat.MediaItem[] androidAutoPlaylists =
                 new MediaBrowserCompat.MediaItem[phonePlaylists.size()];
+        synchronized (state) {
+            state.androidAutoPlaylists = androidAutoPlaylists;
+        }
         AtomicInteger remainingPlaylistRequests = new AtomicInteger(phonePlaylists.size());
         for (int index = 0; index < phonePlaylists.size(); index++) {
             int playlistIndex = index;
@@ -297,9 +317,11 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                                 ? findFirstPlayableSongMediaId(playlistResponse)
                                 : playlistResponse.patch_getPlayableMediaId();
                         if (playableMediaId != null) {
-                            androidAutoPlaylists[playlistIndex] = createAndroidAutoPlaylist(
-                                    playableMediaId, phonePlaylist.title, phonePlaylist.subtitle,
-                                    phonePlaylist.artworkUri);
+                            synchronized (state) {
+                                androidAutoPlaylists[playlistIndex] = createAndroidAutoPlaylist(
+                                        playableMediaId, phonePlaylist.title, phonePlaylist.subtitle,
+                                        phonePlaylist.artworkUri);
+                            }
                         }
                     } catch (InterruptedException ex) {
                         Thread.currentThread().interrupt();
@@ -314,8 +336,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                                 ex);
                     } finally {
                         onPlaylistRequestFinished(
-                                androidAutoRequest, androidAutoPlaylists,
-                                remainingPlaylistRequests);
+                                androidAutoRequest, state, remainingPlaylistRequests);
                     }
                 }, BACKGROUND_EXECUTOR);
             } catch (RuntimeException ex) {
@@ -324,24 +345,17 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                                 + phonePlaylist.playlistBrowseId,
                         ex);
                 onPlaylistRequestFinished(
-                        androidAutoRequest, androidAutoPlaylists, remainingPlaylistRequests);
+                        androidAutoRequest, state, remainingPlaylistRequests);
             }
         }
     }
 
     private static void onPlaylistRequestFinished(
             AndroidAutoPlaylistsRequest androidAutoRequest,
-            MediaBrowserCompat.MediaItem[] androidAutoPlaylists,
+            PhonePlaylistsState state,
             AtomicInteger remainingPlaylistRequests) {
         if (remainingPlaylistRequests.decrementAndGet() != 0) return;
-        List<MediaBrowserCompat.MediaItem> playableAndroidAutoPlaylists =
-                new ArrayList<>(androidAutoPlaylists.length);
-        for (MediaBrowserCompat.MediaItem androidAutoPlaylist : androidAutoPlaylists) {
-            if (androidAutoPlaylist != null) {
-                playableAndroidAutoPlaylists.add(androidAutoPlaylist);
-            }
-        }
-        deliverAndroidAutoPlaylists(androidAutoRequest, playableAndroidAutoPlaylists);
+        deliverAndroidAutoPlaylists(androidAutoRequest, state);
     }
 
     private static String findFirstPlayableSongMediaId(BrowseResponse playlistResponse) {
@@ -396,6 +410,9 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         private final PhoneBrowseRequests phoneBrowseRequests;
         private final List<PhonePlaylist> phonePlaylists = new ArrayList<>();
         private final Set<String> seenPlaylistBrowseIds = new HashSet<>();
+        private boolean androidAutoResultDelivered;
+        private MediaBrowserCompat.MediaItem[] androidAutoPlaylists =
+                new MediaBrowserCompat.MediaItem[0];
 
         private PhonePlaylistsState(PhoneBrowseRequests requests) {
             this.phoneBrowseRequests = requests;
