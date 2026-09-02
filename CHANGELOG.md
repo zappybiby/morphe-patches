@@ -1,3 +1,14 @@
+## [0.2.2](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.2.2) (2026-09-02)
+
+### Changes
+
+* **YouTube Music:** Limit Android Auto playlist loading to two minutes
+* **YouTube Music:** Return playlists that loaded successfully when another playlist request stalls
+
+### Development
+
+* Remove redundant or unnecessary null checks
+
 ## [0.2.1](https://github.com/zappybiby/morphe-patches/releases/tag/restore-android-auto-playlists-v0.2.1) (2026-08-24)
 
 ### Changes

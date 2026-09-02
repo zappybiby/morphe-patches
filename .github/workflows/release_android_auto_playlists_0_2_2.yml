@@ -1,0 +1,59 @@
+name: Release Android Auto playlists 0.2.2
+
+on:
+  push:
+    branches:
+      - restore-android-auto-playlists-source
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Java
+        uses: actions/setup-java@v5.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Gradle
+        uses: burrunan/gradle-cache-action@v3
+
+      - name: Build standalone patch
+        run: ./gradlew :aa-playlist-patch:buildAndroid --no-daemon
+
+      - name: Verify artifact
+        run: test -f aa-playlist-patch/build/libs/restore-android-auto-playlists-0.2.2.mpp
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes_file" <<'EOF'
+          Main changes:
+          Two minute limit to load playlists to prevent indefinite loading if one fails. Also shows the playlists that were able to load in cases where one playlist fails to load.
+
+          Dev changes:
+          Removed redundant or unnecessary null checks.
+
+          Notes:
+          My attempts to find a good way to load playlists incrementally, instead of waiting for all to return first, has not been fruitful so far. Using `onChildrenLoad` did technically work, but the method tried added considerable delays / problems compared to the current approach. I gave up on it for now and might have to revisit it or find something else.
+
+          For reference, our current method when loaded/warm loads 35 playlists in about 22 seconds. On a new cold start, closer to 40-60 seconds.
+
+          Despite not finding a way to progressively load playlists, pagination is handled, YT loads up to 25 at once, so we request until there are no more pages to load.
+
+          Most testing done on 9.15 and 9.33. Expected to support 9.32 as well.
+          EOF
+          gh release create restore-android-auto-playlists-v0.2.2 \
+            aa-playlist-patch/build/libs/restore-android-auto-playlists-0.2.2.mpp \
+            --target "$GITHUB_SHA" \
+            --title "Play Android Auto playlists v0.2.2" \
+            --notes-file "$notes_file"
