@@ -26,6 +26,8 @@ jobs:
         uses: burrunan/gradle-cache-action@v3
 
       - name: Build standalone patch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: ./gradlew :aa-playlist-patch:buildAndroid --no-daemon
 
       - name: Verify artifact
