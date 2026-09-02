@@ -17,7 +17,6 @@ import androidx.annotation.Nullable;
 import com.google.common.util.concurrent.ListenableFuture;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -26,334 +25,412 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.ResourceUtils;
 import app.morphe.extension.shared.Utils;
 
 /**
- * Loads YTM's phone Library when Android Auto requests Playlists.
+ * Returns the playlists shown in YTM's phone Library when Android Auto opens Playlists.
  *
- * <p>FEmusic_library_landing returns playlist titles and Browse IDs in GridRenderer. Playlist pages
- * contain the playback commands used to create Android Auto media IDs.
+ * <p>The phone Library also contains artists, podcasts, New Episodes, and Episodes for Later, so
+ * only playlists are kept. Each playlist's Play button supplies the media ID Android Auto uses to
+ * start playback. Liked Music has no Play button, so its first playable song starts the queue.
+ *
+ * <p>The Kotlin patch adds the interfaces and methods below to YTM's obfuscated classes.
  */
 @SuppressWarnings("unused")
 public final class RestoreAndroidAutoPlaylistsPatch {
-    private static final String LIBRARY_BROWSE_ID = "FEmusic_library_landing";
+    private static final String PHONE_LIBRARY_BROWSE_ID = "FEmusic_library_landing";
     private static final String LIKED_MUSIC_BROWSE_ID = "VLLM";
     private static final String EPISODES_FOR_LATER_BROWSE_ID = "VLSE";
-    private static final String PLAYLISTS_TITLE_RESOURCE = "library_playlists_shelf_title";
-    private static final Executor REQUEST_EXECUTOR = Utils::runOnBackgroundThread;
-    private static final Set<String> PLAYLIST_CATEGORY_IDS =
+    private static final String PLAYLISTS_TITLE_RESOURCE_NAME = "library_playlists_shelf_title";
+    // Resolving 33 playlists took over one minute; stalled Browse futures remained pending for two minutes.
+    // Return the resolved playlists after two minutes instead of retrying the requests.
+    private static final int ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS = 120_000;
+    private static final Executor BACKGROUND_EXECUTOR = Utils::runOnBackgroundThread;
+    // A playlist named Playlists starts playback; Android Auto's Playlists folder opens the list.
+    private static final Set<String> PLAYLISTS_TITLE_MATCH_MEDIA_IDS =
             ConcurrentHashMap.newKeySet();
 
-    public interface BrowseService {
-        @NonNull ListenableFuture<?> patch_requestBrowse(
+    // YTM uses this object to request the phone Library, more playlists, and opened playlists.
+    public interface PhoneBrowseRequests {
+        @NonNull ListenableFuture<BrowseResponse> patch_requestBrowse(
                 @NonNull String browseId, @NonNull Executor executor);
-        @NonNull ListenableFuture<?> patch_requestContinuation(
-                @NonNull Object continuation, @NonNull Executor executor);
+        @NonNull ListenableFuture<BrowseResponse> patch_requestMorePlaylists(
+                @NonNull Object continuationAction, @NonNull Executor executor);
     }
 
+    // Library, pagination, and opened-playlist requests all return this class.
     public interface BrowseResponse {
-        @NonNull Iterable<?> patch_getTabs();
-        @Nullable Object patch_getContinuationGrid();
-        @Nullable String patch_getPlaylistMediaId();
+        // Initial Library and opened-playlist responses.
+        @NonNull Iterable<BrowseTab> patch_getTabs();
+        // Pagination responses.
+        @Nullable GridRenderer patch_getMorePlaylists();
+        // Opened-playlist responses.
+        @Nullable String patch_getPlayableMediaId();
     }
 
+    // YTM uses TabRenderer for both Library and opened-playlist contents, even when no tab is visible.
     public interface BrowseTab {
-        @Nullable Object patch_getSectionList();
+        @Nullable SectionList patch_getSectionList();
     }
 
+    // SectionListRenderer is an invisible container for the Library grid or opened-playlist songs.
     public interface SectionList {
-        @NonNull Iterable<?>[] patch_getItemLists();
+        @NonNull Iterable<?> patch_getContents();
     }
 
-    public interface PlaylistGrid {
-        @Nullable Iterable<?> patch_getItems();
-        @Nullable Iterable<?> patch_getContinuations();
+    public interface GridRenderer {
+        // The phone Library grid mixes playlists with artists, podcasts, and other content.
+        @NonNull Iterable<?> patch_getRows();
+        // NEXT requests another batch; RELOAD replaces the current grid.
+        @NonNull Iterable<?> patch_getContinuationActions();
     }
 
-    public interface PlaylistShelf {
-        @Nullable Iterable<?> patch_getItems();
+    // Protobuf field 175617300 contains the songs below an opened playlist's header.
+    public interface OpenedPlaylistSongs {
+        @NonNull Iterable<PlaylistOrTrack> patch_getSongs();
     }
 
-    public interface LoadChildrenResult {
-        @Nullable String patch_getParentMediaId();
-        void patch_sendResult(@NonNull List<MediaBrowserCompat.MediaItem> items);
+    // Carries the requested Playlists folder ID and the playlist list returned to Android Auto.
+    public interface AndroidAutoPlaylistsRequest {
+        @Nullable String patch_getRequestedMediaId();
+        void patch_deliverAndroidAutoPlaylists(
+                @NonNull List<MediaBrowserCompat.MediaItem> androidAutoPlaylists);
     }
 
-    public interface MusicItem {
-        @Nullable String patch_getBrowseId();
-        @Nullable String patch_getMediaId();
+    // YTM uses protobuf field 161429595 for a Library playlist or an opened-playlist song.
+    public interface PlaylistOrTrack {
+        @Nullable String patch_getPlaylistBrowseId();
+        @Nullable String patch_getPlayableMediaId();
         @Nullable Uri patch_getArtworkUri();
         @Nullable CharSequence patch_getTitle();
         @Nullable CharSequence patch_getSubtitle();
     }
 
+    // MusicBrowserService recreation replaces this; active loads keep the instance in their state.
     @Nullable
-    private static volatile BrowseService browseService;
+    private static volatile PhoneBrowseRequests phoneBrowseRequests;
 
     private RestoreAndroidAutoPlaylistsPatch() {
     }
 
-    /** Injection point. Called from MusicBrowserService's generated superclass during onCreate. */
-    public static void setBrowseService(@Nullable BrowseService service) {
-        if (service == null) return;
-        if (browseService != service) PLAYLIST_CATEGORY_IDS.clear();
-        browseService = service;
-        Logger.printDebug(() -> "BrowseService ready: " +
-                service.getClass().getName());
+    /** Injection point. Captures the YTM object used for phone Library and playlist requests. */
+    public static void setPhoneBrowseRequests(@NonNull PhoneBrowseRequests requests) {
+        phoneBrowseRequests = requests;
+        Logger.printDebug(() -> "Ready to request phone Library and opened playlists: " +
+                requests.getClass().getName());
     }
 
-    /** Injection point. A true result skips YTM's loadChildren response. */
-    public static boolean replacePlaylists(@NonNull Object result) {
+    /**
+     * Injection point. YTM detaches MediaBrowserService.Result before this hook, so the Android
+     * Auto playlist list can be delivered after the phone requests finish.
+     */
+    public static boolean handleAndroidAutoPlaylists(
+            @NonNull AndroidAutoPlaylistsRequest androidAutoRequest) {
         try {
-            if (browseService == null || !(result instanceof LoadChildrenResult)) {
-                return false;
-            }
-            LoadChildrenResult loadChildrenResult = (LoadChildrenResult) result;
-            if (!isPlaylistRequest(loadChildrenResult)) return false;
-            loadPlaylists(loadChildrenResult);
+            PhoneBrowseRequests phoneRequests = phoneBrowseRequests;
+            if (phoneRequests == null) return false;
+            if (!isAndroidAutoPlaylistsRequest(androidAutoRequest)) return false;
+            PhonePlaylistsState state = new PhonePlaylistsState(phoneRequests);
+            Utils.runOnMainThreadDelayed(
+                    () -> deliverAndroidAutoPlaylists(androidAutoRequest, state),
+                    ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS);
+            requestPhoneLibrary(androidAutoRequest, state);
             return true;
         } catch (RuntimeException ex) {
-            Logger.printException(() -> "Could not start Android Auto playlist request", ex);
+            Logger.printException(() -> "Could not handle Android Auto Playlists request", ex);
             return false;
         }
     }
 
-    /** Injection point. Saves the Playlists parent ID used by later loadChildren requests. */
-    public static void rememberPlaylistCategoryId(
-            @Nullable String mediaId, @Nullable CharSequence title) {
-        if (title == null || !ResourceUtils.getString(PLAYLISTS_TITLE_RESOURCE)
+    /** Injection point. Records media IDs whose title matches Android Auto's localized Playlists. */
+    public static void rememberPlaylistsTitleMatch(
+            @Nullable String androidAutoMediaId, @Nullable CharSequence title) {
+        if (title == null || !ResourceUtils.getString(PLAYLISTS_TITLE_RESOURCE_NAME)
                 .contentEquals(title)) return;
-        if (mediaId != null) PLAYLIST_CATEGORY_IDS.add(mediaId);
+        if (androidAutoMediaId != null) PLAYLISTS_TITLE_MATCH_MEDIA_IDS.add(androidAutoMediaId);
     }
 
-    private static void loadPlaylists(LoadChildrenResult result) {
-        LibraryState state = new LibraryState();
-        loadLibraryPage(result, state,
-                browseService.patch_requestBrowse(LIBRARY_BROWSE_ID, REQUEST_EXECUTOR), false);
+    private static void requestPhoneLibrary(
+            AndroidAutoPlaylistsRequest androidAutoRequest, PhonePlaylistsState state) {
+        handleLibraryResponse(
+                androidAutoRequest, state,
+                state.phoneBrowseRequests.patch_requestBrowse(
+                        PHONE_LIBRARY_BROWSE_ID, BACKGROUND_EXECUTOR),
+                RestoreAndroidAutoPlaylistsPatch::collectLibraryPlaylists);
     }
 
-    private static void loadLibraryPage(
-            LoadChildrenResult result, LibraryState state, ListenableFuture<?> request,
-            boolean isContinuation) {
-        request.addListener(() -> {
+    private static void requestMorePlaylists(
+            AndroidAutoPlaylistsRequest androidAutoRequest, PhonePlaylistsState state,
+            Object continuationAction) {
+        handleLibraryResponse(
+                androidAutoRequest, state,
+                state.phoneBrowseRequests.patch_requestMorePlaylists(
+                        continuationAction, BACKGROUND_EXECUTOR),
+                RestoreAndroidAutoPlaylistsPatch::collectMorePlaylists);
+    }
+
+    private static void handleLibraryResponse(
+            AndroidAutoPlaylistsRequest androidAutoRequest, PhonePlaylistsState state,
+            ListenableFuture<BrowseResponse> libraryResponseFuture,
+            BiFunction<BrowseResponse, PhonePlaylistsState, Object>
+                    collectPlaylistsAndGetContinuation) {
+        libraryResponseFuture.addListener(() -> {
             try {
-                BrowseResponse response = (BrowseResponse) request.get();
-                Object continuation = collectPage(response, state, isContinuation);
-                if (continuation != null) {
-                    loadLibraryPage(result, state,
-                            browseService.patch_requestContinuation(
-                                    continuation, REQUEST_EXECUTOR), true);
+                BrowseResponse libraryResponse = libraryResponseFuture.get();
+                Object continuationAction =
+                        collectPlaylistsAndGetContinuation.apply(libraryResponse, state);
+                if (continuationAction != null) {
+                    requestMorePlaylists(androidAutoRequest, state, continuationAction);
                     return;
                 }
-                loadPlaylistMediaItems(result, state.playlists);
+                requestEachPlaylist(androidAutoRequest, state);
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
-                Logger.printException(() -> "Library Browse request interrupted", ex);
-                sendResult(result, Collections.emptyList());
+                Logger.printException(() -> "YTM Library request interrupted", ex);
+                deliverAndroidAutoPlaylists(androidAutoRequest, state);
             } catch (ExecutionException | RuntimeException ex) {
-                Logger.printException(() -> "Library Browse request failed", ex);
-                sendResult(result, Collections.emptyList());
+                Logger.printException(() -> "YTM Library request failed", ex);
+                deliverAndroidAutoPlaylists(androidAutoRequest, state);
             }
-        }, REQUEST_EXECUTOR);
+        }, BACKGROUND_EXECUTOR);
     }
 
-    private static void sendResult(
-            LoadChildrenResult result, List<MediaBrowserCompat.MediaItem> items) {
+    private static void deliverAndroidAutoPlaylists(
+            AndroidAutoPlaylistsRequest androidAutoRequest,
+            PhonePlaylistsState state) {
+        List<MediaBrowserCompat.MediaItem> playableAndroidAutoPlaylists;
+        synchronized (state) {
+            if (state.androidAutoResultDelivered) return;
+            state.androidAutoResultDelivered = true;
+            playableAndroidAutoPlaylists = new ArrayList<>(state.androidAutoPlaylists.length);
+            for (MediaBrowserCompat.MediaItem androidAutoPlaylist : state.androidAutoPlaylists) {
+                if (androidAutoPlaylist != null) {
+                    playableAndroidAutoPlaylists.add(androidAutoPlaylist);
+                }
+            }
+        }
         try {
-            result.patch_sendResult(items);
+            androidAutoRequest.patch_deliverAndroidAutoPlaylists(playableAndroidAutoPlaylists);
         } catch (RuntimeException ex) {
             Logger.printException(() -> "Could not deliver Android Auto playlists", ex);
         }
     }
 
-    private static Object collectPage(
-            BrowseResponse response, LibraryState state, boolean isContinuation) {
-        Object continuation = null;
-        if (isContinuation) {
-            Object grid = response.patch_getContinuationGrid();
-            if (grid != null) {
-                continuation = collectPlaylists(
-                        Collections.singletonList(grid), state, null);
-            }
-        } else {
-            for (Object tab : response.patch_getTabs()) {
-                SectionList sectionList = (SectionList)
-                        ((BrowseTab) tab).patch_getSectionList();
-                if (sectionList == null) continue;
-                for (Iterable<?> sectionItems : sectionList.patch_getItemLists()) {
-                    continuation = collectPlaylists(sectionItems, state, continuation);
+    private static Object collectLibraryPlaylists(
+            BrowseResponse libraryResponse, PhonePlaylistsState state) {
+        Object continuationAction = null;
+        for (BrowseTab tab : libraryResponse.patch_getTabs()) {
+            SectionList sectionList = tab.patch_getSectionList();
+            if (sectionList == null) continue;
+            for (Object sectionContent : sectionList.patch_getContents()) {
+                if (!(sectionContent instanceof GridRenderer)) continue;
+                GridRenderer gridRenderer = (GridRenderer) sectionContent;
+                collectPlaylistsFromGrid(gridRenderer, state);
+                if (continuationAction == null) {
+                    continuationAction = firstContinuationAction(gridRenderer);
                 }
             }
         }
-        Logger.printDebug(() -> "Found Library playlists: " + state.playlists.size());
-        return continuation;
+        Logger.printDebug(() -> "Found playlists in phone Library: " + state.phonePlaylists.size());
+        return continuationAction;
     }
 
-    private static Object collectPlaylists(
-            Iterable<?> sectionItems, LibraryState state, Object continuation) {
-        for (Object sectionItem : sectionItems) {
-            if (!(sectionItem instanceof PlaylistGrid)) continue;
-            PlaylistGrid grid = (PlaylistGrid) sectionItem;
-            if (continuation == null) {
-                Iterable<?> continuations = grid.patch_getContinuations();
-                if (continuations != null) {
-                    Iterator<?> iterator = continuations.iterator();
-                    if (iterator.hasNext()) continuation = iterator.next();
-                }
-            }
+    private static Object collectMorePlaylists(
+            BrowseResponse libraryResponse, PhonePlaylistsState state) {
+        GridRenderer gridRenderer = libraryResponse.patch_getMorePlaylists();
+        if (gridRenderer == null) return null;
+        collectPlaylistsFromGrid(gridRenderer, state);
+        Logger.printDebug(() -> "Found playlists in phone Library: " + state.phonePlaylists.size());
+        return firstContinuationAction(gridRenderer);
+    }
 
-            Iterable<?> playlistItems = grid.patch_getItems();
-            if (playlistItems == null) continue;
-            for (Object item : playlistItems) {
-                if (!(item instanceof MusicItem)) continue;
-                try {
-                    addPlaylist((MusicItem) item, state);
-                } catch (RuntimeException ex) {
-                    Logger.printException(() -> "Library playlist skipped", ex);
-                }
+    private static void collectPlaylistsFromGrid(
+            GridRenderer gridRenderer, PhonePlaylistsState state) {
+        for (Object gridRow : gridRenderer.patch_getRows()) {
+            if (!(gridRow instanceof PlaylistOrTrack)) continue;
+            try {
+                addPhonePlaylist((PlaylistOrTrack) gridRow, state);
+            } catch (RuntimeException ex) {
+                Logger.printException(() -> "Could not read a Library grid row", ex);
             }
         }
-        return continuation;
     }
 
-    private static void addPlaylist(MusicItem item, LibraryState state) {
-        String browseId = item.patch_getBrowseId();
-        if (browseId == null || state.seenBrowseIds.contains(browseId)) return;
-        // Episodes for Later (VLSE) has no playlist Play command.
-        if (EPISODES_FOR_LATER_BROWSE_ID.equals(browseId)) return;
+    @Nullable
+    private static Object firstContinuationAction(GridRenderer gridRenderer) {
+        Iterator<?> actions = gridRenderer.patch_getContinuationActions().iterator();
+        return actions.hasNext() ? actions.next() : null;
+    }
 
-        CharSequence titleText = item.patch_getTitle();
+    private static void addPhonePlaylist(
+            PlaylistOrTrack playlistOrTrack, PhonePlaylistsState state) {
+        String playlistBrowseId = playlistOrTrack.patch_getPlaylistBrowseId();
+        if (playlistBrowseId == null) return;
+        // Episodes for Later (VLSE) has no Play button.
+        if (EPISODES_FOR_LATER_BROWSE_ID.equals(playlistBrowseId)) return;
+
+        CharSequence titleText = playlistOrTrack.patch_getTitle();
         String title = titleText == null ? "" : titleText.toString();
         if (title.isEmpty()) return;
-        state.seenBrowseIds.add(browseId);
-        // Subtitle and artwork failures do not block playback.
-        state.playlists.add(new LibraryPlaylist(
-                browseId,
+        if (!state.seenPlaylistBrowseIds.add(playlistBrowseId)) return;
+        // Subtitle and artwork are optional for playback.
+        state.phonePlaylists.add(new PhonePlaylist(
+                playlistBrowseId,
                 title,
-                subtitleOrEmpty(item),
-                artworkUriOrNull(item)));
+                subtitleOrEmpty(playlistOrTrack),
+                artworkUriOrNull(playlistOrTrack)));
     }
 
-    private static void loadPlaylistMediaItems(
-            LoadChildrenResult result, List<LibraryPlaylist> playlists) {
-        if (playlists.isEmpty()) {
-            sendResult(result, Collections.emptyList());
+    private static void requestEachPlaylist(
+            AndroidAutoPlaylistsRequest androidAutoRequest, PhonePlaylistsState state) {
+        List<PhonePlaylist> phonePlaylists = state.phonePlaylists;
+        if (phonePlaylists.isEmpty()) {
+            deliverAndroidAutoPlaylists(androidAutoRequest, state);
             return;
         }
 
-        // The array preserves Library order when requests finish out of order.
-        MediaBrowserCompat.MediaItem[] items = new MediaBrowserCompat.MediaItem[playlists.size()];
-        AtomicInteger remaining = new AtomicInteger(playlists.size());
-        for (int index = 0; index < playlists.size(); index++) {
-            int itemIndex = index;
-            LibraryPlaylist playlist = playlists.get(index);
-            ListenableFuture<?> request = browseService.patch_requestBrowse(
-                    playlist.browseId, REQUEST_EXECUTOR);
-            request.addListener(() -> {
-                try {
-                    BrowseResponse response = (BrowseResponse) request.get();
-                    // Liked Music (VLLM) has no ButtonRenderer Play command in response.q.
-                    String mediaId = LIKED_MUSIC_BROWSE_ID.equals(playlist.browseId)
-                            ? firstTrackMediaId(response)
-                            : response.patch_getPlaylistMediaId();
-                    if (mediaId != null && !mediaId.isEmpty()) {
-                        items[itemIndex] = createMediaItem(
-                                mediaId, playlist.title, playlist.subtitle, playlist.artwork);
+        // YTM runs these Browse requests through its own executor and Cronet; no extra queue is
+        // needed here. Keep Library order and omit failures or missing Play actions.
+        MediaBrowserCompat.MediaItem[] androidAutoPlaylists =
+                new MediaBrowserCompat.MediaItem[phonePlaylists.size()];
+        synchronized (state) {
+            state.androidAutoPlaylists = androidAutoPlaylists;
+        }
+        AtomicInteger remainingPlaylistRequests = new AtomicInteger(phonePlaylists.size());
+        for (int index = 0; index < phonePlaylists.size(); index++) {
+            int playlistIndex = index;
+            PhonePlaylist phonePlaylist = phonePlaylists.get(index);
+            try {
+                ListenableFuture<BrowseResponse> playlistResponseFuture =
+                        state.phoneBrowseRequests.patch_requestBrowse(
+                                phonePlaylist.playlistBrowseId, BACKGROUND_EXECUTOR);
+                playlistResponseFuture.addListener(() -> {
+                    try {
+                        BrowseResponse playlistResponse = playlistResponseFuture.get();
+                        // Liked Music (VLLM) has no Play button; use its first playable song.
+                        String playableMediaId = LIKED_MUSIC_BROWSE_ID.equals(
+                                phonePlaylist.playlistBrowseId)
+                                ? findFirstPlayableSongMediaId(playlistResponse)
+                                : playlistResponse.patch_getPlayableMediaId();
+                        if (playableMediaId != null) {
+                            synchronized (state) {
+                                androidAutoPlaylists[playlistIndex] = createAndroidAutoPlaylist(
+                                        playableMediaId, phonePlaylist.title, phonePlaylist.subtitle,
+                                        phonePlaylist.artworkUri);
+                            }
+                        }
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                        Logger.printException(
+                                () -> "YTM playlist request interrupted: "
+                                        + phonePlaylist.playlistBrowseId,
+                                ex);
+                    } catch (ExecutionException | RuntimeException ex) {
+                        Logger.printException(
+                                () -> "YTM playlist request failed: "
+                                        + phonePlaylist.playlistBrowseId,
+                                ex);
+                    } finally {
+                        onPlaylistRequestFinished(
+                                androidAutoRequest, state, remainingPlaylistRequests);
                     }
-                } catch (InterruptedException ex) {
-                    Thread.currentThread().interrupt();
-                    Logger.printException(() -> "Playlist Browse request interrupted", ex);
-                } catch (ExecutionException | RuntimeException ex) {
-                    Logger.printException(() -> "Playlist Browse request failed", ex);
-                } finally {
-                    completePlaylistRequest(result, items, remaining);
-                }
-            }, REQUEST_EXECUTOR);
+                }, BACKGROUND_EXECUTOR);
+            } catch (RuntimeException ex) {
+                Logger.printException(
+                        () -> "Could not request YTM playlist: "
+                                + phonePlaylist.playlistBrowseId,
+                        ex);
+                onPlaylistRequestFinished(
+                        androidAutoRequest, state, remainingPlaylistRequests);
+            }
         }
     }
 
-    private static void completePlaylistRequest(
-            LoadChildrenResult result, MediaBrowserCompat.MediaItem[] items,
-            AtomicInteger remaining) {
-        if (remaining.decrementAndGet() != 0) return;
-        List<MediaBrowserCompat.MediaItem> mediaItems = new ArrayList<>(items.length);
-        for (MediaBrowserCompat.MediaItem item : items) {
-            if (item != null) mediaItems.add(item);
-        }
-        sendResult(result, mediaItems);
+    private static void onPlaylistRequestFinished(
+            AndroidAutoPlaylistsRequest androidAutoRequest,
+            PhonePlaylistsState state,
+            AtomicInteger remainingPlaylistRequests) {
+        if (remainingPlaylistRequests.decrementAndGet() != 0) return;
+        deliverAndroidAutoPlaylists(androidAutoRequest, state);
     }
 
-    private static String firstTrackMediaId(BrowseResponse response) {
-        for (Object tab : response.patch_getTabs()) {
-            SectionList sectionList = (SectionList)
-                    ((BrowseTab) tab).patch_getSectionList();
+    private static String findFirstPlayableSongMediaId(BrowseResponse playlistResponse) {
+        for (BrowseTab tab : playlistResponse.patch_getTabs()) {
+            SectionList sectionList = tab.patch_getSectionList();
             if (sectionList == null) continue;
-            for (Iterable<?> sectionItems : sectionList.patch_getItemLists()) {
-                for (Object shelf : sectionItems) {
-                    if (!(shelf instanceof PlaylistShelf)) continue;
-                    Iterable<?> playlistTracks = ((PlaylistShelf) shelf).patch_getItems();
-                    if (playlistTracks == null) continue;
-                    for (Object track : playlistTracks) {
-                        if (!(track instanceof MusicItem)) continue;
-                        String mediaId = ((MusicItem) track).patch_getMediaId();
-                        if (mediaId != null && !mediaId.isEmpty()) return mediaId;
-                    }
+            for (Object sectionContent : sectionList.patch_getContents()) {
+                if (!(sectionContent instanceof OpenedPlaylistSongs)) continue;
+                for (PlaylistOrTrack song :
+                        ((OpenedPlaylistSongs) sectionContent).patch_getSongs()) {
+                    String playableMediaId = song.patch_getPlayableMediaId();
+                    if (playableMediaId != null) return playableMediaId;
                 }
             }
         }
         return null;
     }
 
-    private static String subtitleOrEmpty(MusicItem item) {
+    private static String subtitleOrEmpty(PlaylistOrTrack playlist) {
         try {
-            CharSequence subtitle = item.patch_getSubtitle();
+            CharSequence subtitle = playlist.patch_getSubtitle();
             return subtitle == null ? "" : subtitle.toString();
         } catch (RuntimeException ignored) {
             return "";
         }
     }
 
-    private static Uri artworkUriOrNull(MusicItem item) {
+    private static Uri artworkUriOrNull(PlaylistOrTrack playlist) {
         try {
-            return item.patch_getArtworkUri();
+            return playlist.patch_getArtworkUri();
         } catch (RuntimeException ignored) {
             return null;
         }
     }
 
-    private static MediaBrowserCompat.MediaItem createMediaItem(
-            String mediaId, String title, String subtitle, Uri iconUri) {
+    private static MediaBrowserCompat.MediaItem createAndroidAutoPlaylist(
+            String playableMediaId, String title, String subtitle, Uri artworkUri) {
         MediaDescriptionCompat description = new MediaDescriptionCompat(
-                mediaId, title, subtitle, null, null, iconUri, null, null);
+                playableMediaId, title, subtitle, null, null, artworkUri, null, null);
         return new MediaBrowserCompat.MediaItem(
                 description, MediaBrowserCompat.MediaItem.FLAG_PLAYABLE);
     }
 
-    private static boolean isPlaylistRequest(LoadChildrenResult result) {
-        String parentMediaId = result.patch_getParentMediaId();
-        return parentMediaId != null && PLAYLIST_CATEGORY_IDS.contains(parentMediaId);
+    private static boolean isAndroidAutoPlaylistsRequest(
+            AndroidAutoPlaylistsRequest androidAutoRequest) {
+        String requestedMediaId = androidAutoRequest.patch_getRequestedMediaId();
+        return requestedMediaId != null &&
+                PLAYLISTS_TITLE_MATCH_MEDIA_IDS.contains(requestedMediaId);
     }
 
-    private static final class LibraryState {
-        private final List<LibraryPlaylist> playlists = new ArrayList<>();
-        private final Set<String> seenBrowseIds = new HashSet<>();
+    private static final class PhonePlaylistsState {
+        private final PhoneBrowseRequests phoneBrowseRequests;
+        private final List<PhonePlaylist> phonePlaylists = new ArrayList<>();
+        private final Set<String> seenPlaylistBrowseIds = new HashSet<>();
+        private boolean androidAutoResultDelivered;
+        private MediaBrowserCompat.MediaItem[] androidAutoPlaylists =
+                new MediaBrowserCompat.MediaItem[0];
+
+        private PhonePlaylistsState(PhoneBrowseRequests requests) {
+            this.phoneBrowseRequests = requests;
+        }
     }
 
-    private static final class LibraryPlaylist {
-        private final String browseId;
+    private static final class PhonePlaylist {
+        private final String playlistBrowseId;
         private final String title;
         private final String subtitle;
-        private final Uri artwork;
+        private final Uri artworkUri;
 
-        private LibraryPlaylist(
-                String browseId, String title, String subtitle, Uri artwork) {
-            this.browseId = browseId;
+        private PhonePlaylist(
+                String playlistBrowseId, String title, String subtitle, Uri artworkUri) {
+            this.playlistBrowseId = playlistBrowseId;
             this.title = title;
             this.subtitle = subtitle;
-            this.artwork = artwork;
+            this.artworkUri = artworkUri;
         }
     }
 }
