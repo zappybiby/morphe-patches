@@ -113,6 +113,103 @@ private fun BytecodePatchContext.hookPlaylistsTitleMediaIds() {
         }
 }
 
+private fun BytecodePatchContext.patchPhoneBrowseRequests() {
+    val getGridRowsMethod = GridRendererRowsFingerprint.originalMethod
+    val getGridContinuationActionsMethod = gridContinuationActionsFingerprint(
+        getGridRowsMethod,
+    ).originalMethod
+    val browseRequestFromEndpointMethod = BrowseRequestFromEndpointFingerprint.originalMethod
+    val browseRequestType = browseRequestFromEndpointMethod.returnType
+    val createBrowseRequestMethod = browseRequestFromEndpointMethod.instructions.asSequence()
+        .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
+        .filter { reference ->
+            reference.parameterTypes.isEmpty() &&
+                reference.returnType == browseRequestType
+        }
+        .distinct()
+        .singleOrNull()
+        ?: throw PatchException("Could not resolve the method that creates a Browse request")
+    val phoneBrowseRequestsType = createBrowseRequestMethod.definingClass
+    // NEXT and RELOAD share the type accepted by the Library pagination request method.
+    val continuationReaderReturnTypes =
+        getGridContinuationActionsMethod.instructions.asSequence()
+        .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
+        .map { reference -> reference.returnType }
+        .toSet()
+    val createPaginationRequestMethod = classDefBy(
+        phoneBrowseRequestsType,
+    ).methods.singleOrNull { method ->
+        method.returnType == browseRequestType &&
+            method.parameterTypes.singleOrNull()?.toString() in continuationReaderReturnTypes
+    }
+        ?: throw PatchException("Could not resolve the Library pagination request method")
+    val browseRequestSenderFingerprint = sendBrowseRequestFingerprint(
+        phoneBrowseRequestsType,
+        browseRequestType,
+    )
+    val sendBrowseRequestMethod = browseRequestSenderFingerprint.originalMethod
+    val requestBrowseIdField = browseRequestSenderFingerprint.instructionMatches.single()
+        .instruction
+        .getReference<FieldReference>()!!
+
+    val browseRequestMethods = generateSequence(
+        classDefBy(browseRequestType),
+    ) { classDef ->
+        classDef.superclass?.let { superclass -> classDefByOrNull(superclass) }
+    }.flatMap { classDef -> classDef.methods.asSequence() }
+    val clickTrackingParamsSetterMethod = browseRequestMethods
+        // 9.32.51 and 9.33.52 add a public byte[] overload; the protected setter still matches.
+        .firstOrNull { method ->
+            AccessFlags.PROTECTED.isSet(method.accessFlags) &&
+                method.returnType == "V" &&
+                method.parameterTypes.map(CharSequence::toString) == listOf("[B")
+        }
+        ?: throw PatchException("Could not resolve the click tracking parameter setter")
+    val setRequestBrowseIdMethod = setRequestBrowseIdFingerprint(
+        requestBrowseIdField,
+    ).originalMethod
+    val phoneBrowseRequestsClass = mutableClassDefBy(phoneBrowseRequestsType)
+    phoneBrowseRequestsClass.interfaces.add(EXTENSION_PHONE_BROWSE_REQUESTS_INTERFACE)
+    phoneBrowseRequestsClass.addInterfaceMethod(
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_PHONE_BROWSE_REQUESTS_INTERFACE,
+            "patch_requestBrowse",
+        ),
+        registerCount = 5,
+        instructions = """
+            invoke-virtual { p0 }, $createBrowseRequestMethod
+            move-result-object v0
+            invoke-virtual { v0, p1 }, $setRequestBrowseIdMethod
+            # YTM rejects null clickTrackingParams, so pass an empty byte array.
+            const/4 v1, 0x0
+            new-array v1, v1, [B
+            invoke-virtual { v0, v1 }, $clickTrackingParamsSetterMethod
+            invoke-virtual { p0, v0, p2 }, $sendBrowseRequestMethod
+            move-result-object v0
+            return-object v0
+        """,
+    )
+    val continuationActionType = createPaginationRequestMethod
+        .parameterTypes.single().toString()
+    phoneBrowseRequestsClass.addInterfaceMethod(
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_PHONE_BROWSE_REQUESTS_INTERFACE,
+            "patch_requestMorePlaylists",
+        ),
+        registerCount = 3,
+        instructions = """
+            check-cast p1, $continuationActionType
+            invoke-virtual { p0, p1 }, $createPaginationRequestMethod
+            move-result-object p1
+            invoke-virtual { p0, p1, p2 }, $sendBrowseRequestMethod
+            move-result-object p1
+            return-object p1
+        """,
+    )
+
+    capturePhoneBrowseRequests(phoneBrowseRequestsType)
+}
+
 private fun BytecodePatchContext.capturePhoneBrowseRequests(phoneBrowseRequestsType: String) {
     val phoneBrowseRequestsProviderCandidates =
         phoneBrowseRequestsProviderFingerprint(phoneBrowseRequestsType)
@@ -237,6 +334,24 @@ private fun BytecodePatchContext.patchPhoneBrowseResponses() {
     addOpenedPlaylistSongsInterface(getOpenedPlaylistSongsMethod)
 }
 
+private fun BytecodePatchContext.addPaginatedLibraryGridDecoder(
+    decodePaginatedLibraryGridMethod: Method,
+): Method {
+    val clonedDecoderMethod = decodePaginatedLibraryGridMethod.cloneMutable(
+        name = "patch_decodePaginatedLibraryGrid",
+        accessFlags = AccessFlags.PUBLIC.value or AccessFlags.STATIC.value,
+        // The decoder reads the response from p1. Keep an unused first parameter so the copied
+        // bytecode retains the same register layout.
+        parameters = listOf(
+            ImmutableMethodParameter(decodePaginatedLibraryGridMethod.definingClass, null, null),
+        ) + decodePaginatedLibraryGridMethod.parameters,
+    )
+    mutableClassDefBy(decodePaginatedLibraryGridMethod.definingClass).methods.add(
+        clonedDecoderMethod,
+    )
+    return clonedDecoderMethod
+}
+
 private fun BytecodePatchContext.addBrowseResponseInterface(
     getTabsMethod: Method,
     getPaginationResponseMethod: Method,
@@ -276,6 +391,90 @@ private fun BytecodePatchContext.addBrowseResponseInterface(
             invoke-static { v0, p0 }, $paginatedLibraryGridDecoderMethod
             move-result-object p0
             check-cast p0, $EXTENSION_GRID_RENDERER_INTERFACE
+            return-object p0
+        """,
+    )
+}
+
+private fun BytecodePatchContext.addOpenedPlaylistPlayableMediaIdGetter(
+    browseResponseClass: MutableClass,
+    getTabsMethod: Method,
+    createPlayableMediaIdMethod: Method,
+) {
+    val playActionType = createPlayableMediaIdMethod.parameterTypes.single().toString()
+    val playButtonExtensionInitializer = playButtonRendererFingerprint(
+        playActionType,
+    ).originalMethod
+    val buttonRendererType = playButtonExtensionInitializer.instructions
+        .first { instruction -> instruction.opcode == Opcode.CONST_CLASS }
+        .getReference<TypeReference>()!!
+        .type
+    val playlistHeaderType = playButtonExtensionInitializer.instructions
+        .asSequence()
+        .filter { instruction -> instruction.opcode == Opcode.SGET_OBJECT }
+        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+        .first { field -> field.definingClass == field.type }
+        .type
+    val playButtonExtensionField = playButtonExtensionInitializer.instructions
+        .first { instruction -> instruction.opcode == Opcode.SPUT_OBJECT }
+        .getReference<FieldReference>()!!
+    val decodePlayButtonMethod = decodeButtonRendererFingerprint(
+        playlistHeaderType,
+        buttonRendererType,
+        playButtonExtensionField,
+    ).originalMethod
+    val playActionField = buttonRendererActionCopyFingerprint(
+        buttonRendererType,
+        playActionType,
+    ).matchAll()
+        .map { match ->
+            val (playButtonActionReadMatch, _) = match.instructionMatches
+            playButtonActionReadMatch.instruction.getReference<FieldReference>()!!
+        }
+        .distinct()
+        .singleOrNull()
+        ?: throw PatchException("Could not resolve the opened-playlist header Play action")
+
+    val browseResponseProtoField = getTabsMethod.instructions
+        .asSequence()
+        .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
+        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+        .filter { field ->
+            field.definingClass == getTabsMethod.definingClass &&
+                field.type != getTabsMethod.returnType
+        }
+        .distinct()
+        .singleOrNull()
+        ?: throw PatchException("Could not resolve the Browse response message field")
+    // Opened-playlist field q contains the ButtonRenderer used by its Play button.
+    val playlistHeaderContentField =
+        classDefBy(browseResponseProtoField.type).fields.singleOrNull { field ->
+            !AccessFlags.STATIC.isSet(field.accessFlags) &&
+                field.name == PLAYLIST_HEADER_FIELD_NAME &&
+                field.type == playlistHeaderType
+        } ?: throw PatchException("Could not resolve the playlist header content field")
+
+    browseResponseClass.addInterfaceMethod(
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_BROWSE_RESPONSE_INTERFACE,
+            "patch_getPlayableMediaId",
+        ),
+        registerCount = 2,
+        instructions = """
+            iget-object p0, p0, $browseResponseProtoField
+            iget-object p0, p0, $playlistHeaderContentField
+            # true selects ButtonRenderer protobuf field 65153809.
+            const/4 v0, 0x1
+            invoke-static { v0, p0 }, $decodePlayButtonMethod
+            move-result-object p0
+            if-eqz p0, :no_playable_media_id
+            iget-object p0, p0, $playActionField
+            if-eqz p0, :no_playable_media_id
+            invoke-static { p0 }, $createPlayableMediaIdMethod
+            move-result-object p0
+            return-object p0
+            :no_playable_media_id
+            const/4 p0, 0x0
             return-object p0
         """,
     )
@@ -373,108 +572,6 @@ private fun BytecodePatchContext.addOpenedPlaylistSongsInterface(
             return-object p0
         """,
     )
-}
-
-private fun BytecodePatchContext.addOpenedPlaylistPlayableMediaIdGetter(
-    browseResponseClass: MutableClass,
-    getTabsMethod: Method,
-    createPlayableMediaIdMethod: Method,
-) {
-    val playActionType = createPlayableMediaIdMethod.parameterTypes.single().toString()
-    val playButtonExtensionInitializer = playButtonRendererFingerprint(
-        playActionType,
-    ).originalMethod
-    val buttonRendererType = playButtonExtensionInitializer.instructions
-        .first { instruction -> instruction.opcode == Opcode.CONST_CLASS }
-        .getReference<TypeReference>()!!
-        .type
-    val playlistHeaderType = playButtonExtensionInitializer.instructions
-        .asSequence()
-        .filter { instruction -> instruction.opcode == Opcode.SGET_OBJECT }
-        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
-        .first { field -> field.definingClass == field.type }
-        .type
-    val playButtonExtensionField = playButtonExtensionInitializer.instructions
-        .first { instruction -> instruction.opcode == Opcode.SPUT_OBJECT }
-        .getReference<FieldReference>()!!
-    val decodePlayButtonMethod = decodeButtonRendererFingerprint(
-        playlistHeaderType,
-        buttonRendererType,
-        playButtonExtensionField,
-    ).originalMethod
-    val playActionField = buttonRendererActionCopyFingerprint(
-        buttonRendererType,
-        playActionType,
-    ).matchAll()
-        .map { match ->
-            val (playButtonActionReadMatch, _) = match.instructionMatches
-            playButtonActionReadMatch.instruction.getReference<FieldReference>()!!
-        }
-        .distinct()
-        .singleOrNull()
-        ?: throw PatchException("Could not resolve the opened-playlist header Play action")
-
-    val browseResponseProtoField = getTabsMethod.instructions
-        .asSequence()
-        .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
-        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
-        .filter { field ->
-            field.definingClass == getTabsMethod.definingClass &&
-                field.type != getTabsMethod.returnType
-        }
-        .distinct()
-        .singleOrNull()
-        ?: throw PatchException("Could not resolve the Browse response message field")
-    // Opened-playlist field q contains the ButtonRenderer used by its Play button.
-    val playlistHeaderContentField =
-        classDefBy(browseResponseProtoField.type).fields.singleOrNull { field ->
-            !AccessFlags.STATIC.isSet(field.accessFlags) &&
-                field.name == PLAYLIST_HEADER_FIELD_NAME &&
-                field.type == playlistHeaderType
-        } ?: throw PatchException("Could not resolve the playlist header content field")
-
-    browseResponseClass.addInterfaceMethod(
-        interfaceMethod = extensionInterfaceMethod(
-            EXTENSION_BROWSE_RESPONSE_INTERFACE,
-            "patch_getPlayableMediaId",
-        ),
-        registerCount = 2,
-        instructions = """
-            iget-object p0, p0, $browseResponseProtoField
-            iget-object p0, p0, $playlistHeaderContentField
-            # true selects ButtonRenderer protobuf field 65153809.
-            const/4 v0, 0x1
-            invoke-static { v0, p0 }, $decodePlayButtonMethod
-            move-result-object p0
-            if-eqz p0, :no_playable_media_id
-            iget-object p0, p0, $playActionField
-            if-eqz p0, :no_playable_media_id
-            invoke-static { p0 }, $createPlayableMediaIdMethod
-            move-result-object p0
-            return-object p0
-            :no_playable_media_id
-            const/4 p0, 0x0
-            return-object p0
-        """,
-    )
-}
-
-private fun BytecodePatchContext.addPaginatedLibraryGridDecoder(
-    decodePaginatedLibraryGridMethod: Method,
-): Method {
-    val clonedDecoderMethod = decodePaginatedLibraryGridMethod.cloneMutable(
-        name = "patch_decodePaginatedLibraryGrid",
-        accessFlags = AccessFlags.PUBLIC.value or AccessFlags.STATIC.value,
-        // The decoder reads the response from p1. Keep an unused first parameter so the copied
-        // bytecode retains the same register layout.
-        parameters = listOf(
-            ImmutableMethodParameter(decodePaginatedLibraryGridMethod.definingClass, null, null),
-        ) + decodePaginatedLibraryGridMethod.parameters,
-    )
-    mutableClassDefBy(decodePaginatedLibraryGridMethod.definingClass).methods.add(
-        clonedDecoderMethod,
-    )
-    return clonedDecoderMethod
 }
 
 private fun BytecodePatchContext.patchPlaylistOrTrack() {
@@ -720,103 +817,6 @@ private fun MutableClass.addArtworkUriGetter(
     )
 }
 
-private fun BytecodePatchContext.patchPhoneBrowseRequests() {
-    val getGridRowsMethod = GridRendererRowsFingerprint.originalMethod
-    val getGridContinuationActionsMethod = gridContinuationActionsFingerprint(
-        getGridRowsMethod,
-    ).originalMethod
-    val browseRequestFromEndpointMethod = BrowseRequestFromEndpointFingerprint.originalMethod
-    val browseRequestType = browseRequestFromEndpointMethod.returnType
-    val createBrowseRequestMethod = browseRequestFromEndpointMethod.instructions.asSequence()
-        .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
-        .filter { reference ->
-            reference.parameterTypes.isEmpty() &&
-                reference.returnType == browseRequestType
-        }
-        .distinct()
-        .singleOrNull()
-        ?: throw PatchException("Could not resolve the method that creates a Browse request")
-    val phoneBrowseRequestsType = createBrowseRequestMethod.definingClass
-    // NEXT and RELOAD share the type accepted by the Library pagination request method.
-    val continuationReaderReturnTypes =
-        getGridContinuationActionsMethod.instructions.asSequence()
-        .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
-        .map { reference -> reference.returnType }
-        .toSet()
-    val createPaginationRequestMethod = classDefBy(
-        phoneBrowseRequestsType,
-    ).methods.singleOrNull { method ->
-        method.returnType == browseRequestType &&
-            method.parameterTypes.singleOrNull()?.toString() in continuationReaderReturnTypes
-    }
-        ?: throw PatchException("Could not resolve the Library pagination request method")
-    val browseRequestSenderFingerprint = sendBrowseRequestFingerprint(
-        phoneBrowseRequestsType,
-        browseRequestType,
-    )
-    val sendBrowseRequestMethod = browseRequestSenderFingerprint.originalMethod
-    val requestBrowseIdField = browseRequestSenderFingerprint.instructionMatches.single()
-        .instruction
-        .getReference<FieldReference>()!!
-
-    val browseRequestMethods = generateSequence(
-        classDefBy(browseRequestType),
-    ) { classDef ->
-        classDef.superclass?.let { superclass -> classDefByOrNull(superclass) }
-    }.flatMap { classDef -> classDef.methods.asSequence() }
-    val clickTrackingParamsSetterMethod = browseRequestMethods
-        // 9.32.51 and 9.33.52 add a public byte[] overload; the protected setter still matches.
-        .firstOrNull { method ->
-            AccessFlags.PROTECTED.isSet(method.accessFlags) &&
-                method.returnType == "V" &&
-                method.parameterTypes.map(CharSequence::toString) == listOf("[B")
-        }
-        ?: throw PatchException("Could not resolve the click tracking parameter setter")
-    val setRequestBrowseIdMethod = setRequestBrowseIdFingerprint(
-        requestBrowseIdField,
-    ).originalMethod
-    val phoneBrowseRequestsClass = mutableClassDefBy(phoneBrowseRequestsType)
-    phoneBrowseRequestsClass.interfaces.add(EXTENSION_PHONE_BROWSE_REQUESTS_INTERFACE)
-    phoneBrowseRequestsClass.addInterfaceMethod(
-        interfaceMethod = extensionInterfaceMethod(
-            EXTENSION_PHONE_BROWSE_REQUESTS_INTERFACE,
-            "patch_requestBrowse",
-        ),
-        registerCount = 5,
-        instructions = """
-            invoke-virtual { p0 }, $createBrowseRequestMethod
-            move-result-object v0
-            invoke-virtual { v0, p1 }, $setRequestBrowseIdMethod
-            # YTM rejects null clickTrackingParams, so pass an empty byte array.
-            const/4 v1, 0x0
-            new-array v1, v1, [B
-            invoke-virtual { v0, v1 }, $clickTrackingParamsSetterMethod
-            invoke-virtual { p0, v0, p2 }, $sendBrowseRequestMethod
-            move-result-object v0
-            return-object v0
-        """,
-    )
-    val continuationActionType = createPaginationRequestMethod
-        .parameterTypes.single().toString()
-    phoneBrowseRequestsClass.addInterfaceMethod(
-        interfaceMethod = extensionInterfaceMethod(
-            EXTENSION_PHONE_BROWSE_REQUESTS_INTERFACE,
-            "patch_requestMorePlaylists",
-        ),
-        registerCount = 3,
-        instructions = """
-            check-cast p1, $continuationActionType
-            invoke-virtual { p0, p1 }, $createPaginationRequestMethod
-            move-result-object p1
-            invoke-virtual { p0, p1, p2 }, $sendBrowseRequestMethod
-            move-result-object p1
-            return-object p1
-        """,
-    )
-
-    capturePhoneBrowseRequests(phoneBrowseRequestsType)
-}
-
 private fun BytecodePatchContext.patchAndroidAutoPlaylists() {
     val sendEmptyAndroidAutoMediaItemsMethod = SendEmptyAndroidAutoMediaItemsFingerprint.originalMethod
     addAndroidAutoPlaylistsRequestInterface(sendEmptyAndroidAutoMediaItemsMethod)
@@ -891,6 +891,30 @@ private fun BytecodePatchContext.addAndroidAutoPlaylistsRequestInterface(
     )
 }
 
+private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
+    androidAutoRequestHandlerType: String,
+    androidAutoRequestType: String,
+) {
+    val handleAndroidAutoRequestMethod = mutableClassDefBy(
+        androidAutoRequestHandlerType,
+    ).methods.single { method ->
+        method.returnType == "V" &&
+            method.parameterTypes.map(CharSequence::toString) == listOf(androidAutoRequestType)
+    }
+    val handledRegister = handleAndroidAutoRequestMethod.findFreeRegister(0)
+
+    handleAndroidAutoRequestMethod.addInstructionsWithLabels(
+        0,
+        """
+            invoke-static/range { p1 .. p1 }, $EXTENSION_CLASS->handleAndroidAutoPlaylists($EXTENSION_ANDROID_AUTO_PLAYLISTS_REQUEST_INTERFACE)Z
+            move-result v$handledRegister
+            if-eqz v$handledRegister, :resume
+            return-void
+        """,
+        ExternalLabel("resume", handleAndroidAutoRequestMethod.getInstruction<Instruction>(0)),
+    )
+}
+
 private fun BytecodePatchContext.extensionInterfaceMethod(
     interfaceType: String,
     name: String,
@@ -917,29 +941,5 @@ private fun MutableClass.addInterfaceMethod(
         ).toMutable().apply {
             addInstructions(0, instructions)
         },
-    )
-}
-
-private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
-    androidAutoRequestHandlerType: String,
-    androidAutoRequestType: String,
-) {
-    val handleAndroidAutoRequestMethod = mutableClassDefBy(
-        androidAutoRequestHandlerType,
-    ).methods.single { method ->
-        method.returnType == "V" &&
-            method.parameterTypes.map(CharSequence::toString) == listOf(androidAutoRequestType)
-    }
-    val handledRegister = handleAndroidAutoRequestMethod.findFreeRegister(0)
-
-    handleAndroidAutoRequestMethod.addInstructionsWithLabels(
-        0,
-        """
-            invoke-static/range { p1 .. p1 }, $EXTENSION_CLASS->handleAndroidAutoPlaylists($EXTENSION_ANDROID_AUTO_PLAYLISTS_REQUEST_INTERFACE)Z
-            move-result v$handledRegister
-            if-eqz v$handledRegister, :resume
-            return-void
-        """,
-        ExternalLabel("resume", handleAndroidAutoRequestMethod.getInstruction<Instruction>(0)),
     )
 }

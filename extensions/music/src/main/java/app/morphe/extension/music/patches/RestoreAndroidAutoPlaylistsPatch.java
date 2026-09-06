@@ -124,6 +124,14 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 requests.getClass().getName());
     }
 
+    /** Injection point. Records media IDs whose title matches Android Auto's localized Playlists. */
+    public static void rememberPlaylistsTitleMatch(
+            @Nullable String androidAutoMediaId, @Nullable CharSequence title) {
+        if (title == null || !ResourceUtils.getString(PLAYLISTS_TITLE_RESOURCE_NAME)
+                .contentEquals(title)) return;
+        if (androidAutoMediaId != null) PLAYLISTS_TITLE_MATCH_MEDIA_IDS.add(androidAutoMediaId);
+    }
+
     /**
      * Injection point. YTM detaches MediaBrowserService.Result before this hook, so the Android
      * Auto playlist list can be delivered after the phone requests finish.
@@ -146,12 +154,11 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
-    /** Injection point. Records media IDs whose title matches Android Auto's localized Playlists. */
-    public static void rememberPlaylistsTitleMatch(
-            @Nullable String androidAutoMediaId, @Nullable CharSequence title) {
-        if (title == null || !ResourceUtils.getString(PLAYLISTS_TITLE_RESOURCE_NAME)
-                .contentEquals(title)) return;
-        if (androidAutoMediaId != null) PLAYLISTS_TITLE_MATCH_MEDIA_IDS.add(androidAutoMediaId);
+    private static boolean isAndroidAutoPlaylistsRequest(
+            AndroidAutoPlaylistsRequest androidAutoRequest) {
+        String requestedMediaId = androidAutoRequest.patch_getRequestedMediaId();
+        return requestedMediaId != null &&
+                PLAYLISTS_TITLE_MATCH_MEDIA_IDS.contains(requestedMediaId);
     }
 
     private static void requestPhoneLibrary(
@@ -197,27 +204,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 deliverAndroidAutoPlaylists(androidAutoRequest, state);
             }
         }, BACKGROUND_EXECUTOR);
-    }
-
-    private static void deliverAndroidAutoPlaylists(
-            AndroidAutoPlaylistsRequest androidAutoRequest,
-            PhonePlaylistsState state) {
-        List<MediaBrowserCompat.MediaItem> playableAndroidAutoPlaylists;
-        synchronized (state) {
-            if (state.androidAutoResultDelivered) return;
-            state.androidAutoResultDelivered = true;
-            playableAndroidAutoPlaylists = new ArrayList<>(state.androidAutoPlaylists.length);
-            for (MediaBrowserCompat.MediaItem androidAutoPlaylist : state.androidAutoPlaylists) {
-                if (androidAutoPlaylist != null) {
-                    playableAndroidAutoPlaylists.add(androidAutoPlaylist);
-                }
-            }
-        }
-        try {
-            androidAutoRequest.patch_deliverAndroidAutoPlaylists(playableAndroidAutoPlaylists);
-        } catch (RuntimeException ex) {
-            Logger.printException(() -> "Could not deliver Android Auto playlists", ex);
-        }
     }
 
     private static Object collectLibraryPlaylists(
@@ -285,6 +271,23 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 artworkUriOrNull(playlistOrTrack)));
     }
 
+    private static String subtitleOrEmpty(PlaylistOrTrack playlist) {
+        try {
+            CharSequence subtitle = playlist.patch_getSubtitle();
+            return subtitle == null ? "" : subtitle.toString();
+        } catch (RuntimeException ignored) {
+            return "";
+        }
+    }
+
+    private static Uri artworkUriOrNull(PlaylistOrTrack playlist) {
+        try {
+            return playlist.patch_getArtworkUri();
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
     private static void requestEachPlaylist(
             AndroidAutoPlaylistsRequest androidAutoRequest, PhonePlaylistsState state) {
         List<PhonePlaylist> phonePlaylists = state.phonePlaylists;
@@ -350,14 +353,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
-    private static void onPlaylistRequestFinished(
-            AndroidAutoPlaylistsRequest androidAutoRequest,
-            PhonePlaylistsState state,
-            AtomicInteger remainingPlaylistRequests) {
-        if (remainingPlaylistRequests.decrementAndGet() != 0) return;
-        deliverAndroidAutoPlaylists(androidAutoRequest, state);
-    }
-
     private static String findFirstPlayableSongMediaId(BrowseResponse playlistResponse) {
         for (BrowseTab tab : playlistResponse.patch_getTabs()) {
             SectionList sectionList = tab.patch_getSectionList();
@@ -374,23 +369,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         return null;
     }
 
-    private static String subtitleOrEmpty(PlaylistOrTrack playlist) {
-        try {
-            CharSequence subtitle = playlist.patch_getSubtitle();
-            return subtitle == null ? "" : subtitle.toString();
-        } catch (RuntimeException ignored) {
-            return "";
-        }
-    }
-
-    private static Uri artworkUriOrNull(PlaylistOrTrack playlist) {
-        try {
-            return playlist.patch_getArtworkUri();
-        } catch (RuntimeException ignored) {
-            return null;
-        }
-    }
-
     private static MediaBrowserCompat.MediaItem createAndroidAutoPlaylist(
             String playableMediaId, String title, String subtitle, Uri artworkUri) {
         MediaDescriptionCompat description = new MediaDescriptionCompat(
@@ -399,11 +377,33 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 description, MediaBrowserCompat.MediaItem.FLAG_PLAYABLE);
     }
 
-    private static boolean isAndroidAutoPlaylistsRequest(
-            AndroidAutoPlaylistsRequest androidAutoRequest) {
-        String requestedMediaId = androidAutoRequest.patch_getRequestedMediaId();
-        return requestedMediaId != null &&
-                PLAYLISTS_TITLE_MATCH_MEDIA_IDS.contains(requestedMediaId);
+    private static void onPlaylistRequestFinished(
+            AndroidAutoPlaylistsRequest androidAutoRequest,
+            PhonePlaylistsState state,
+            AtomicInteger remainingPlaylistRequests) {
+        if (remainingPlaylistRequests.decrementAndGet() != 0) return;
+        deliverAndroidAutoPlaylists(androidAutoRequest, state);
+    }
+
+    private static void deliverAndroidAutoPlaylists(
+            AndroidAutoPlaylistsRequest androidAutoRequest,
+            PhonePlaylistsState state) {
+        List<MediaBrowserCompat.MediaItem> playableAndroidAutoPlaylists;
+        synchronized (state) {
+            if (state.androidAutoResultDelivered) return;
+            state.androidAutoResultDelivered = true;
+            playableAndroidAutoPlaylists = new ArrayList<>(state.androidAutoPlaylists.length);
+            for (MediaBrowserCompat.MediaItem androidAutoPlaylist : state.androidAutoPlaylists) {
+                if (androidAutoPlaylist != null) {
+                    playableAndroidAutoPlaylists.add(androidAutoPlaylist);
+                }
+            }
+        }
+        try {
+            androidAutoRequest.patch_deliverAndroidAutoPlaylists(playableAndroidAutoPlaylists);
+        } catch (RuntimeException ex) {
+            Logger.printException(() -> "Could not deliver Android Auto playlists", ex);
+        }
     }
 
     private static final class PhonePlaylistsState {
