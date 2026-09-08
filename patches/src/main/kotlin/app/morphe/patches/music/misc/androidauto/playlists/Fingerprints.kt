@@ -31,8 +31,8 @@ private const val BROWSE_TABS_PROTO_FIELD = 58_173_949L
 private const val TAB_RENDERER_PROTO_FIELD = 58_174_010L
 private const val TAB_CONTENT_PRESENT_FLAG = 1L
 private const val SECTION_LIST_CONTENTS_FIELD_NAME = "f"
-private const val PLAYLIST_OR_TRACK_PROTO_FIELD = 161_429_595L
-private const val GRID_PLAYLIST_OR_TRACK_PRESENT_FLAG = 0x40000L
+private const val PLAYLIST_OR_SONG_PROTO_FIELD = 161_429_595L
+private const val GRID_PLAYLIST_OR_SONG_PRESENT_FLAG = 0x40000L
 private const val NEXT_ACTION_PRESENT_FLAG = 0x1L
 private const val RELOAD_ACTION_PRESENT_FLAG = 0x2L
 private const val PLAY_BUTTON_PROTO_FIELD = 65_153_809L
@@ -99,8 +99,8 @@ internal fun musicBrowserServiceSuperclassOnCreateFingerprint(
     ),
 )
 
-internal fun phoneBrowseRequestsProviderFingerprint(
-    phoneBrowseRequestsType: String,
+internal fun browseServiceProviderFingerprint(
+    browseServiceType: String,
 ) = Fingerprint(
     filters = listOf(
         fieldAccess(opcode = Opcode.IGET_OBJECT),
@@ -111,7 +111,7 @@ internal fun phoneBrowseRequestsProviderFingerprint(
             location = MatchAfterImmediately(),
         ),
         opcode(Opcode.MOVE_RESULT_OBJECT, location = MatchAfterImmediately()),
-        checkCast(phoneBrowseRequestsType, location = MatchAfterImmediately()),
+        checkCast(browseServiceType, location = MatchAfterImmediately()),
     ),
 )
 
@@ -131,10 +131,10 @@ internal object BrowseRequestFromEndpointFingerprint : Fingerprint(
 )
 
 internal fun sendBrowseRequestFingerprint(
-    phoneBrowseRequestsType: String,
+    browseServiceType: String,
     browseRequestType: String,
 ) = Fingerprint(
-    definingClass = phoneBrowseRequestsType,
+    definingClass = browseServiceType,
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "Lcom/google/common/util/concurrent/ListenableFuture;",
     parameters = listOf(browseRequestType, "Ljava/util/concurrent/Executor;"),
@@ -228,14 +228,14 @@ internal fun sectionListContentsFingerprint(
 // Library playlists and opened playlist songs
 
 // Field 161429595 is a playlist in Library responses and a song in opened-playlist responses.
-internal object PlaylistOrTrackFingerprint : Fingerprint(
+internal object PlaylistOrSongFingerprint : Fingerprint(
     name = "<clinit>",
     returnType = "V",
     parameters = emptyList(),
     filters = listOf(
         opcode(Opcode.CONST_CLASS),
         literal(
-            PLAYLIST_OR_TRACK_PROTO_FIELD,
+            PLAYLIST_OR_SONG_PROTO_FIELD,
             location = MatchAfterWithin(2),
         ),
     ),
@@ -248,30 +248,30 @@ internal object HandleMusicReloadShelfEventFingerprint : Fingerprint(
     parameters = listOf("L"),
 )
 
-// Presence bit 0x40000 identifies the method returning field-161429595 rows from GridRenderer.
-internal object GridRendererRowsFingerprint : Fingerprint(
+// Presence bit 0x40000 marks playlist/song items in the Library grid.
+internal object GridItemsFingerprint : Fingerprint(
     classFingerprint = HandleMusicReloadShelfEventFingerprint,
     accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.STATIC),
     returnType = "Ljava/util/List;",
     parameters = listOf("L"),
-    filters = listOf(literal(GRID_PLAYLIST_OR_TRACK_PRESENT_FLAG)),
+    filters = listOf(literal(GRID_PLAYLIST_OR_SONG_PRESENT_FLAG)),
 )
 
 // Presence bits 0x1 and 0x2 identify the method returning NEXT and RELOAD actions.
-internal fun gridContinuationActionsFingerprint(getGridRowsMethod: Method) = Fingerprint(
-    definingClass = getGridRowsMethod.definingClass,
+internal fun gridContinuationActionsFingerprint(getGridItemsMethod: Method) = Fingerprint(
+    definingClass = getGridItemsMethod.definingClass,
     accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.STATIC),
     returnType = "Ljava/util/List;",
-    parameters = getGridRowsMethod.parameterTypes.map(CharSequence::toString),
+    parameters = getGridItemsMethod.parameterTypes.map(CharSequence::toString),
     filters = listOf(
         literal(NEXT_ACTION_PRESENT_FLAG),
         literal(RELOAD_ACTION_PRESENT_FLAG),
     ),
-    custom = { method, _ -> method != getGridRowsMethod },
+    custom = { method, _ -> method != getGridItemsMethod },
 )
 
 // The field-161429595 cast distinguishes the method returning opened-playlist songs.
-internal fun openedPlaylistSongsFingerprint(playlistOrTrackType: String) = Fingerprint(
+internal fun openedPlaylistSongsFingerprint(playlistOrSongType: String) = Fingerprint(
     accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.STATIC),
     returnType = "Ljava/util/List;",
     parameters = listOf("L", "Z"),
@@ -279,12 +279,12 @@ internal fun openedPlaylistSongsFingerprint(playlistOrTrackType: String) = Finge
     custom = { method, _ ->
         method.instructions.any { instruction ->
             instruction.opcode == Opcode.CHECK_CAST &&
-                instruction.getReference<TypeReference>()?.type == playlistOrTrackType
+                instruction.getReference<TypeReference>()?.type == playlistOrSongType
         }
     },
 )
 
-// Paginated Library responses omit TabRenderer and decode GridRenderer directly.
+// Library pagination uses the grid decoder rather than the tab reader.
 internal object LibraryPaginationDecoderFingerprint : Fingerprint(
     classFingerprint = HandleMusicReloadShelfEventFingerprint,
     accessFlags = listOf(
@@ -298,7 +298,7 @@ internal object LibraryPaginationDecoderFingerprint : Fingerprint(
 )
 
 // Field 164480666 is the thumbnail on Library playlists and opened-playlist songs.
-internal object PlaylistOrTrackThumbnailFingerprint : Fingerprint(
+internal object PlaylistOrSongThumbnailFingerprint : Fingerprint(
     name = "<clinit>",
     returnType = "V",
     parameters = emptyList(),
@@ -370,7 +370,7 @@ internal fun browseEndpointFromActionFingerprint(
 )
 
 // YTM stores this String as the media ID Android Auto sends back to start playback.
-internal object CreatePlayableMediaIdFingerprint : Fingerprint(
+internal object EncodeMediaIdFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
     returnType = "Ljava/lang/String;",
     parameters = listOf("L"),
