@@ -36,7 +36,7 @@ import app.morphe.extension.shared.Utils;
  *
  * <p>The phone Library also contains artists, podcasts, New Episodes, and Episodes for Later, so
  * only playlists are kept. Each playlist's Play button supplies the media ID Android Auto uses to
- * start playback. Liked Music has no Play button, so its first playable song starts the queue.
+ * start playback. Liked Music has no Play button, so use its first song with a media ID.
  *
  * <p>The Kotlin patch adds the interfaces and methods below to YTM's obfuscated classes.
  */
@@ -314,7 +314,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 playlistResponseFuture.addListener(() -> {
                     try {
                         BrowseResponse playlistResponse = playlistResponseFuture.get();
-                        // Liked Music (VLLM) has no Play button; use its first playable song.
+                        // Liked Music (VLLM) has no Play button; use its first song with a media ID.
                         String playableMediaId = LIKED_MUSIC_BROWSE_ID.equals(
                                 phonePlaylist.playlistBrowseId)
                                 ? findFirstPlayableSongMediaId(playlistResponse)

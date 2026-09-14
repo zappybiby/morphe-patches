@@ -200,7 +200,8 @@ internal fun createBrowseTabFingerprint(tabMapperType: String) = Fingerprint(
     ),
 )
 
-// Presence bit 1 identifies the method returning TabRenderer.content.
+// A tab's SectionList groups blocks like the Library grid
+// or a playlist's song list. This flag is set when that list is present.
 internal fun getSectionListFingerprint(tabWrapperType: String) = Fingerprint(
     definingClass = tabWrapperType,
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
@@ -248,7 +249,9 @@ internal object HandleMusicReloadShelfEventFingerprint : Fingerprint(
     parameters = listOf("L"),
 )
 
-// Presence bit 0x40000 identifies the method returning field-161429595 rows from GridRenderer.
+// The Library grid mixes playlists with other content.
+// This flag marks the shared playlist/song row type;
+// the reader also returns the grid's other row types.
 internal object GridRendererRowsFingerprint : Fingerprint(
     classFingerprint = HandleMusicReloadShelfEventFingerprint,
     accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.STATIC),
@@ -284,7 +287,7 @@ internal fun openedPlaylistSongsFingerprint(playlistOrTrackType: String) = Finge
     },
 )
 
-// Paginated Library responses omit TabRenderer and decode GridRenderer directly.
+// Reads a grid from the response or the first item in its SectionList.
 internal object LibraryPaginationDecoderFingerprint : Fingerprint(
     classFingerprint = HandleMusicReloadShelfEventFingerprint,
     accessFlags = listOf(
@@ -359,7 +362,8 @@ internal fun formatTextFingerprint(textType: String) = Fingerprint(
     parameters = listOf(textType, "Ljava/lang/String;"),
 )
 
-// A Library playlist's tap action resolves to the BrowseEndpoint containing its VL ID.
+// A BrowseEndpoint tells YTM which page to open.
+// We read its ID to request the playlist's contents.
 internal fun browseEndpointFromActionFingerprint(
     actionType: String,
     browseEndpointType: String,

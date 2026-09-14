@@ -463,7 +463,7 @@ private fun BytecodePatchContext.addOpenedPlaylistPlayableMediaIdGetter(
         instructions = """
             iget-object p0, p0, $browseResponseProtoField
             iget-object p0, p0, $playlistHeaderContentField
-            # true selects ButtonRenderer protobuf field 65153809.
+            # The native helper requires true to read the button data.
             const/4 v0, 0x1
             invoke-static { v0, p0 }, $decodePlayButtonMethod
             move-result-object p0
@@ -566,7 +566,7 @@ private fun BytecodePatchContext.addOpenedPlaylistSongsInterface(
         registerCount = 2,
         instructions = """
             const/4 v0, 0x0
-            # false returns the opened playlist's songs from protobuf field 161429595.
+            # Use false: the UI wrappers don't implement our PlaylistOrTrack interface.
             invoke-static { p0, v0 }, $getSongsMethod
             move-result-object p0
             return-object p0
@@ -636,7 +636,7 @@ private fun BytecodePatchContext.patchPlaylistOrTrack() {
     val formatTextMethod = formatTextFingerprint(titleField.type).originalMethod
 
     val playlistOrTrackActionType = createPlayableMediaIdMethod.parameterTypes.single().toString()
-    // Fields i and k both have YTM's tap-action type; neither is specific to playlists or songs.
+    // i is the normal tap action; k is the double-tap action.
     val actionFieldI = playlistOrTrackField("i")
     val actionFieldK = playlistOrTrackField("k")
     if (actionFieldI.type != playlistOrTrackActionType ||
@@ -702,6 +702,7 @@ private fun MutableClass.addPlaylistBrowseIdGetter(
             const/4 v0, 0x0
             iget-object v1, p0, $actionFieldI
             if-eqz v1, :try_for_browse_id
+            # Throws if this action has no BrowseEndpoint.
             invoke-static { v1 }, $actionToBrowseEndpointMethod
             move-result-object v1
             iget-object v1, v1, $browseEndpointBrowseIdField
@@ -746,7 +747,7 @@ private fun MutableClass.addPlayableMediaIdGetter(
         interfaceMethod = interfaceMethod,
         registerCount = 2,
         instructions = """
-            # YTM's row-action selector reads field i and only uses k when i is absent.
+            # This getter uses k as a fallback when i is null.
             iget-object v0, p0, $actionFieldI
             if-eqz v0, :try_for_playable_id
             invoke-static { v0 }, $createPlayableMediaIdMethod
@@ -781,7 +782,7 @@ private fun MutableClass.addTextGetter(
         registerCount = 3,
         instructions = """
             iget-object v0, p0, $textField
-            # null keeps YTM's normal formatting without adding a TTS span.
+            # Pass null to keep the formatter's default TTS behavior.
             const/4 v1, 0x0
             invoke-static { v0, v1 }, $formatTextMethod
             move-result-object v0
