@@ -74,6 +74,17 @@ internal object SendEmptyAndroidAutoMediaItemsFingerprint : Fingerprint(
     strings = listOf("Invalid media id: ")
 )
 
+// The framework callback receives FLAG_PLAYABLE row IDs before YTM decodes them.
+internal object AndroidAutoPlayFromMediaIdFingerprint : Fingerprint(
+    name = "onPlayFromMediaId",
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "V",
+    parameters = listOf("Ljava/lang/String;", "Landroid/os/Bundle;"),
+    custom = { _, classDef ->
+        classDef.superclass == "Landroid/media/session/MediaSession\$Callback;"
+    },
+)
+
 // Phone Browse requests
 
 internal fun musicBrowserServiceSuperclassOnCreateFingerprint(
