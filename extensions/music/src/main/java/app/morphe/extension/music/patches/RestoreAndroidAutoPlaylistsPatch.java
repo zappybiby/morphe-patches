@@ -76,8 +76,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     // folders; it does not change playlist playback.
     private static final Set<String> PLAYLISTS_TITLE_MATCH_MEDIA_IDS =
             ConcurrentHashMap.newKeySet();
-    // Every onPlayFromMediaId request, including an ordinary media ID, invalidates older
-    // selections. Pause, stop, and folder navigation do not advance this counter.
+    // Reject pending playback after another selection or Pause/Stop.
     private static final AtomicLong PLAY_REQUEST_GENERATION = new AtomicLong();
     private static final WeakHashMap<Object, WeakReference<PlaybackStateSession>>
             PLAYBACK_SESSIONS = new WeakHashMap<>();
@@ -460,7 +459,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                     // The response arrives on a background thread. Ask YTM to start playback
                     // on the thread it uses to handle playback commands.
                     callbackHandler.post(() -> {
-                        // Recheck for another selection or a replaced Browse client
+                        // Recheck for another selection, Pause/Stop, or a replaced Browse client
                         // after waiting for YTM's playback thread.
                         if (requestGeneration != PLAY_REQUEST_GENERATION.get() ||
                                 requests != phoneBrowseRequests)
@@ -482,6 +481,12 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                     playlistBrowseId, ex);
         }
         return true;
+    }
+
+    /** Injection point. Cancel pending playlist playback and empty-playlist messages on Pause/Stop. */
+    public static void cancelPendingPlaylistPlayback() {
+        // YTM cannot cancel a playback command it has not received yet.
+        PLAY_REQUEST_GENERATION.incrementAndGet();
     }
 
     private static SharedBrowseRow findFirstPlayableSong(BrowseResponse playlistResponse) {
