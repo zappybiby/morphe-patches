@@ -107,6 +107,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     public interface PlaylistOrTrack {
         @Nullable String patch_getPlaylistBrowseId();
         @Nullable String patch_getPlayableMediaId();
+        boolean patch_hasPlayableVideoId();
         @Nullable Uri patch_getArtworkUri();
         @Nullable CharSequence patch_getTitle();
         @Nullable CharSequence patch_getSubtitle();
@@ -317,10 +318,13 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                     try {
                         BrowseResponse playlistResponse = playlistResponseFuture.get();
                         // Liked Music (VLLM) has no Play button; use its first song with a media ID.
-                        String playableMediaId = LIKED_MUSIC_BROWSE_ID.equals(
-                                phonePlaylist.playlistBrowseId)
-                                ? findFirstPlayableSongMediaId(playlistResponse)
-                                : playlistResponse.patch_getPlayableMediaId();
+                        // The opened page can contain an "Add a song" control even when it has
+                        // zero tracks. Its action serializes to a media ID but cannot play.
+                        String firstSongMediaId = findFirstPlayableSongMediaId(playlistResponse);
+                        String playableMediaId = firstSongMediaId == null ? null
+                                : LIKED_MUSIC_BROWSE_ID.equals(phonePlaylist.playlistBrowseId)
+                                        ? firstSongMediaId
+                                        : playlistResponse.patch_getPlayableMediaId();
                         if (playableMediaId != null) {
                             synchronized (state) {
                                 androidAutoPlaylists[playlistIndex] = createAndroidAutoPlaylist(
@@ -363,6 +367,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 if (!(sectionContent instanceof OpenedPlaylistSongs)) continue;
                 for (PlaylistOrTrack song :
                         ((OpenedPlaylistSongs) sectionContent).patch_getSongs()) {
+                    if (!song.patch_hasPlayableVideoId()) continue;
                     String playableMediaId = song.patch_getPlayableMediaId();
                     if (playableMediaId != null) return playableMediaId;
                 }

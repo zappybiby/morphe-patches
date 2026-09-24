@@ -584,6 +584,31 @@ private fun BytecodePatchContext.patchPlaylistOrTrack() {
         .getReference<FieldReference>()
         ?: throw PatchException("Could not resolve the BrowseEndpoint browse ID field")
     val createPlayableMediaIdMethod = CreatePlayableMediaIdFingerprint.originalMethod
+    val watchEndpointInitializer = WatchEndpointExtensionFingerprint.originalMethod
+    val watchEndpointExtensionField = watchEndpointInitializer.instructions
+        .mapNotNull { instruction ->
+            if (instruction.opcode == Opcode.SPUT_OBJECT) {
+                instruction.getReference<FieldReference>()
+            } else {
+                null
+            }
+        }
+        .singleOrNull { field -> field.definingClass == watchEndpointInitializer.definingClass }
+        ?: throw PatchException("Could not resolve the WatchEndpoint extension field")
+    val watchEndpointType = watchEndpointInitializer.instructions
+        .mapNotNull { instruction ->
+            if (instruction.opcode == Opcode.CONST_CLASS) {
+                instruction.getReference<TypeReference>()?.type
+            } else {
+                null
+            }
+        }
+        .singleOrNull()
+        ?: throw PatchException("Could not resolve the WatchEndpoint message type")
+    val watchEndpointVideoIdField = classDefBy(watchEndpointType).fields.singleOrNull { field ->
+        !AccessFlags.STATIC.isSet(field.accessFlags) &&
+            field.name == "d" && field.type == "Ljava/lang/String;"
+    } ?: throw PatchException("Could not resolve WatchEndpoint.videoId")
     val playlistOrTrackFields = classDefBy(playlistOrTrackType).fields.toList()
 
     fun playlistOrTrackField(name: String) = playlistOrTrackFields
@@ -633,7 +658,7 @@ private fun BytecodePatchContext.patchPlaylistOrTrack() {
     val formatTextMethod = formatTextFingerprint(titleField.type).originalMethod
 
     val playlistOrTrackActionType = createPlayableMediaIdMethod.parameterTypes.single().toString()
-    // i is the normal tap action; k is the double-tap action.
+    // Both obfuscated fields hold actions; stock DEX does not identify their gesture semantics.
     val actionFieldI = playlistOrTrackField("i")
     val actionFieldK = playlistOrTrackField("k")
     if (actionFieldI.type != playlistOrTrackActionType ||
@@ -648,6 +673,23 @@ private fun BytecodePatchContext.patchPlaylistOrTrack() {
         playlistOrTrackActionType,
         browseEndpointBrowseIdField.definingClass,
     ).originalMethod
+    val actionSuperclass = classDefBy(playlistOrTrackActionType).superclass
+        ?: throw PatchException("Could not resolve the action superclass")
+    val extensionSetField = classDefBy(actionSuperclass).fields.singleOrNull { field ->
+        !AccessFlags.STATIC.isSet(field.accessFlags) && field.name == "j"
+    } ?: throw PatchException("Could not resolve the action extension set")
+    val extensionKeyField = classDefBy(watchEndpointExtensionField.type).fields
+        .singleOrNull { field ->
+            !AccessFlags.STATIC.isSet(field.accessFlags) && field.name == "d"
+        } ?: throw PatchException("Could not resolve the WatchEndpoint extension key")
+    val hasWatchEndpointMethod = classDefBy(extensionSetField.type).methods.singleOrNull { method ->
+        method.returnType == "Z" &&
+            method.parameterTypes.map(CharSequence::toString) == listOf(extensionKeyField.type)
+    } ?: throw PatchException("Could not resolve the WatchEndpoint presence method")
+    val getWatchEndpointMethod = classDefBy(extensionSetField.type).methods.singleOrNull { method ->
+        method.returnType == "Ljava/lang/Object;" &&
+            method.parameterTypes.map(CharSequence::toString) == listOf(extensionKeyField.type)
+    } ?: throw PatchException("Could not resolve the WatchEndpoint value method")
 
     val playlistOrTrackClass = mutableClassDefBy(playlistOrTrackType)
     playlistOrTrackClass.interfaces.add(EXTENSION_PLAYLIST_OR_TRACK_INTERFACE)
@@ -663,6 +705,18 @@ private fun BytecodePatchContext.patchPlaylistOrTrack() {
         actionFieldI,
         actionFieldK,
         createPlayableMediaIdMethod,
+    )
+    playlistOrTrackClass.addPlayableVideoIdGetter(
+        extensionInterfaceMethod(EXTENSION_PLAYLIST_OR_TRACK_INTERFACE, "patch_hasPlayableVideoId"),
+        actionFieldI,
+        actionFieldK,
+        extensionSetField,
+        watchEndpointExtensionField,
+        extensionKeyField,
+        hasWatchEndpointMethod,
+        getWatchEndpointMethod,
+        watchEndpointType,
+        watchEndpointVideoIdField,
     )
     playlistOrTrackClass.addTextGetter(
         extensionInterfaceMethod(EXTENSION_PLAYLIST_OR_TRACK_INTERFACE, "patch_getTitle"),
@@ -762,6 +816,49 @@ private fun MutableClass.addPlayableMediaIdGetter(
             check-cast v0, Ljava/lang/String;
             :return_playable_media_id
             return-object v0
+        """,
+    )
+}
+
+private fun MutableClass.addPlayableVideoIdGetter(
+    interfaceMethod: Method,
+    actionFieldI: FieldReference,
+    actionFieldK: FieldReference,
+    extensionSetField: FieldReference,
+    watchEndpointExtensionField: FieldReference,
+    extensionKeyField: FieldReference,
+    hasWatchEndpointMethod: Method,
+    getWatchEndpointMethod: Method,
+    watchEndpointType: String,
+    watchEndpointVideoIdField: FieldReference,
+) {
+    addInterfaceMethod(
+        interfaceMethod = interfaceMethod,
+        registerCount = 4,
+        instructions = """
+            iget-object v0, p0, $actionFieldI
+            if-nez v0, :have_action
+            iget-object v0, p0, $actionFieldK
+            :have_action
+            if-eqz v0, :no_video_id
+            iget-object v0, v0, $extensionSetField
+            sget-object v1, $watchEndpointExtensionField
+            iget-object v1, v1, $extensionKeyField
+            invoke-virtual { v0, v1 }, $hasWatchEndpointMethod
+            move-result v2
+            if-eqz v2, :no_video_id
+            invoke-virtual { v0, v1 }, $getWatchEndpointMethod
+            move-result-object v0
+            check-cast v0, $watchEndpointType
+            iget-object v0, v0, $watchEndpointVideoIdField
+            invoke-virtual { v0 }, Ljava/lang/String;->isEmpty()Z
+            move-result v0
+            if-nez v0, :no_video_id
+            const/4 v0, 0x1
+            return v0
+            :no_video_id
+            const/4 v0, 0x0
+            return v0
         """,
     )
 }
