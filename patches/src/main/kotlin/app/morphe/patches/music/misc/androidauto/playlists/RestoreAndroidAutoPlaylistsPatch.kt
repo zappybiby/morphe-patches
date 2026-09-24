@@ -761,8 +761,10 @@ private fun BytecodePatchContext.patchPhoneBrowseRequests() {
         classDef.superclass?.let { superclass -> classDefByOrNull(superclass) }
     }.flatMap { classDef -> classDef.methods.asSequence() }
     val clickTrackingParamsSetterMethod = browseRequestMethods
+        // 9.32.51 and 9.33.52 add a public byte[] overload; the protected setter still matches.
         .firstOrNull { method ->
-            method.returnType == "V" &&
+            AccessFlags.PROTECTED.isSet(method.accessFlags) &&
+                method.returnType == "V" &&
                 method.parameterTypes.map(CharSequence::toString) == listOf("[B")
         }
         ?: throw PatchException("Could not resolve the click tracking parameter setter")
