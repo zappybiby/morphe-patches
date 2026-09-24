@@ -55,6 +55,8 @@ private const val EXTENSION_OPENED_PLAYLIST_SONGS_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$OpenedPlaylistSongs;"
 private const val EXTENSION_ANDROID_AUTO_PLAYLISTS_REQUEST_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$AndroidAutoPlaylistsRequest;"
+private const val EXTENSION_PLAYBACK_CALLBACK_INTERFACE =
+    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$PlaybackCallback;"
 private const val EXTENSION_PLAYLIST_OR_TRACK_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$PlaylistOrTrack;"
 private const val MUSIC_BROWSER_SERVICE_CLASS =
@@ -84,7 +86,49 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
         patchPhoneBrowseResponses()
         patchPlaylistOrTrack()
         patchAndroidAutoPlaylists()
+        hookPlayFromMediaId()
     }
+}
+
+private fun BytecodePatchContext.hookPlayFromMediaId() {
+    val playFromMediaIdMethod = AndroidAutoPlayFromMediaIdFingerprint.method
+    val callbackClass = mutableClassDefBy(playFromMediaIdMethod.definingClass)
+    val delegateField = playFromMediaIdMethod.instructions.asSequence()
+        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+        .distinct()
+        .single { field -> field.definingClass == callbackClass.type }
+    val handlerField = classDefBy(delegateField.type).fields.singleOrNull { field ->
+        runCatching { classDefBy(field.type).superclass == "Landroid/os/Handler;" }
+            .getOrDefault(false)
+    } ?: throw PatchException("Could not find media session callback Handler")
+    callbackClass.interfaces.add(EXTENSION_PLAYBACK_CALLBACK_INTERFACE)
+    callbackClass.addInterfaceMethod(
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_PLAYBACK_CALLBACK_INTERFACE,
+            "patch_getCallbackHandler",
+        ),
+        registerCount = 2,
+        instructions = """
+            iget-object v0, p0, $delegateField
+            if-eqz v0, :no_handler
+            iget-object v0, v0, $handlerField
+            return-object v0
+            :no_handler
+            const/4 v0, 0x0
+            return-object v0
+        """,
+    )
+    val handledRegister = playFromMediaIdMethod.findFreeRegister(0)
+    playFromMediaIdMethod.addInstructionsWithLabels(
+        0,
+        """
+            invoke-static/range { p0 .. p2 }, $EXTENSION_CLASS->handlePlayFromMediaId(Landroid/media/session/MediaSession${'$'}Callback;Ljava/lang/String;Landroid/os/Bundle;)Z
+            move-result v$handledRegister
+            if-eqz v$handledRegister, :resume
+            return-void
+        """,
+        ExternalLabel("resume", playFromMediaIdMethod.getInstruction<Instruction>(0)),
+    )
 }
 
 private fun BytecodePatchContext.hookPlaylistsTitleMediaIds() {
