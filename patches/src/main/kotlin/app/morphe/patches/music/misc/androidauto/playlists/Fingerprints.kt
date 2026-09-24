@@ -37,6 +37,7 @@ private const val NEXT_ACTION_PRESENT_FLAG = 0x1L
 private const val RELOAD_ACTION_PRESENT_FLAG = 0x2L
 private const val PLAY_BUTTON_PROTO_FIELD = 65_153_809L
 private const val THUMBNAIL_PROTO_FIELD = 164_480_666L
+private const val WATCH_ENDPOINT_PROTO_FIELD = 48_687_757L
 
 // Android Auto
 
@@ -402,7 +403,14 @@ internal object CreatePlayableMediaIdFingerprint : Fingerprint(
 
 // Opened playlist playback
 
-// Field 65153809 contains an opened playlist's Play ButtonRenderer.
+internal object WatchEndpointExtensionFingerprint : Fingerprint(
+    name = "<clinit>",
+    returnType = "V",
+    parameters = emptyList(),
+    filters = listOf(literal(WATCH_ENDPOINT_PROTO_FIELD)),
+)
+
+// Field 65153809 contains the playlist's Play button data (ButtonRenderer).
 internal fun playButtonRendererFingerprint(playActionType: String) = Fingerprint(
     name = "<clinit>",
     returnType = "V",
