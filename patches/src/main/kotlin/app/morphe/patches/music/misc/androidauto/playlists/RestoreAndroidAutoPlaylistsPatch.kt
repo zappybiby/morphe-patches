@@ -1174,6 +1174,17 @@ private fun BytecodePatchContext.installPlaybackCallbackBridges() {
         """,
         ExternalLabel("resume", playFromMediaIdMethod.getInstruction<Instruction>(0)),
     )
+    // onPause/onStop are Android callback names and are not obfuscated.
+    // Cancel the pending playlist before YTM handles Pause/Stop for the current song.
+    for (name in listOf("onPause", "onStop")) {
+        val transportMethod = callbackClass.methods.single { method ->
+            method.name == name && method.parameterTypes.isEmpty() && method.returnType == "V"
+        }
+        transportMethod.addInstructions(
+            0,
+            "invoke-static {}, $EXTENSION_CLASS->cancelPendingPlaylistPlayback()V",
+        )
+    }
 }
 
 private fun BytecodePatchContext.extensionInterfaceMethod(
