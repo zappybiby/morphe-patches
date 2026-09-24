@@ -31,8 +31,8 @@ private const val BROWSE_TABS_PROTO_FIELD = 58_173_949L
 private const val TAB_RENDERER_PROTO_FIELD = 58_174_010L
 private const val TAB_CONTENT_PRESENT_FLAG = 1L
 private const val SECTION_LIST_CONTENTS_FIELD_NAME = "f"
-private const val PLAYLIST_OR_TRACK_PROTO_FIELD = 161_429_595L
-private const val GRID_PLAYLIST_OR_TRACK_PRESENT_FLAG = 0x40000L
+private const val SHARED_BROWSE_ROW_PROTO_FIELD = 161_429_595L
+private const val GRID_SHARED_BROWSE_ROW_PRESENT_FLAG = 0x40000L
 private const val NEXT_ACTION_PRESENT_FLAG = 0x1L
 private const val RELOAD_ACTION_PRESENT_FLAG = 0x2L
 private const val PLAY_BUTTON_PROTO_FIELD = 65_153_809L
@@ -74,7 +74,7 @@ internal object SendEmptyAndroidAutoMediaItemsFingerprint : Fingerprint(
     strings = listOf("Invalid media id: ")
 )
 
-// The framework callback receives FLAG_PLAYABLE row IDs before YTM decodes them.
+// Intercept playlist selections before YTM decodes the media ID.
 internal object AndroidAutoPlayFromMediaIdFingerprint : Fingerprint(
     name = "onPlayFromMediaId",
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
@@ -83,6 +83,19 @@ internal object AndroidAutoPlayFromMediaIdFingerprint : Fingerprint(
     custom = { _, classDef ->
         classDef.superclass == "Landroid/media/session/MediaSession\$Callback;"
     },
+)
+
+// YTM's playback-state setter updates its own copy and notifies Android.
+internal object MediaSessionCompatPlaybackStateSetterFingerprint : Fingerprint(
+    returnType = "V",
+    parameters = listOf("Landroid/support/v4/media/session/PlaybackStateCompat;"),
+    filters = listOf(
+        methodCall(
+            definingClass = "Landroid/media/session/MediaSession;",
+            name = "setPlaybackState",
+            parameters = listOf("Landroid/media/session/PlaybackState;"),
+        ),
+    ),
 )
 
 // Phone Browse requests
@@ -212,8 +225,7 @@ internal fun createBrowseTabFingerprint(tabMapperType: String) = Fingerprint(
     ),
 )
 
-// A tab's SectionList groups blocks like the Library grid
-// or a playlist's song list. This flag is set when that list is present.
+// This flag marks a tab with page contents, such as Library items or playlist songs.
 internal fun getSectionListFingerprint(tabWrapperType: String) = Fingerprint(
     definingClass = tabWrapperType,
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
@@ -222,7 +234,7 @@ internal fun getSectionListFingerprint(tabWrapperType: String) = Fingerprint(
     filters = listOf(literal(TAB_CONTENT_PRESENT_FLAG)),
 )
 
-// Field f contains renderer contents; field g contains continuation commands instead.
+// Read page items from f; g contains actions for loading more items.
 internal fun sectionListContentsFingerprint(
     sectionListType: String,
     sectionContentsType: String,
@@ -238,17 +250,17 @@ internal fun sectionListContentsFingerprint(
     ),
 )
 
-// Library playlists and opened playlist songs
+// Library playlists and opened-playlist rows
 
-// Field 161429595 is a playlist in Library responses and a song in opened-playlist responses.
-internal object PlaylistOrTrackFingerprint : Fingerprint(
+// The same protobuf row type represents Library playlists, songs, and editor buttons.
+internal object SharedBrowseRowFingerprint : Fingerprint(
     name = "<clinit>",
     returnType = "V",
     parameters = emptyList(),
     filters = listOf(
         opcode(Opcode.CONST_CLASS),
         literal(
-            PLAYLIST_OR_TRACK_PROTO_FIELD,
+            SHARED_BROWSE_ROW_PROTO_FIELD,
             location = MatchAfterWithin(2),
         ),
     ),
@@ -261,18 +273,16 @@ internal object HandleMusicReloadShelfEventFingerprint : Fingerprint(
     parameters = listOf("L"),
 )
 
-// The Library grid mixes playlists with other content.
-// This flag marks the shared playlist/song row type;
-// the reader also returns the grid's other row types.
+// Reads all Library items, including artists and podcasts that the extension must filter out.
 internal object GridRendererRowsFingerprint : Fingerprint(
     classFingerprint = HandleMusicReloadShelfEventFingerprint,
     accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.STATIC),
     returnType = "Ljava/util/List;",
     parameters = listOf("L"),
-    filters = listOf(literal(GRID_PLAYLIST_OR_TRACK_PRESENT_FLAG)),
+    filters = listOf(literal(GRID_SHARED_BROWSE_ROW_PRESENT_FLAG)),
 )
 
-// Presence bits 0x1 and 0x2 identify the method returning NEXT and RELOAD actions.
+// NEXT (0x1) loads more Library items; RELOAD (0x2) refreshes the list.
 internal fun gridContinuationActionsFingerprint(getGridRowsMethod: Method) = Fingerprint(
     definingClass = getGridRowsMethod.definingClass,
     accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.STATIC),
@@ -285,8 +295,8 @@ internal fun gridContinuationActionsFingerprint(getGridRowsMethod: Method) = Fin
     custom = { method, _ -> method != getGridRowsMethod },
 )
 
-// The field-161429595 cast distinguishes the method returning opened-playlist songs.
-internal fun openedPlaylistSongsFingerprint(playlistOrTrackType: String) = Fingerprint(
+// False returns playlist rows, including editor buttons; true builds UI objects.
+internal fun openedPlaylistRowsFingerprint(sharedBrowseRowType: String) = Fingerprint(
     accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.STATIC),
     returnType = "Ljava/util/List;",
     parameters = listOf("L", "Z"),
@@ -294,12 +304,12 @@ internal fun openedPlaylistSongsFingerprint(playlistOrTrackType: String) = Finge
     custom = { method, _ ->
         method.instructions.any { instruction ->
             instruction.opcode == Opcode.CHECK_CAST &&
-                instruction.getReference<TypeReference>()?.type == playlistOrTrackType
+                instruction.getReference<TypeReference>()?.type == sharedBrowseRowType
         }
     },
 )
 
-// Reads a grid from the response or the first item in its SectionList.
+// Reads additional Library pages, whether the list is at the response root or inside a section.
 internal object LibraryPaginationDecoderFingerprint : Fingerprint(
     classFingerprint = HandleMusicReloadShelfEventFingerprint,
     accessFlags = listOf(
@@ -312,8 +322,8 @@ internal object LibraryPaginationDecoderFingerprint : Fingerprint(
     parameters = listOf("L"),
 )
 
-// Field 164480666 is the thumbnail on Library playlists and opened-playlist songs.
-internal object PlaylistOrTrackThumbnailFingerprint : Fingerprint(
+// Field 164480666 is the thumbnail on Library playlists and opened-playlist rows.
+internal object SharedBrowseRowThumbnailFingerprint : Fingerprint(
     name = "<clinit>",
     returnType = "V",
     parameters = emptyList(),
@@ -373,8 +383,7 @@ internal fun formatTextFingerprint(textType: String) = Fingerprint(
     parameters = listOf(textType, "Ljava/lang/String;"),
 )
 
-// A BrowseEndpoint tells YTM which page to open.
-// We read its ID to request the playlist's contents.
+// A BrowseEndpoint contains the page ID. Other action types make this converter throw.
 internal fun browseEndpointFromActionFingerprint(
     actionType: String,
     browseEndpointType: String,
@@ -384,20 +393,22 @@ internal fun browseEndpointFromActionFingerprint(
     parameters = listOf(actionType),
 )
 
-// YTM stores this String as the media ID Android Auto sends back to start playback.
-internal object CreatePlayableMediaIdFingerprint : Fingerprint(
+// Editor-button actions can also be encoded; a media ID alone does not identify a song.
+internal object EncodeActionMediaIdFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
     returnType = "Ljava/lang/String;",
     parameters = listOf("L"),
     custom = { method, _ ->
-        val playableActionType = method.parameterTypes.single().toString()
-        if (playableActionType == "Ljava/lang/String;") {
+        val actionType = method.parameterTypes.single().toString()
+        if (actionType == "Ljava/lang/String;") {
             false
         } else {
+            // The native encoder stores the action in a media-ID wrapper, then serializes that
+            // wrapper to a String.
             val actionWrapperType = method.instructions
                 .filter { instruction -> instruction.opcode == Opcode.IPUT_OBJECT }
                 .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
-                .filter { field -> field.type == playableActionType }
+                .filter { field -> field.type == actionType }
                 .distinct()
                 .singleOrNull()
                 ?.definingClass
@@ -414,6 +425,7 @@ internal object CreatePlayableMediaIdFingerprint : Fingerprint(
 
 // Opened playlist playback
 
+// Editor buttons also have action IDs; require a WatchEndpoint video ID to identify a song.
 internal object WatchEndpointExtensionFingerprint : Fingerprint(
     name = "<clinit>",
     returnType = "V",
