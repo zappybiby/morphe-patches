@@ -92,159 +92,6 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
     }
 }
 
-// The playback hook needs both the callback's Handler and YTM's compat-state publisher for
-// the temporary no-tracks notice. Install those bridges before intercepting deferred IDs.
-private fun BytecodePatchContext.installPlaybackCallbackBridges() {
-    val playFromMediaIdMethod = AndroidAutoPlayFromMediaIdFingerprint.method
-    val callbackClass = mutableClassDefBy(playFromMediaIdMethod.definingClass)
-    val delegateField = playFromMediaIdMethod.instructions.asSequence()
-        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
-        .distinct()
-        .single { field -> field.definingClass == callbackClass.type }
-    val delegateClass = classDefBy(delegateField.type)
-    // Post playback after the Browse result on the same Looper as the framework callback.
-    val handlerField = delegateClass.fields.singleOrNull { field ->
-        runCatching { classDefBy(field.type).superclass == "Landroid/os/Handler;" }
-            .getOrDefault(false)
-    } ?: throw PatchException("Could not find media session callback Handler")
-    val ownerReferenceField = delegateClass.fields.singleOrNull { field ->
-        field.type == "Ljava/lang/ref/WeakReference;"
-    } ?: throw PatchException("Could not find media session callback owner")
-    val playbackStateSetter = MediaSessionCompatPlaybackStateSetterFingerprint.method
-    val sessionClass = mutableClassDefBy(playbackStateSetter.definingClass)
-    val cachedStateField = playbackStateSetter.instructions.asSequence()
-        .filter { instruction -> instruction.opcode == Opcode.IPUT_OBJECT }
-        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
-        .singleOrNull { field ->
-            field.type == "Landroid/support/v4/media/session/PlaybackStateCompat;"
-        } ?: throw PatchException("Could not find cached compat playback state")
-    // In 9.15 the callback owner is the compat session itself. Later builds put the cached
-    // state on an inner owner held by the outer compat session wrapper.
-    val ownerField = if (cachedStateField.definingClass == sessionClass.type) {
-        null
-    } else {
-        playbackStateSetter.instructions.asSequence()
-            .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
-            .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
-            .distinct()
-            .singleOrNull { field ->
-                field.definingClass == sessionClass.type && field.type == "Ljava/lang/Object;"
-            } ?: throw PatchException("Could not find compat playback session owner")
-    }
-    sessionClass.interfaces.add(EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE)
-    sessionClass.addInterfaceMethod(
-        extensionInterfaceMethod(
-            EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE,
-            "patch_getPlaybackOwner",
-        ),
-        registerCount = 2,
-        instructions = if (ownerField == null) {
-            "return-object p0"
-        } else {
-            """
-                iget-object v0, p0, $ownerField
-                return-object v0
-            """
-        },
-    )
-    sessionClass.addInterfaceMethod(
-        extensionInterfaceMethod(
-            EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE,
-            "patch_getPlaybackState",
-        ),
-        registerCount = 2,
-        instructions = if (ownerField == null) {
-            """
-                iget-object v0, p0, $cachedStateField
-                return-object v0
-            """
-        } else {
-            """
-                iget-object v0, p0, $ownerField
-                check-cast v0, ${cachedStateField.definingClass}
-                iget-object v0, v0, $cachedStateField
-                return-object v0
-            """
-        },
-    )
-    sessionClass.addInterfaceMethod(
-        extensionInterfaceMethod(
-            EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE,
-            "patch_setPlaybackState",
-        ),
-        registerCount = 2,
-        instructions = """
-            invoke-virtual { p0, p1 }, $playbackStateSetter
-            return-void
-        """,
-    )
-    if (ownerField != null) {
-        // The callback weakly refers to the inner owner. Register the outer wrapper when it
-        // installs that callback so the notice can use the stock compat-state setter.
-        val setCallbackMethod = sessionClass.methods.singleOrNull { method ->
-            method.returnType == "V" &&
-                method.parameterTypes.map { it.toString() } == listOf(
-                    delegateField.type, "Landroid/os/Handler;",
-                )
-        } ?: throw PatchException("Could not find compat media session callback setup")
-        setCallbackMethod.addInstructions(
-            0,
-            "invoke-static/range { p0 .. p0 }, $EXTENSION_CLASS->registerPlaybackSession($EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE)V",
-        )
-    }
-    callbackClass.interfaces.add(EXTENSION_PLAYBACK_CALLBACK_INTERFACE)
-    callbackClass.addInterfaceMethod(
-        interfaceMethod = extensionInterfaceMethod(
-            EXTENSION_PLAYBACK_CALLBACK_INTERFACE,
-            "patch_getCallbackHandler",
-        ),
-        registerCount = 2,
-        instructions = """
-            iget-object v0, p0, $delegateField
-            if-eqz v0, :no_handler
-            iget-object v0, v0, $handlerField
-            return-object v0
-            :no_handler
-            const/4 v0, 0x0
-            return-object v0
-        """,
-    )
-    callbackClass.addInterfaceMethod(
-        interfaceMethod = extensionInterfaceMethod(
-            EXTENSION_PLAYBACK_CALLBACK_INTERFACE,
-            "patch_getPlaybackStateSession",
-        ),
-        registerCount = 2,
-        instructions = """
-            iget-object v0, p0, $delegateField
-            if-eqz v0, :no_session
-            iget-object v0, v0, $ownerReferenceField
-            if-eqz v0, :no_session
-            invoke-virtual { v0 }, Ljava/lang/ref/WeakReference;->get()Ljava/lang/Object;
-            move-result-object v0
-            invoke-static { v0 }, $EXTENSION_CLASS->resolvePlaybackSession(Ljava/lang/Object;)$EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE
-            move-result-object v0
-            return-object v0
-            :no_session
-            const/4 v0, 0x0
-            return-object v0
-        """,
-    )
-    // Resolve our synthetic playlist token before YTM decodes native media IDs. For native
-    // IDs the extension returns false and the original callback continues unchanged.
-    val handledRegister = playFromMediaIdMethod.findFreeRegister(0)
-    playFromMediaIdMethod.addInstructionsWithLabels(
-        0,
-        """
-            invoke-static/range { p0 .. p2 }, $EXTENSION_CLASS->handlePlayFromMediaId(Landroid/media/session/MediaSession${'$'}Callback;Ljava/lang/String;Landroid/os/Bundle;)Z
-            move-result v$handledRegister
-            if-eqz v$handledRegister, :resume
-            return-void
-        """,
-        ExternalLabel("resume", playFromMediaIdMethod.getInstruction<Instruction>(0)),
-    )
-}
-
 private fun BytecodePatchContext.hookPlaylistsTitleMediaIds() {
     val buildAndroidAutoMediaItemMethod = BuildAndroidAutoMediaItemFingerprint.method
 
@@ -909,8 +756,9 @@ private fun MutableClass.addPlaylistBrowseIdGetter(
     actionToBrowseEndpointMethod: Method,
     browseEndpointBrowseIdField: FieldReference,
 ) {
-    // Identify the playlist destination across both actions without assuming which field carries
-    // it. Conflicting playlist IDs leave the destination ambiguous, so the row is rejected.
+    // Skip rows with conflicting playlist IDs to avoid opening the wrong playlist.
+    // Each non-null action must contain a BrowseEndpoint (a page link).
+    // Other action types make YTM's converter throw, so collectPlaylistsFromGrid skips the row.
     addInterfaceMethod(
         interfaceMethod = interfaceMethod,
         registerCount = 4,
@@ -1174,6 +1022,157 @@ private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
             return-void
         """,
         ExternalLabel("resume", handleAndroidAutoRequestMethod.getInstruction<Instruction>(0)),
+    )
+}
+
+// Give the extension access to YTM's playback-command thread and playback-state setter
+// so it can start the selected playlist or show the empty-playlist message.
+private fun BytecodePatchContext.installPlaybackCallbackBridges() {
+    val playFromMediaIdMethod = AndroidAutoPlayFromMediaIdFingerprint.method
+    val callbackClass = mutableClassDefBy(playFromMediaIdMethod.definingClass)
+    val delegateField = playFromMediaIdMethod.instructions.asSequence()
+        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+        .distinct()
+        .single { field -> field.definingClass == callbackClass.type }
+    val delegateClass = classDefBy(delegateField.type)
+    // This Handler schedules work on the thread YTM uses to handle playback commands.
+    val handlerField = delegateClass.fields.singleOrNull { field ->
+        runCatching { classDefBy(field.type).superclass == "Landroid/os/Handler;" }
+            .getOrDefault(false)
+    } ?: throw PatchException("Could not find media session callback Handler")
+    val ownerReferenceField = delegateClass.fields.singleOrNull { field ->
+        field.type == "Ljava/lang/ref/WeakReference;"
+    } ?: throw PatchException("Could not find media session callback owner")
+    val playbackStateSetter = MediaSessionCompatPlaybackStateSetterFingerprint.method
+    val sessionClass = mutableClassDefBy(playbackStateSetter.definingClass)
+    val cachedStateField = playbackStateSetter.instructions.asSequence()
+        .filter { instruction -> instruction.opcode == Opcode.IPUT_OBJECT }
+        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+        .singleOrNull { field ->
+            field.type == "Landroid/support/v4/media/session/PlaybackStateCompat;"
+        } ?: throw PatchException("Could not find cached compat playback state")
+    // 9.15 stores playback state on the session itself; later versions use an inner object.
+    val ownerField = if (cachedStateField.definingClass == sessionClass.type) {
+        null
+    } else {
+        playbackStateSetter.instructions.asSequence()
+            .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
+            .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
+            .distinct()
+            .singleOrNull { field ->
+                field.definingClass == sessionClass.type && field.type == "Ljava/lang/Object;"
+            } ?: throw PatchException("Could not find compat playback session owner")
+    }
+    sessionClass.interfaces.add(EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE)
+    sessionClass.addInterfaceMethod(
+        extensionInterfaceMethod(
+            EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE,
+            "patch_getPlaybackOwner",
+        ),
+        registerCount = 2,
+        instructions = if (ownerField == null) {
+            "return-object p0"
+        } else {
+            """
+                iget-object v0, p0, $ownerField
+                return-object v0
+            """
+        },
+    )
+    sessionClass.addInterfaceMethod(
+        extensionInterfaceMethod(
+            EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE,
+            "patch_getPlaybackState",
+        ),
+        registerCount = 2,
+        instructions = if (ownerField == null) {
+            """
+                iget-object v0, p0, $cachedStateField
+                return-object v0
+            """
+        } else {
+            """
+                iget-object v0, p0, $ownerField
+                check-cast v0, ${cachedStateField.definingClass}
+                iget-object v0, v0, $cachedStateField
+                return-object v0
+            """
+        },
+    )
+    sessionClass.addInterfaceMethod(
+        extensionInterfaceMethod(
+            EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE,
+            "patch_setPlaybackState",
+        ),
+        registerCount = 2,
+        instructions = """
+            invoke-virtual { p0, p1 }, $playbackStateSetter
+            return-void
+        """,
+    )
+    if (ownerField != null) {
+        // The callback only holds the inner object. Remember its session so the extension can
+        // use YTM's playback-state setter to show the empty-playlist message.
+        val setCallbackMethod = sessionClass.methods.singleOrNull { method ->
+            method.returnType == "V" &&
+                method.parameterTypes.map { it.toString() } == listOf(
+                    delegateField.type, "Landroid/os/Handler;",
+                )
+        } ?: throw PatchException("Could not find compat media session callback setup")
+        setCallbackMethod.addInstructions(
+            0,
+            "invoke-static/range { p0 .. p0 }, $EXTENSION_CLASS->registerPlaybackSession($EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE)V",
+        )
+    }
+    callbackClass.interfaces.add(EXTENSION_PLAYBACK_CALLBACK_INTERFACE)
+    callbackClass.addInterfaceMethod(
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_PLAYBACK_CALLBACK_INTERFACE,
+            "patch_getCallbackHandler",
+        ),
+        registerCount = 2,
+        instructions = """
+            iget-object v0, p0, $delegateField
+            if-eqz v0, :no_handler
+            iget-object v0, v0, $handlerField
+            return-object v0
+            :no_handler
+            const/4 v0, 0x0
+            return-object v0
+        """,
+    )
+    callbackClass.addInterfaceMethod(
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_PLAYBACK_CALLBACK_INTERFACE,
+            "patch_getPlaybackStateSession",
+        ),
+        registerCount = 2,
+        instructions = """
+            iget-object v0, p0, $delegateField
+            if-eqz v0, :no_session
+            iget-object v0, v0, $ownerReferenceField
+            if-eqz v0, :no_session
+            invoke-virtual { v0 }, Ljava/lang/ref/WeakReference;->get()Ljava/lang/Object;
+            move-result-object v0
+            invoke-static { v0 }, $EXTENSION_CLASS->resolvePlaybackSession(Ljava/lang/Object;)$EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE
+            move-result-object v0
+            return-object v0
+            :no_session
+            const/4 v0, 0x0
+            return-object v0
+        """,
+    )
+    // YTM cannot decode this patch's media IDs; resolve them before its playback handler runs.
+    val handledRegister = playFromMediaIdMethod.findFreeRegister(0)
+    playFromMediaIdMethod.addInstructionsWithLabels(
+        0,
+        """
+            invoke-static/range { p0 .. p2 }, $EXTENSION_CLASS->handlePlayFromMediaId(Landroid/media/session/MediaSession${'$'}Callback;Ljava/lang/String;Landroid/os/Bundle;)Z
+            move-result v$handledRegister
+            if-eqz v$handledRegister, :resume
+            return-void
+        """,
+        ExternalLabel("resume", playFromMediaIdMethod.getInstruction<Instruction>(0)),
     )
 }
 

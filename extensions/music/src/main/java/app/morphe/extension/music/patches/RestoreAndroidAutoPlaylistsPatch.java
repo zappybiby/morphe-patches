@@ -48,16 +48,12 @@ import app.morphe.extension.shared.Utils;
  *
  * <p>Failure behavior preserves current playback:
  * <ul>
- *   <li>A selected page that loads but has no playable row, including an empty or editor-only
- *       page, attempts the no-tracks notice. The notice requires a current selection and an
- *       available compat playback state without an existing error; it preserves that state.
- *   <li>A failed selected-playlist request, expired selection deadline, or missing native Play
- *       action leaves playback alone and is logged. These failures do not establish that the
- *       playlist has no tracks, so they do not use the no-tracks notice.
- *   <li>An asynchronous Library failure or folder deadline attempts to deliver the prepared
- *       folder result once, without a playback notice. Failure before item conversion finishes
- *       yields an empty folder even when some Library rows were collected. Partial-result
- *       delivery is not implemented; this empty result does not establish an empty Library.
+ *   <li>If the selected playlist loads without songs, try to show the empty-playlist message.
+ *       This requires an existing playback state with no error already reported by YTM.
+ *   <li>Log playlist load errors and timeouts without changing playback. A missing Play-button
+ *       command is handled the same way. These failures do not mean the playlist is empty.
+ *   <li>Return the playlists collected so far if loading the Library fails or times out.
+ *       Return an empty list if none were collected.
  * </ul>
  *
  * <p>The Kotlin patch adds the interfaces and methods below to YTM's obfuscated classes.
@@ -69,9 +65,9 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final String EPISODES_FOR_LATER_BROWSE_ID = "VLSE";
     private static final String DEFERRED_PLAYLIST_MEDIA_ID_PREFIX = "morphe:aa:playlist:";
     private static final String PLAYLISTS_TITLE_RESOURCE_NAME = "library_playlists_shelf_title";
-    // Maximum wait before attempting to deliver the prepared folder result.
-    private static final int ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS = 120_000;
-    // Maximum wait for the selected playlist's response listener to claim completion.
+    // Limit the total time spent loading Library pages before returning the collected playlists.
+    private static final int ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS = 30_000;
+    // Maximum wait before ignoring a late response for the selected playlist.
     private static final int SELECTED_PLAYLIST_LOAD_TIMEOUT_MILLISECONDS = 30_000;
     private static final int NO_TRACKS_NOTICE_MILLISECONDS = 8_000;
     // PlaybackStateCompat's app error code, required to display the empty-playlist message.
@@ -174,25 +170,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 requests.getClass().getName());
     }
 
-    /** Injection point. Newer YTM versions wrap the callback owner in a separate session object. */
-    public static void registerPlaybackSession(@NonNull PlaybackStateSession session) {
-        synchronized (PLAYBACK_SESSIONS) {
-            PLAYBACK_SESSIONS.put(
-                    session.patch_getPlaybackOwner(), new WeakReference<>(session));
-        }
-    }
-
-    /** Injection point. Older YTM versions use the callback owner as the session itself. */
-    @Nullable
-    public static PlaybackStateSession resolvePlaybackSession(@Nullable Object owner) {
-        if (owner instanceof PlaybackStateSession) return (PlaybackStateSession) owner;
-        if (owner == null) return null;
-        synchronized (PLAYBACK_SESSIONS) {
-            WeakReference<PlaybackStateSession> session = PLAYBACK_SESSIONS.get(owner);
-            return session == null ? null : session.get();
-        }
-    }
-
     /**
      * Injection point. Record IDs paired with the translated Playlists title; the folder ID varies.
      */
@@ -219,149 +196,23 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             if (requestedMediaId == null) return false;
             if (!PLAYLISTS_TITLE_MATCH_MEDIA_IDS.contains(requestedMediaId)) return false;
             PlaylistFolderLoad load = new PlaylistFolderLoad(phoneRequests);
-            // This deadline attempts delivery without cancelling YTM's requests; later callbacks
-            // can run but cannot deliver a second result.
-            Utils.runOnMainThreadDelayed(
-                    () -> deliverAndroidAutoPlaylists(androidAutoRequest, load),
-                    ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS);
-            requestPhoneLibrary(androidAutoRequest, load);
+            try {
+                // Late responses are ignored; YTM's underlying requests are not cancelled.
+                Utils.runOnMainThreadDelayed(
+                        () -> deliverAndroidAutoPlaylists(androidAutoRequest, load, "timed out"),
+                        ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS);
+                requestPhoneLibrary(androidAutoRequest, load);
+            } catch (RuntimeException ex) {
+                // Finish this request here. Returning false would let YTM answer it too,
+                // while the timeout is still scheduled to send our result.
+                Logger.printException(() -> "Could not request YTM Library", ex);
+                deliverAndroidAutoPlaylists(androidAutoRequest, load, "failed");
+            }
             return true;
         } catch (RuntimeException ex) {
             Logger.printException(() -> "Could not handle Android Auto Playlists request", ex);
             return false;
         }
-    }
-
-    /**
-     * Injection point. Resolves a deferred playlist ID before YTM's native media-ID decoder,
-     * then replays the resolved native ID through the media-session callback.
-     *
-     * @return true if a deferred ID was consumed, even if resolution fails or playback is pending;
-     *         false to let YTM handle an ordinary ID. YTM cannot decode this patch's deferred IDs.
-     */
-    public static boolean handlePlayFromMediaId(
-            @NonNull MediaSession.Callback callback, @Nullable String mediaId,
-            @Nullable Bundle extras) {
-        if (mediaId == null || !mediaId.startsWith(DEFERRED_PLAYLIST_MEDIA_ID_PREFIX)) {
-            PLAY_REQUEST_GENERATION.incrementAndGet();
-            return false;
-        }
-        long requestGeneration = PLAY_REQUEST_GENERATION.incrementAndGet();
-        PlaybackCallback playbackCallback = (PlaybackCallback) callback;
-        String playlistBrowseId = mediaId.substring(DEFERRED_PLAYLIST_MEDIA_ID_PREFIX.length());
-        PhoneBrowseRequests requests = phoneBrowseRequests;
-        if (playlistBrowseId.isEmpty() || requests == null) {
-            Logger.printDebug(() -> "Could not resolve selected Android Auto playlist");
-            return true;
-        }
-        Handler callbackHandler = playbackCallback.patch_getCallbackHandler();
-        if (callbackHandler == null) {
-            Logger.printDebug(() -> "Android Auto playback callback is no longer active");
-            return true;
-        }
-        Bundle playbackExtras = extras == null ? null : new Bundle(extras);
-        // The response listener and deadline compete to complete this selection. If the listener
-        // wins, the deadline cannot interrupt its processing or queued playback replay.
-        // Neither path cancels the underlying YTM request.
-        AtomicBoolean completed = new AtomicBoolean();
-        Utils.runOnMainThreadDelayed(() -> {
-            if (completed.compareAndSet(false, true) &&
-                    requestGeneration == PLAY_REQUEST_GENERATION.get()) {
-                Logger.printDebug(() -> "Selected Android Auto playlist request timed out");
-            }
-        }, SELECTED_PLAYLIST_LOAD_TIMEOUT_MILLISECONDS);
-        try {
-            ListenableFuture<BrowseResponse> future =
-                    requests.patch_requestBrowse(playlistBrowseId, BACKGROUND_EXECUTOR);
-            future.addListener(() -> {
-                if (!completed.compareAndSet(false, true)) return;
-                try {
-                    BrowseResponse response = future.get();
-                    // A header Play action alone does not prove the page has a playable song.
-                    SharedBrowseRow firstPlayableSong = findFirstPlayableSong(response);
-                    if (firstPlayableSong == null) {
-                        // Editor-only or unavailable-song pages have no playable row.
-                        Logger.printDebug(() ->
-                                "Selected Android Auto playlist has no playable songs");
-                        showNoPlayableSongsNotice(
-                                playbackCallback, callbackHandler, requestGeneration);
-                        return;
-                    }
-                    String nativePlayMediaId = LIKED_MUSIC_BROWSE_ID.equals(playlistBrowseId)
-                            ? firstPlayableSong.patch_getActionMediaId()
-                            : response.patch_getHeaderPlayMediaId();
-                    if (nativePlayMediaId == null) {
-                        Logger.printDebug(() -> "Selected Android Auto playlist has no Play action");
-                        return;
-                    }
-                    // The response is processed in the background; replay must use the Looper
-                    // registered with YTM's media-session callback.
-                    callbackHandler.post(() -> {
-                        // A slower earlier selection must not replace the user's latest choice.
-                        // Check here because another request or a service recreation can occur
-                        // while replay is queued. A replaced Browse client also invalidates replay.
-                        if (requestGeneration != PLAY_REQUEST_GENERATION.get() ||
-                                requests != phoneBrowseRequests)
-                            return;
-                        callback.onPlayFromMediaId(nativePlayMediaId, playbackExtras);
-                    });
-                } catch (InterruptedException ex) {
-                    Thread.currentThread().interrupt();
-                    Logger.printException(() -> "YTM playlist request interrupted: " +
-                            playlistBrowseId, ex);
-                } catch (ExecutionException | RuntimeException ex) {
-                    Logger.printException(() -> "YTM playlist request failed: " +
-                            playlistBrowseId, ex);
-                }
-            }, BACKGROUND_EXECUTOR);
-        } catch (RuntimeException ex) {
-            completed.set(true);
-            Logger.printException(() -> "Could not request YTM playlist: " +
-                    playlistBrowseId, ex);
-        }
-        return true;
-    }
-
-    private static void showNoPlayableSongsNotice(
-            PlaybackCallback callback, Handler callbackHandler, long requestGeneration) {
-        callbackHandler.post(() -> {
-            if (requestGeneration != PLAY_REQUEST_GENERATION.get()) return;
-            try {
-                PlaybackStateSession session = callback.patch_getPlaybackStateSession();
-                if (session == null) return;
-                PlaybackStateCompat currentPlaybackState = session.patch_getPlaybackState();
-                if (currentPlaybackState == null) {
-                    // A session without a compat state has no playback state to preserve.
-                    // TODO: Verify an idle compat state can be synthesized safely for this case.
-                    Logger.printDebug(() -> "No playback state for no-tracks notice");
-                    return;
-                }
-                // An existing compat error code takes precedence over this temporary notice.
-                if (currentPlaybackState.f != 0) return;
-                CharSequence message = ResourceUtils.getString(NO_TRACKS_MESSAGE_RESOURCE_NAME);
-                // Android Auto needs the compat error code. A framework-only error message did
-                // not show a toast, and changing the state to ERROR would interrupt playback.
-                // Keep the current state, position, actions, queue, and extras; replace only the
-                // compat error code and message. The compile-only stub maps YTM's a-k fields.
-                PlaybackStateCompat noPlayableSongsNotice = new PlaybackStateCompat(
-                        currentPlaybackState.a, currentPlaybackState.b, currentPlaybackState.c,
-                        currentPlaybackState.d, currentPlaybackState.e, APP_ERROR_CODE, message,
-                        currentPlaybackState.h, currentPlaybackState.i, currentPlaybackState.j,
-                        currentPlaybackState.k);
-                session.patch_setPlaybackState(noPlayableSongsNotice);
-                callbackHandler.postDelayed(() -> {
-                    try {
-                        // Native playback can publish a newer state while the message is shown.
-                        if (session.patch_getPlaybackState() == noPlayableSongsNotice)
-                            session.patch_setPlaybackState(currentPlaybackState);
-                    } catch (RuntimeException ex) {
-                        Logger.printException(() -> "Could not clear no-tracks notice", ex);
-                    }
-                }, NO_TRACKS_NOTICE_MILLISECONDS);
-            } catch (RuntimeException ex) {
-                Logger.printException(() -> "Could not show no-tracks notice", ex);
-            }
-        });
     }
 
     private static void requestPhoneLibrary(
@@ -389,24 +240,29 @@ public final class RestoreAndroidAutoPlaylistsPatch {
             BiFunction<BrowseResponse, PlaylistFolderLoad, Object>
                     collectPlaylistsAndGetContinuation) {
         libraryResponseFuture.addListener(() -> {
+            synchronized (load) {
+                if (load.androidAutoResultDelivered) return;
+            }
             try {
                 BrowseResponse libraryResponse = libraryResponseFuture.get();
                 Object continuationAction =
                         collectPlaylistsAndGetContinuation.apply(libraryResponse, load);
+                synchronized (load) {
+                    if (load.androidAutoResultDelivered) return;
+                }
                 if (continuationAction != null) {
                     requestLibraryContinuation(androidAutoRequest, load, continuationAction);
                     return;
                 }
-                // Deliver after Library pagination; opening each playlist page here made the
-                // folder wait for the slowest playlist before showing any Library rows.
-                deliverLibraryPlaylists(androidAutoRequest, load);
+                // Load playlist contents on selection to avoid delaying this list.
+                deliverAndroidAutoPlaylists(androidAutoRequest, load, "completed");
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
                 Logger.printException(() -> "YTM Library request interrupted", ex);
-                deliverAndroidAutoPlaylists(androidAutoRequest, load);
+                deliverAndroidAutoPlaylists(androidAutoRequest, load, "interrupted");
             } catch (ExecutionException | RuntimeException ex) {
                 Logger.printException(() -> "YTM Library request failed", ex);
-                deliverAndroidAutoPlaylists(androidAutoRequest, load);
+                deliverAndroidAutoPlaylists(androidAutoRequest, load, "failed");
             }
         }, BACKGROUND_EXECUTOR);
     }
@@ -426,8 +282,10 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 }
             }
         }
-        Logger.printDebug(() -> "Found playlists in phone Library: " +
-                load.libraryPlaylistRows.size());
+        synchronized (load) {
+            Logger.printDebug(() -> "Found playlists in phone Library: " +
+                    load.libraryPlaylistRows.size());
+        }
         return continuationAction;
     }
 
@@ -436,8 +294,10 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         GridRenderer gridRenderer = libraryResponse.patch_getPaginatedLibraryGrid();
         if (gridRenderer == null) return null;
         collectPlaylistsFromGrid(gridRenderer, load);
-        Logger.printDebug(() -> "Found playlists in phone Library: " +
-                load.libraryPlaylistRows.size());
+        synchronized (load) {
+            Logger.printDebug(() -> "Found playlists in phone Library: " +
+                    load.libraryPlaylistRows.size());
+        }
         return firstContinuationAction(gridRenderer);
     }
 
@@ -470,13 +330,17 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         CharSequence titleText = libraryRow.patch_getTitle();
         String title = titleText == null ? "" : titleText.toString();
         if (title.isEmpty()) return;
-        if (!load.seenPlaylistBrowseIds.add(playlistBrowseId)) return;
-        // Missing subtitle or artwork affects presentation, not whether the row can play.
-        load.libraryPlaylistRows.add(new LibraryPlaylistRow(
+        // Subtitle and artwork are not needed for playback.
+        LibraryPlaylistRow row = new LibraryPlaylistRow(
                 playlistBrowseId,
                 title,
                 subtitleOrEmpty(libraryRow),
-                artworkUriOrNull(libraryRow)));
+                artworkUriOrNull(libraryRow));
+        synchronized (load) {
+            if (load.androidAutoResultDelivered || !load.seenPlaylistBrowseIds.add(playlistBrowseId))
+                return;
+            load.libraryPlaylistRows.add(row);
+        }
     }
 
     private static String subtitleOrEmpty(SharedBrowseRow libraryRow) {
@@ -496,19 +360,130 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
-    private static void deliverLibraryPlaylists(
-            AndroidAutoPlaylistsRequest androidAutoRequest, PlaylistFolderLoad load) {
-        // Publish only after converting the full collection. A failure during pagination or
-        // conversion leaves the initially empty prepared result for failure/deadline delivery.
-        List<MediaBrowserCompat.MediaItem> playlistItems =
-                new ArrayList<>(load.libraryPlaylistRows.size());
-        for (LibraryPlaylistRow libraryRow : load.libraryPlaylistRows) {
-            playlistItems.add(createDeferredPlaylistItem(libraryRow));
-        }
+    private static void deliverAndroidAutoPlaylists(
+            AndroidAutoPlaylistsRequest androidAutoRequest,
+            PlaylistFolderLoad load, String completionReason) {
+        List<LibraryPlaylistRow> collectedRows;
         synchronized (load) {
-            load.androidAutoPlaylistItems = playlistItems;
+            // Prevent the loader from changing the list while it is copied, and send only one result.
+            if (load.androidAutoResultDelivered) return;
+            load.androidAutoResultDelivered = true;
+            collectedRows = new ArrayList<>(load.libraryPlaylistRows);
         }
-        deliverAndroidAutoPlaylists(androidAutoRequest, load);
+        List<MediaBrowserCompat.MediaItem> androidAutoPlaylistItems =
+                new ArrayList<>(collectedRows.size());
+        for (LibraryPlaylistRow row : collectedRows) {
+            try {
+                androidAutoPlaylistItems.add(createDeferredPlaylistItem(row));
+            } catch (RuntimeException ex) {
+                Logger.printException(() -> "Could not build a Library playlist item", ex);
+            }
+        }
+        Logger.printDebug(() -> "YTM Library " + completionReason + "; returning " +
+                androidAutoPlaylistItems.size() + " playlists");
+        try {
+            androidAutoRequest.patch_deliverAndroidAutoPlaylists(androidAutoPlaylistItems);
+        } catch (RuntimeException ex) {
+            Logger.printException(() -> "Could not deliver Android Auto playlists", ex);
+        }
+    }
+
+    private static MediaBrowserCompat.MediaItem createDeferredPlaylistItem(
+            LibraryPlaylistRow libraryRow) {
+        MediaDescriptionCompat description = new MediaDescriptionCompat(
+                DEFERRED_PLAYLIST_MEDIA_ID_PREFIX + libraryRow.playlistBrowseId,
+                libraryRow.title, libraryRow.subtitle, null, null, libraryRow.artworkUri,
+                null, null);
+        return new MediaBrowserCompat.MediaItem(
+                description, MediaBrowserCompat.MediaItem.FLAG_PLAYABLE);
+    }
+
+    /**
+     * Injection point. Resolve this patch's deferred media ID, then ask YTM to start playback.
+     *
+     * @return true for this patch's media IDs, including failed or pending requests;
+     *         false for YTM's own IDs. YTM cannot decode this patch's IDs.
+     */
+    public static boolean handlePlayFromMediaId(
+            @NonNull MediaSession.Callback callback, @Nullable String mediaId,
+            @Nullable Bundle extras) {
+        if (mediaId == null || !mediaId.startsWith(DEFERRED_PLAYLIST_MEDIA_ID_PREFIX)) {
+            PLAY_REQUEST_GENERATION.incrementAndGet();
+            return false;
+        }
+        long requestGeneration = PLAY_REQUEST_GENERATION.incrementAndGet();
+        PlaybackCallback playbackCallback = (PlaybackCallback) callback;
+        String playlistBrowseId = mediaId.substring(DEFERRED_PLAYLIST_MEDIA_ID_PREFIX.length());
+        PhoneBrowseRequests requests = phoneBrowseRequests;
+        if (playlistBrowseId.isEmpty() || requests == null) {
+            Logger.printDebug(() -> "Could not resolve selected Android Auto playlist");
+            return true;
+        }
+        Handler callbackHandler = playbackCallback.patch_getCallbackHandler();
+        if (callbackHandler == null) {
+            Logger.printDebug(() -> "Android Auto playback callback is no longer active");
+            return true;
+        }
+        Bundle playbackExtras = extras == null ? null : new Bundle(extras);
+        // Ignore responses after the timeout. Once response processing starts, allow it to finish.
+        AtomicBoolean completed = new AtomicBoolean();
+        Utils.runOnMainThreadDelayed(() -> {
+            if (completed.compareAndSet(false, true) &&
+                    requestGeneration == PLAY_REQUEST_GENERATION.get()) {
+                Logger.printDebug(() -> "Selected Android Auto playlist request timed out");
+            }
+        }, SELECTED_PLAYLIST_LOAD_TIMEOUT_MILLISECONDS);
+        try {
+            ListenableFuture<BrowseResponse> future =
+                    requests.patch_requestBrowse(playlistBrowseId, BACKGROUND_EXECUTOR);
+            future.addListener(() -> {
+                if (!completed.compareAndSet(false, true)) return;
+                try {
+                    BrowseResponse response = future.get();
+                    // The playlist's Play button can be present even when there are no songs.
+                    // Check for a song before asking YTM to play the playlist.
+                    SharedBrowseRow firstPlayableSong = findFirstPlayableSong(response);
+                    if (firstPlayableSong == null) {
+                        Logger.printDebug(() ->
+                                "Selected Android Auto playlist has no playable songs");
+                        showNoPlayableSongsNotice(
+                                playbackCallback, callbackHandler, requestGeneration);
+                        return;
+                    }
+                    // Liked Music has no Play button; start it with the first playable song.
+                    String nativePlayMediaId = LIKED_MUSIC_BROWSE_ID.equals(playlistBrowseId)
+                            ? firstPlayableSong.patch_getActionMediaId()
+                            : response.patch_getHeaderPlayMediaId();
+                    if (nativePlayMediaId == null) {
+                        Logger.printDebug(() -> "Selected Android Auto playlist has no Play action");
+                        return;
+                    }
+                    // The response arrives on a background thread. Ask YTM to start playback
+                    // on the thread it uses to handle playback commands.
+                    callbackHandler.post(() -> {
+                        // Do not start this playlist if the user has since selected something else,
+                        // pressed Pause/Stop, or the service has replaced its Browse client.
+                        // Check just before starting: any of these can happen while this task waits.
+                        if (requestGeneration != PLAY_REQUEST_GENERATION.get() ||
+                                requests != phoneBrowseRequests)
+                            return;
+                        callback.onPlayFromMediaId(nativePlayMediaId, playbackExtras);
+                    });
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    Logger.printException(() -> "YTM playlist request interrupted: " +
+                            playlistBrowseId, ex);
+                } catch (ExecutionException | RuntimeException ex) {
+                    Logger.printException(() -> "YTM playlist request failed: " +
+                            playlistBrowseId, ex);
+                }
+            }, BACKGROUND_EXECUTOR);
+        } catch (RuntimeException ex) {
+            completed.set(true);
+            Logger.printException(() -> "Could not request YTM playlist: " +
+                    playlistBrowseId, ex);
+        }
+        return true;
     }
 
     private static SharedBrowseRow findFirstPlayableSong(BrowseResponse playlistResponse) {
@@ -528,32 +503,66 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         return null;
     }
 
-    private static MediaBrowserCompat.MediaItem createDeferredPlaylistItem(
-            LibraryPlaylistRow libraryRow) {
-        MediaDescriptionCompat description = new MediaDescriptionCompat(
-                DEFERRED_PLAYLIST_MEDIA_ID_PREFIX + libraryRow.playlistBrowseId,
-                libraryRow.title, libraryRow.subtitle, null, null, libraryRow.artworkUri,
-                null, null);
-        return new MediaBrowserCompat.MediaItem(
-                description, MediaBrowserCompat.MediaItem.FLAG_PLAYABLE);
+    /**
+     * Injection point. Save the session that can update playback state for this callback.
+     */
+    public static void registerPlaybackSession(@NonNull PlaybackStateSession session) {
+        synchronized (PLAYBACK_SESSIONS) {
+            PLAYBACK_SESSIONS.put(
+                    session.patch_getPlaybackOwner(), new WeakReference<>(session));
+        }
     }
 
-    private static void deliverAndroidAutoPlaylists(
-            AndroidAutoPlaylistsRequest androidAutoRequest,
-            PlaylistFolderLoad load) {
-        // Deliver the prepared result as-is; collected Library rows are not converted here.
-        List<MediaBrowserCompat.MediaItem> androidAutoPlaylistItems;
-        synchronized (load) {
-            // Success, failure, and the deadline share one delivery attempt for the detached result.
-            if (load.androidAutoResultDelivered) return;
-            load.androidAutoResultDelivered = true;
-            androidAutoPlaylistItems = load.androidAutoPlaylistItems;
+    /**
+     * Injection point. Find the callback's session so it can show the empty-playlist message.
+     */
+    @Nullable
+    public static PlaybackStateSession resolvePlaybackSession(@Nullable Object owner) {
+        if (owner instanceof PlaybackStateSession) return (PlaybackStateSession) owner;
+        if (owner == null) return null;
+        synchronized (PLAYBACK_SESSIONS) {
+            WeakReference<PlaybackStateSession> session = PLAYBACK_SESSIONS.get(owner);
+            return session == null ? null : session.get();
         }
-        try {
-            androidAutoRequest.patch_deliverAndroidAutoPlaylists(androidAutoPlaylistItems);
-        } catch (RuntimeException ex) {
-            Logger.printException(() -> "Could not deliver Android Auto playlists", ex);
-        }
+    }
+
+    private static void showNoPlayableSongsNotice(
+            PlaybackCallback callback, Handler callbackHandler, long requestGeneration) {
+        callbackHandler.post(() -> {
+            if (requestGeneration != PLAY_REQUEST_GENERATION.get()) return;
+            try {
+                PlaybackStateSession session = callback.patch_getPlaybackStateSession();
+                if (session == null) return;
+                PlaybackStateCompat currentPlaybackState = session.patch_getPlaybackState();
+                if (currentPlaybackState == null) {
+                    // TODO: Find a way to show the empty-playlist message without an existing playback state.
+                    Logger.printDebug(() -> "No playback state for no-tracks notice");
+                    return;
+                }
+                // Do not replace an error YTM is already reporting.
+                if (currentPlaybackState.f != 0) return;
+                CharSequence message = ResourceUtils.getString(NO_TRACKS_MESSAGE_RESOURCE_NAME);
+                // Android Auto needs an error code in PlaybackStateCompat to display the message.
+                // Keep the playback status unchanged so the current song is not marked as failed.
+                PlaybackStateCompat noPlayableSongsNotice = new PlaybackStateCompat(
+                        currentPlaybackState.a, currentPlaybackState.b, currentPlaybackState.c,
+                        currentPlaybackState.d, currentPlaybackState.e, APP_ERROR_CODE, message,
+                        currentPlaybackState.h, currentPlaybackState.i, currentPlaybackState.j,
+                        currentPlaybackState.k);
+                session.patch_setPlaybackState(noPlayableSongsNotice);
+                callbackHandler.postDelayed(() -> {
+                    try {
+                        // Do not restore an old state if playback changed while the message was visible.
+                        if (session.patch_getPlaybackState() == noPlayableSongsNotice)
+                            session.patch_setPlaybackState(currentPlaybackState);
+                    } catch (RuntimeException ex) {
+                        Logger.printException(() -> "Could not clear no-tracks notice", ex);
+                    }
+                }, NO_TRACKS_NOTICE_MILLISECONDS);
+            } catch (RuntimeException ex) {
+                Logger.printException(() -> "Could not show no-tracks notice", ex);
+            }
+        });
     }
 
     private static final class PlaylistFolderLoad {
@@ -561,8 +570,6 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         private final List<LibraryPlaylistRow> libraryPlaylistRows = new ArrayList<>();
         private final Set<String> seenPlaylistBrowseIds = new HashSet<>();
         private boolean androidAutoResultDelivered;
-        // TODO: Evaluate returning collected rows on failure/deadline with a synchronized snapshot.
-        private List<MediaBrowserCompat.MediaItem> androidAutoPlaylistItems = new ArrayList<>();
 
         private PlaylistFolderLoad(PhoneBrowseRequests requests) {
             this.phoneBrowseRequests = requests;
