@@ -54,6 +54,8 @@ public final class SupportAndroidAutoPatch {
     // Limit the total time spent loading Library pages before returning the collected playlists.
     private static final int ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS = 30_000;
     private static final int SELECTED_PLAYLIST_LOAD_TIMEOUT_MILLISECONDS = 30_000;
+    // Allow phone Library time to return updated artwork after a successful edit.
+    private static final int PLAYLIST_EDIT_REFRESH_DELAY_MILLISECONDS = 5_000;
     private static final int NO_TRACKS_NOTICE_MILLISECONDS = 8_000;
     private static final int APP_ERROR_CODE = 1;
     private static final String NO_TRACKS_MESSAGE_RESOURCE_NAME = "sideloaded_playlists_no_tracks";
@@ -70,6 +72,8 @@ public final class SupportAndroidAutoPatch {
     private static final AtomicLong PLAY_REQUEST_GENERATION = new AtomicLong();
     private static final WeakHashMap<Object, WeakReference<PlaybackStateSession>>
             PLAYBACK_SESSIONS = new WeakHashMap<>();
+    @Nullable
+    private static volatile PlaylistSubscription playlistSubscription;
     private static String androidAutoHomeMediaId;
     private static List<MediaBrowserCompat.MediaItem> androidAutoPodcastFolders =
             Collections.emptyList();
@@ -121,6 +125,11 @@ public final class SupportAndroidAutoPatch {
                 @NonNull List<MediaBrowserCompat.MediaItem> androidAutoPlaylists);
     }
 
+    // Reloads the Playlists folder through its existing Android Auto connection.
+    public interface AndroidAutoPlaylistReload {
+        void patch_reloadPlaylistFolder(@NonNull String parentMediaId, @NonNull Object connection);
+    }
+
     public interface PlaybackCallback {
         @Nullable Handler patch_getCallbackHandler();
         @Nullable PlaybackStateSession patch_getPlaybackStateSession();
@@ -155,6 +164,7 @@ public final class SupportAndroidAutoPatch {
      */
     public static void setPhoneBrowseRequests(@NonNull PhoneBrowseRequests requests) {
         phoneBrowseRequests = requests;
+        playlistSubscription = null;
         Logger.printDebug(() -> "Ready to request phone Library and opened playlists: " +
                 requests.getClass().getName());
     }
@@ -167,6 +177,52 @@ public final class SupportAndroidAutoPatch {
         if (title == null || !ResourceUtils.getString(PLAYLISTS_TITLE_RESOURCE_NAME)
                 .contentEquals(title)) return;
         if (androidAutoMediaId != null) PLAYLISTS_TITLE_MATCH_MEDIA_IDS.add(androidAutoMediaId);
+    }
+
+    /**
+     * Injection point. Save the Playlists connection so phone edits can refresh the open folder.
+     */
+    public static void rememberPlaylistsSubscription(
+            @NonNull AndroidAutoPlaylistReload browser,
+            @Nullable String parentMediaId,
+            @NonNull Object connection) {
+        if (parentMediaId == null || !PLAYLISTS_TITLE_MATCH_MEDIA_IDS.contains(parentMediaId))
+            return;
+        playlistSubscription = new PlaylistSubscription(browser, parentMediaId, connection);
+    }
+
+    /**
+     * Injection point. Refresh Android Auto Playlists after a successful playlist edit on the phone.
+     */
+    public static void watchPlaylistEdit(@Nullable ListenableFuture<?> editResult) {
+        if (editResult == null || playlistSubscription == null) return;
+        try {
+            editResult.addListener(() -> {
+                try {
+                    editResult.get();
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    return;
+                } catch (ExecutionException | RuntimeException ex) {
+                    Logger.printException(() -> "Playlist edit failed", ex);
+                    return;
+                }
+                Utils.runOnMainThreadDelayed(() -> {
+                    PlaylistSubscription subscription = playlistSubscription;
+                    if (subscription == null) return;
+                    AndroidAutoPlaylistReload browser = subscription.browser.get();
+                    Object connection = subscription.connection.get();
+                    if (browser == null || connection == null) return;
+                    try {
+                        browser.patch_reloadPlaylistFolder(subscription.parentMediaId, connection);
+                    } catch (RuntimeException ex) {
+                        Logger.printException(() -> "Could not refresh Android Auto Playlists", ex);
+                    }
+                }, PLAYLIST_EDIT_REFRESH_DELAY_MILLISECONDS);
+            }, BACKGROUND_EXECUTOR);
+        } catch (RuntimeException ex) {
+            Logger.printException(() -> "Could not observe playlist edit", ex);
+        }
     }
 
     /**
@@ -214,7 +270,8 @@ public final class SupportAndroidAutoPatch {
         try {
             String parentMediaId = request.patch_getRequestedMediaId();
             if (ANDROID_AUTO_ROOT_MEDIA_ID.equals(parentMediaId)) {
-                // A new root load may follow an account switch or reconnect.
+                // Discard folders and connections from a previous account or Android Auto connection.
+                playlistSubscription = null;
                 androidAutoHomeMediaId = null;
                 androidAutoPodcastFolders = Collections.emptyList();
                 // The two-item root is Home, Library. YTM's own Podcasts tab adds a third item.
@@ -607,6 +664,19 @@ public final class SupportAndroidAutoPatch {
                 Logger.printException(() -> "Could not show no-tracks notice", ex);
             }
         });
+    }
+
+    private static final class PlaylistSubscription {
+        private final WeakReference<AndroidAutoPlaylistReload> browser;
+        private final String parentMediaId;
+        private final WeakReference<Object> connection;
+
+        private PlaylistSubscription(
+                AndroidAutoPlaylistReload browser, String parentMediaId, Object connection) {
+            this.browser = new WeakReference<>(browser);
+            this.parentMediaId = parentMediaId;
+            this.connection = new WeakReference<>(connection);
+        }
     }
 
     private static final class PlaylistFolderLoad {
