@@ -6,7 +6,20 @@ public class MediaBrowserCompat {
         public static final int FLAG_BROWSABLE = 1;
         public static final int FLAG_PLAYABLE = 2;
 
+        // Contains the item's media ID, title, subtitle, artwork, and extras.
+        public MediaDescriptionCompat a;
+
         public MediaItem(MediaDescriptionCompat description, int flags) {
+            throw new UnsupportedOperationException("Stub");
+        }
+
+        // Returns the media ID.
+        public String a() {
+            throw new UnsupportedOperationException("Stub");
+        }
+
+        // Whether the item can be opened to browse its contents.
+        public boolean b() {
             throw new UnsupportedOperationException("Stub");
         }
     }
