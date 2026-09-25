@@ -5,7 +5,7 @@
  * See the included NOTICE file for GPLv3 Section 7 terms that apply to this code.
  */
 
-package app.morphe.patches.music.misc.androidauto.playlists
+package app.morphe.patches.music.misc.androidauto.support
 
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
@@ -39,8 +39,13 @@ private const val PLAY_BUTTON_PROTO_FIELD = 65_153_809L
 private const val THUMBNAIL_PROTO_FIELD = 164_480_666L
 private const val WATCH_ENDPOINT_PROTO_FIELD = 48_687_757L
 
-// Android Auto
+// Identify the Playlists folder and how YTM returns its contents to Android Auto
 
+/**
+ * Matches the constructor that stores an Android Auto item's ID, title, and artwork.
+ * [BuildAndroidAutoMediaItemFingerprint] uses it to find where YTM creates the Playlists folder;
+ * [androidAutoMediaDescriptionFingerprint] uses it to find YTM's artwork conversion.
+ */
 internal val MEDIA_DESCRIPTION_CONSTRUCTOR_CALL = methodCall(
     definingClass = "Landroid/support/v4/media/MediaDescriptionCompat;",
     name = "<init>",
@@ -57,16 +62,18 @@ internal val MEDIA_DESCRIPTION_CONSTRUCTOR_CALL = methodCall(
     returnType = "V",
 )
 
+/** Creates Android Auto media items, including the Playlists folder. */
 internal object BuildAndroidAutoMediaItemFingerprint : Fingerprint(
     returnType = "Lj$/util/Optional;",
     parameters = listOf("L", "Ljava/util/Set;", "L"),
     filters = listOf(MEDIA_DESCRIPTION_CONSTRUCTOR_CALL),
     custom = { method, _ ->
-        // YTM has separate FLAG_BROWSABLE, FLAG_PLAYABLE, and combined construction paths.
+        // Three constructor calls cover media items that can be opened, played, or both.
         method.findInstructionIndicesReversed(MEDIA_DESCRIPTION_CONSTRUCTOR_CALL).size == 3
     },
 )
 
+/** YTM's handler for invalid Android Auto media IDs. */
 internal object SendEmptyAndroidAutoMediaItemsFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC, AccessFlags.FINAL),
     returnType = "V",
@@ -85,7 +92,7 @@ internal object AndroidAutoPlayFromMediaIdFingerprint : Fingerprint(
     },
 )
 
-// YTM's playback-state setter updates its own copy and notifies Android.
+/** Updates YTM's playback status and sends it to Android Auto. */
 internal object MediaSessionCompatPlaybackStateSetterFingerprint : Fingerprint(
     returnType = "V",
     parameters = listOf("Landroid/support/v4/media/session/PlaybackStateCompat;"),
@@ -98,8 +105,9 @@ internal object MediaSessionCompatPlaybackStateSetterFingerprint : Fingerprint(
     ),
 )
 
-// Phone Browse requests
+// Request Library and playlist pages through YTM
 
+/** Initializes MusicBrowserService with the objects it needs to load Library and playlist data. */
 internal fun musicBrowserServiceSuperclassOnCreateFingerprint(
     musicBrowserServiceType: String,
     generatedComponentType: String,
@@ -124,6 +132,7 @@ internal fun musicBrowserServiceSuperclassOnCreateFingerprint(
     ),
 )
 
+/** Obtains YTM's object for sending Library and playlist requests. */
 internal fun phoneBrowseRequestsProviderFingerprint(
     phoneBrowseRequestsType: String,
 ) = Fingerprint(
@@ -149,6 +158,7 @@ internal object BrowseRequestFromEndpointFingerprint : Fingerprint(
             opcode = Opcode.IGET_OBJECT,
             type = "Ljava/lang/String;",
         ),
+        // FEmusic_home identifies the phone's Home page; YTM compares it with the ID read above.
         string("FEmusic_home", location = MatchAfterImmediately()),
     ),
     // The Object-returning lambda only compares the ID; it does not create the request.
@@ -172,6 +182,7 @@ internal fun sendBrowseRequestFingerprint(
     ),
 )
 
+/** Sets the Library or playlist page ID on a YTM request. */
 internal fun setRequestBrowseIdFingerprint(requestBrowseIdField: FieldReference) = Fingerprint(
     definingClass = requestBrowseIdField.definingClass,
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
@@ -187,7 +198,8 @@ internal fun setRequestBrowseIdFingerprint(requestBrowseIdField: FieldReference)
     ),
 )
 
-// Phone Browse responses
+// Read the contents returned by Library and playlist requests
+// TabRenderer contains sections; each can hold a Library grid (GridRenderer) or playlist contents.
 
 // YTM uses TabRenderer for Library and opened-playlist contents, even when no tab is visible.
 internal object BrowseResponseTabsFingerprint : Fingerprint(
@@ -225,7 +237,7 @@ internal fun createBrowseTabFingerprint(tabMapperType: String) = Fingerprint(
     ),
 )
 
-// This flag marks a tab with page contents, such as Library items or playlist songs.
+/** Reads the section list that holds a tab's Library items or playlist songs. */
 internal fun getSectionListFingerprint(tabWrapperType: String) = Fingerprint(
     definingClass = tabWrapperType,
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
@@ -234,7 +246,7 @@ internal fun getSectionListFingerprint(tabWrapperType: String) = Fingerprint(
     filters = listOf(literal(TAB_CONTENT_PRESENT_FLAG)),
 )
 
-// The page contents use the fixed obfuscated field f.
+/** Returns the Library lists or playlist song lists stored in the page's sections. */
 internal fun sectionListContentsFingerprint(
     sectionListType: String,
     sectionContentsType: String,
@@ -245,12 +257,13 @@ internal fun sectionListContentsFingerprint(
     filters = listOf(
         fieldAccess(
             opcode = Opcode.IGET_OBJECT,
+            // Field f contains the Library grid or playlist song list.
             name = SECTION_LIST_CONTENTS_FIELD_NAME,
         ),
     ),
 )
 
-// Library playlists and opened-playlist rows
+// Read individual Library and playlist items
 
 // The same protobuf row type represents Library playlists, songs, and editor buttons.
 internal object SharedBrowseRowFingerprint : Fingerprint(
@@ -266,6 +279,7 @@ internal object SharedBrowseRowFingerprint : Fingerprint(
     ),
 )
 
+/** Identifies the class that updates the phone's Library list and reads pagination responses. */
 internal object HandleMusicReloadShelfEventFingerprint : Fingerprint(
     name = "handleMusicReloadShelfEvent",
     accessFlags = listOf(AccessFlags.PUBLIC),
@@ -309,7 +323,9 @@ internal fun openedPlaylistRowsFingerprint(sharedBrowseRowType: String) = Finger
     },
 )
 
-// Reads additional Library pages, whether the list is at the response root or inside a section.
+// Library pagination responses
+
+/** Reads the Library items returned by pagination. */
 internal object LibraryPaginationDecoderFingerprint : Fingerprint(
     classFingerprint = HandleMusicReloadShelfEventFingerprint,
     accessFlags = listOf(
@@ -336,6 +352,7 @@ internal object SharedBrowseRowThumbnailFingerprint : Fingerprint(
     ),
 )
 
+/** Decodes the artwork data stored on a playlist or song. */
 internal fun decodeThumbnailFingerprint(thumbnailFieldType: String) = Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
     returnType = "Lcom/google/protobuf/MessageLite;",
@@ -350,7 +367,7 @@ internal fun decodeThumbnailFingerprint(thumbnailFieldType: String) = Fingerprin
     ),
 )
 
-// Find YTM's conversion from thumbnail data to Android Auto artwork URIs.
+/** Creates an Android Auto item and converts its artwork to an image URI. */
 internal fun androidAutoMediaDescriptionFingerprint(
     thumbnailFieldTypes: Set<String>,
 ) = Fingerprint(
@@ -377,6 +394,7 @@ internal fun androidAutoMediaDescriptionFingerprint(
     },
 )
 
+/** Converts playlist and song titles or subtitles into display text. */
 internal fun formatTextFingerprint(textType: String) = Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
     returnType = "Landroid/text/Spanned;",
@@ -422,9 +440,9 @@ internal object EncodeActionMediaIdFingerprint : Fingerprint(
     },
 )
 
-// Opened playlist playback
+// Check playlist contents
 
-// Editor buttons also have action IDs; require a WatchEndpoint video ID to identify a song.
+/** WatchEndpoint: YTM's data identifying the song or video to play. */
 internal object WatchEndpointExtensionFingerprint : Fingerprint(
     name = "<clinit>",
     returnType = "V",
@@ -438,7 +456,7 @@ internal fun playButtonRendererFingerprint(playActionType: String) = Fingerprint
     returnType = "V",
     parameters = emptyList(),
     filters = listOf(literal(PLAY_BUTTON_PROTO_FIELD)),
-    // Exclude the FeedbackEndpoint initializer that uses the same protobuf field number.
+    // FeedbackEndpoint uses the same field number for a command. The Play button has a different data type.
     custom = { method, _ ->
         val playButtonMessageType = method.instructions
             .filter { instruction -> instruction.opcode == Opcode.SGET_OBJECT }
@@ -449,6 +467,7 @@ internal fun playButtonRendererFingerprint(playActionType: String) = Fingerprint
     },
 )
 
+/** Reads the Play button from the playlist data containing it. */
 internal fun decodeButtonRendererFingerprint(
     playlistHeaderType: String,
     buttonRendererType: String,
