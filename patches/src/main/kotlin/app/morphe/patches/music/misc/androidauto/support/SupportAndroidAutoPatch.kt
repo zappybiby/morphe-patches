@@ -5,7 +5,7 @@
  * See the included NOTICE file for GPLv3 Section 7 terms that apply to this code.
  */
 
-package app.morphe.patches.music.misc.androidauto.playlists
+package app.morphe.patches.music.misc.androidauto.support
 
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
@@ -40,27 +40,27 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 
 private const val EXTENSION_CLASS =
-    "Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch;"
+    "Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch;"
 private const val EXTENSION_PHONE_BROWSE_REQUESTS_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$PhoneBrowseRequests;"
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$PhoneBrowseRequests;"
 private const val EXTENSION_BROWSE_RESPONSE_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$BrowseResponse;"
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$BrowseResponse;"
 private const val EXTENSION_BROWSE_TAB_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$BrowseTab;"
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$BrowseTab;"
 private const val EXTENSION_SECTION_LIST_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$SectionList;"
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$SectionList;"
 private const val EXTENSION_GRID_RENDERER_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$GridRenderer;"
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$GridRenderer;"
 private const val EXTENSION_OPENED_PLAYLIST_ROWS_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$OpenedPlaylistRows;"
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$OpenedPlaylistRows;"
 private const val EXTENSION_ANDROID_AUTO_PLAYLISTS_REQUEST_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$AndroidAutoPlaylistsRequest;"
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$AndroidAutoPlaylistsRequest;"
 private const val EXTENSION_PLAYBACK_CALLBACK_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$PlaybackCallback;"
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$PlaybackCallback;"
 private const val EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$PlaybackStateSession;"
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$PlaybackStateSession;"
 private const val EXTENSION_SHARED_BROWSE_ROW_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/RestoreAndroidAutoPlaylistsPatch$SharedBrowseRow;"
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$SharedBrowseRow;"
 private const val MUSIC_BROWSER_SERVICE_CLASS =
     "Lcom/google/android/apps/youtube/music/mediabrowser/MusicBrowserService;"
 
@@ -74,9 +74,9 @@ private const val SUBTITLE_FIELD_NAME = "h"
 private const val PLAYLIST_BROWSE_ID_PREFIX = "VL"
 private const val PLAYLIST_HEADER_FIELD_NAME = "q"
 @Suppress("unused")
-val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
-    name = "Restore playlists in Android Auto",
-    description = "Restores YouTube Music playlists in Android Auto.",
+val supportAndroidAutoPatch = bytecodePatch(
+    name = "Restore playlists and podcasts in Android Auto",
+    description = "Restores YouTube Music playlists and podcasts in Android Auto.",
 ) {
     dependsOn(sharedExtensionPatch)
 
@@ -88,6 +88,7 @@ val restoreAndroidAutoPlaylistsPatch = bytecodePatch(
         patchPhoneBrowseResponses()
         patchSharedBrowseRow()
         patchAndroidAutoPlaylists()
+        patchAndroidAutoPodcastItems()
         installPlaybackCallbackBridges()
     }
 }
@@ -1018,6 +1019,25 @@ private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
             return-void
         """,
         ExternalLabel("resume", handleAndroidAutoRequestMethod.getInstruction<Instruction>(0)),
+    )
+}
+
+private fun BytecodePatchContext.patchAndroidAutoPodcastItems() {
+    val androidAutoRequestType =
+        SendEmptyAndroidAutoMediaItemsFingerprint.originalMethod.parameterTypes.first().toString()
+    val deliverAndroidAutoMediaItemsMethod = mutableClassDefBy(androidAutoRequestType).methods.single { method ->
+        method.returnType == "V" &&
+            method.parameterTypes.size == 2 &&
+            method.parameterTypes.first().toString() == "Ljava/util/List;" &&
+            method.parameterTypes.last().toString().startsWith("L")
+    }
+
+    deliverAndroidAutoMediaItemsMethod.addInstructions(
+        0,
+        """
+            invoke-static/range { p0 .. p1 }, $EXTENSION_CLASS->restoreAndroidAutoPodcastItems(${EXTENSION_ANDROID_AUTO_PLAYLISTS_REQUEST_INTERFACE}Ljava/util/List;)Ljava/util/List;
+            move-result-object p1
+        """,
     )
 }
 

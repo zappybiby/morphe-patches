@@ -22,6 +22,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -39,27 +40,12 @@ import app.morphe.extension.shared.ResourceUtils;
 import app.morphe.extension.shared.Utils;
 
 /**
- * Returns the playlists shown in YTM's phone Library when Android Auto opens Playlists.
- *
- * <p>Use the Library's playlist names and artwork to build the Android Auto list. Load a
- * playlist's contents only when selected. Each item carries a deferred media ID: a patch-specific
- * ID containing the playlist's Browse ID (VL...). Use that Browse ID to load the selected
- * playlist, then pass its playback command to YTM.
- *
- * <p>Failure behavior preserves current playback:
- * <ul>
- *   <li>If the selected playlist loads without songs, try to show the empty-playlist message.
- *       This requires an existing playback state with no error already reported by YTM.
- *   <li>Log playlist load errors and timeouts without changing playback. A missing Play-button
- *       command is handled the same way. These failures do not mean the playlist is empty.
- *   <li>Return the playlists collected so far if loading the Library fails or times out.
- *       Return an empty list if none were collected.
- * </ul>
- *
- * <p>The Kotlin patch adds the interfaces and methods below to YTM's obfuscated classes.
+ * Adds phone Library playlists and Home podcast folders to Android Auto.
+ * Load playlist contents only when selected to avoid delaying the Playlists folder.
+ * YTM handles playback and podcast browsing.
  */
 @SuppressWarnings("unused")
-public final class RestoreAndroidAutoPlaylistsPatch {
+public final class SupportAndroidAutoPatch {
     private static final String PHONE_LIBRARY_BROWSE_ID = "FEmusic_library_landing";
     private static final String LIKED_MUSIC_BROWSE_ID = "VLLM";
     private static final String EPISODES_FOR_LATER_BROWSE_ID = "VLSE";
@@ -71,6 +57,10 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final int NO_TRACKS_NOTICE_MILLISECONDS = 8_000;
     private static final int APP_ERROR_CODE = 1;
     private static final String NO_TRACKS_MESSAGE_RESOURCE_NAME = "sideloaded_playlists_no_tracks";
+    private static final String ANDROID_AUTO_ROOT_MEDIA_ID = "com.google.android.projection.gearhead";
+    private static final String PODCASTS_MEDIA_ID = "morphe:aa:podcasts";
+    private static final String PODCASTS_TITLE_RESOURCE_NAME = "offline_podcasts_shelf_title";
+    private static final String SINGLE_ITEM_HINT = "android.media.browse.CONTENT_STYLE_SINGLE_ITEM_HINT";
     private static final Executor BACKGROUND_EXECUTOR = Utils::runOnBackgroundThread;
     // A user playlist can also be named Playlists. The title match only affects opening
     // folders; it does not change playlist playback.
@@ -80,6 +70,9 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     private static final AtomicLong PLAY_REQUEST_GENERATION = new AtomicLong();
     private static final WeakHashMap<Object, WeakReference<PlaybackStateSession>>
             PLAYBACK_SESSIONS = new WeakHashMap<>();
+    private static String androidAutoHomeMediaId;
+    private static List<MediaBrowserCompat.MediaItem> androidAutoPodcastFolders =
+            Collections.emptyList();
 
     // Added to YTM's client for loading Library pages and playlist contents.
     public interface PhoneBrowseRequests {
@@ -154,7 +147,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
     @Nullable
     private static volatile PhoneBrowseRequests phoneBrowseRequests;
 
-    private RestoreAndroidAutoPlaylistsPatch() {
+    private SupportAndroidAutoPatch() {
     }
 
     /**
@@ -211,13 +204,61 @@ public final class RestoreAndroidAutoPlaylistsPatch {
         }
     }
 
+    /**
+     * Injection point. Add a Podcasts tab and reuse YTM's native Home podcast folders.
+     */
+    @Nullable
+    public static synchronized List<MediaBrowserCompat.MediaItem> restoreAndroidAutoPodcastItems(
+            @NonNull AndroidAutoPlaylistsRequest request,
+            @Nullable List<MediaBrowserCompat.MediaItem> items) {
+        try {
+            String parentMediaId = request.patch_getRequestedMediaId();
+            if (ANDROID_AUTO_ROOT_MEDIA_ID.equals(parentMediaId)) {
+                // A new root load may follow an account switch or reconnect.
+                androidAutoHomeMediaId = null;
+                androidAutoPodcastFolders = Collections.emptyList();
+                // The two-item root is Home, Library. YTM's own Podcasts tab adds a third item.
+                if (items == null || items.size() != 2) return items;
+
+                androidAutoHomeMediaId = items.get(0).a();
+                List<MediaBrowserCompat.MediaItem> rootItems = new ArrayList<>(items);
+                MediaDescriptionCompat podcastsDescription = new MediaDescriptionCompat(
+                        PODCASTS_MEDIA_ID,
+                        ResourceUtils.getString(PODCASTS_TITLE_RESOURCE_NAME),
+                        null, null, null, null, null, null);
+                rootItems.add(1, new MediaBrowserCompat.MediaItem(
+                        podcastsDescription, MediaBrowserCompat.MediaItem.FLAG_BROWSABLE));
+                return rootItems;
+            }
+            if (PODCASTS_MEDIA_ID.equals(parentMediaId)) {
+                return new ArrayList<>(androidAutoPodcastFolders);
+            }
+            if (parentMediaId != null && parentMediaId.equals(androidAutoHomeMediaId) &&
+                    items != null) {
+                // TODO: Investigate why Android Auto Speed dial returns only podcasts.
+                List<MediaBrowserCompat.MediaItem> folders = new ArrayList<>();
+                for (MediaBrowserCompat.MediaItem item : items) {
+                    Bundle extras = item.a.f;
+                    // Home's podcast folders share this layout hint. Speed dial can carry it too.
+                    if (item.b() && extras != null && extras.containsKey(SINGLE_ITEM_HINT)) {
+                        folders.add(item);
+                    }
+                }
+                androidAutoPodcastFolders = folders;
+            }
+        } catch (RuntimeException ex) {
+            Logger.printException(() -> "Could not restore Android Auto Podcasts", ex);
+        }
+        return items;
+    }
+
     private static void requestPhoneLibrary(
             AndroidAutoPlaylistsRequest androidAutoRequest, PlaylistFolderLoad load) {
         handleLibraryResponse(
                 androidAutoRequest, load,
                 load.phoneBrowseRequests.patch_requestBrowse(
                         PHONE_LIBRARY_BROWSE_ID, BACKGROUND_EXECUTOR),
-                RestoreAndroidAutoPlaylistsPatch::collectInitialLibraryPlaylists);
+                SupportAndroidAutoPatch::collectInitialLibraryPlaylists);
     }
 
     private static void requestLibraryContinuation(
@@ -227,7 +268,7 @@ public final class RestoreAndroidAutoPlaylistsPatch {
                 androidAutoRequest, load,
                 load.phoneBrowseRequests.patch_requestLibraryContinuation(
                         continuationAction, BACKGROUND_EXECUTOR),
-                RestoreAndroidAutoPlaylistsPatch::collectPaginatedLibraryPlaylists);
+                SupportAndroidAutoPatch::collectPaginatedLibraryPlaylists);
     }
 
     private static void handleLibraryResponse(

@@ -13,6 +13,8 @@ import android.os.Bundle;
 
 // Used only while compiling; YouTube Music provides the real class at runtime.
 public final class MediaDescriptionCompat {
+    public Bundle f;
+
     public MediaDescriptionCompat(
             String mediaId,
             CharSequence title,
