@@ -81,7 +81,32 @@ internal object SendEmptyAndroidAutoMediaItemsFingerprint : Fingerprint(
     strings = listOf("Invalid media id: ")
 )
 
-// Intercept playlist selections before YTM decodes the media ID.
+// Refresh after playlist edits
+
+/** YTM's request for adding or removing playlist songs. */
+internal object EditPlaylistRequestFingerprint : Fingerprint(
+    name = "<init>",
+    returnType = "V",
+    strings = listOf("browse/edit_playlist"),
+)
+
+/** Sends a playlist edit and returns a future reporting completion. */
+internal fun playlistEditFutureFingerprint(requestType: String) = Fingerprint(
+    returnType = "Lcom/google/common/util/concurrent/ListenableFuture;",
+    parameters = listOf(requestType, "Ljava/util/concurrent/Executor;"),
+)
+
+/** Refreshes the requested Android Auto list through its existing connection. */
+internal fun mediaBrowserReloadFingerprint(baseServiceType: String) = Fingerprint(
+    definingClass = baseServiceType,
+    returnType = "V",
+    parameters = listOf("Ljava/lang/String;", "L", "Landroid/os/Bundle;"),
+    strings = listOf("onLoadChildren must call detach() or sendResult() before returning for package="),
+)
+
+// Play a selected playlist: callbacks
+
+/** Receives an Android Auto selection to start playback. */
 internal object AndroidAutoPlayFromMediaIdFingerprint : Fingerprint(
     name = "onPlayFromMediaId",
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),

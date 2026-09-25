@@ -30,6 +30,7 @@ import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.Method
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
+import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
@@ -55,6 +56,8 @@ private const val EXTENSION_OPENED_PLAYLIST_ROWS_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$OpenedPlaylistRows;"
 private const val EXTENSION_ANDROID_AUTO_PLAYLISTS_REQUEST_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$AndroidAutoPlaylistsRequest;"
+private const val EXTENSION_ANDROID_AUTO_PLAYLIST_RELOAD_INTERFACE =
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$AndroidAutoPlaylistReload;"
 private const val EXTENSION_PLAYBACK_CALLBACK_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$PlaybackCallback;"
 private const val EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE =
@@ -91,6 +94,7 @@ val supportAndroidAutoPatch = bytecodePatch(
         patchPhoneBrowseResponses()
         patchSharedBrowseRow()
         patchAndroidAutoPlaylists()
+        patchPlaylistEditRefresh()
         patchAndroidAutoPodcastItems()
         installPlaybackCallbackBridges()
     }
@@ -1045,6 +1049,57 @@ private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
     )
 }
 
+private fun BytecodePatchContext.patchPlaylistEditRefresh() {
+    // Android Auto uses this compatibility connection. The framework notifyChildrenChanged
+    // call does not reach its Playlists subscription.
+    val serviceSuperclass = classDefBy(MUSIC_BROWSER_SERVICE_CLASS).superclass!!
+    val baseServiceType = classDefBy(serviceSuperclass).superclass!!
+    val reloadMethod = mediaBrowserReloadFingerprint(baseServiceType).originalMethod
+    val connectionType = reloadMethod.parameterTypes[1].toString()
+    val baseServiceClass = mutableClassDefBy(baseServiceType)
+    baseServiceClass.interfaces.add(EXTENSION_ANDROID_AUTO_PLAYLIST_RELOAD_INTERFACE)
+    baseServiceClass.addInterfaceMethod(
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_ANDROID_AUTO_PLAYLIST_RELOAD_INTERFACE,
+            "patch_reloadPlaylistFolder",
+        ),
+        registerCount = 4,
+        instructions = """
+            check-cast p2, $connectionType
+            const/4 v0, 0x0
+            invoke-virtual { p0, p1, p2, v0 }, $reloadMethod
+            return-void
+        """,
+    )
+    baseServiceClass.findMutableMethodOf(reloadMethod).addInstructions(
+        0,
+        """
+            invoke-static/range { p0 .. p2 }, $EXTENSION_CLASS->rememberPlaylistsSubscription(${EXTENSION_ANDROID_AUTO_PLAYLIST_RELOAD_INTERFACE}Ljava/lang/String;Ljava/lang/Object;)V
+        """,
+    )
+
+    val editRequestType = EditPlaylistRequestFingerprint.originalMethod.definingClass
+    val sendEditMethod = playlistEditFutureFingerprint(editRequestType).originalMethod
+    val mutableSendEditMethod = mutableClassDefBy(sendEditMethod.definingClass)
+        .findMutableMethodOf(sendEditMethod)
+    // The returned future reports whether the playlist edit succeeded.
+    val returnIndex = mutableSendEditMethod.instructions.withIndex()
+        .singleOrNull { (_, instruction) -> instruction.opcode == Opcode.RETURN_OBJECT }
+        ?.index
+        ?: throw PatchException("Could not find the playlist edit result")
+    val resultRegister = mutableSendEditMethod
+        .getInstruction<OneRegisterInstruction>(returnIndex).registerA
+    mutableSendEditMethod.addInstructions(
+        returnIndex,
+        """
+            invoke-static/range { v$resultRegister .. v$resultRegister }, $EXTENSION_CLASS->watchPlaylistEdit(Lcom/google/common/util/concurrent/ListenableFuture;)V
+        """,
+    )
+}
+
+// Podcasts
+
+// Adds the Podcasts tab using the podcast folders returned by Android Auto Home.
 private fun BytecodePatchContext.patchAndroidAutoPodcastItems() {
     val androidAutoRequestType =
         SendEmptyAndroidAutoMediaItemsFingerprint.originalMethod.parameterTypes.first().toString()
