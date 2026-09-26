@@ -1056,6 +1056,36 @@ private fun BytecodePatchContext.patchPlaylistEditRefresh() {
     val baseServiceType = classDefBy(serviceSuperclass).superclass!!
     val reloadMethod = mediaBrowserReloadFingerprint(baseServiceType).originalMethod
     val connectionType = reloadMethod.parameterTypes[1].toString()
+    // Each reload result retains its connection; use that connection to order folder deliveries.
+    val resultConstructor = reloadMethod.instructions.asSequence()
+        .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
+        .distinct()
+        .single { method -> method.name == "<init>" && connectionType in method.parameterTypes }
+    val resultClass = mutableClassDefBy(resultConstructor.definingClass)
+    val connectionField = resultClass.fields.single { field -> field.type == connectionType }
+    resultClass.accessFlags = resultClass.accessFlags.toPublicAccessFlags()
+    connectionField.accessFlags = connectionField.accessFlags.toPublicAccessFlags()
+    val requestType = SendEmptyAndroidAutoMediaItemsFingerprint.originalMethod.parameterTypes.first().toString()
+    val requestClass = mutableClassDefBy(requestType)
+    val resultField = requestClass.fields.single { field -> field.type == resultClass.superclass }
+    requestClass.addInterfaceMethod(
+        interfaceMethod = extensionInterfaceMethod(
+            EXTENSION_ANDROID_AUTO_PLAYLISTS_REQUEST_INTERFACE,
+            "patch_getBrowserConnection",
+        ),
+        registerCount = 3,
+        instructions = """
+            iget-object v0, p0, $resultField
+            instance-of v1, v0, ${resultClass.type}
+            if-eqz v1, :other_browser
+            check-cast v0, ${resultClass.type}
+            iget-object v0, v0, $connectionField
+            return-object v0
+            :other_browser
+            const/4 v0, 0x0
+            return-object v0
+        """,
+    )
     val baseServiceClass = mutableClassDefBy(baseServiceType)
     baseServiceClass.interfaces.add(EXTENSION_ANDROID_AUTO_PLAYLIST_RELOAD_INTERFACE)
     baseServiceClass.addInterfaceMethod(
