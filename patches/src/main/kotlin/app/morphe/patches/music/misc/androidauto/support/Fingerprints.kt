@@ -25,7 +25,6 @@ import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.Method
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
-import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 
 private const val BROWSE_TABS_PROTO_FIELD = 58_173_949L
 private const val TAB_RENDERER_PROTO_FIELD = 58_174_010L
@@ -339,13 +338,7 @@ internal fun openedPlaylistRowsFingerprint(sharedBrowseRowType: String) = Finger
     accessFlags = listOf(AccessFlags.PRIVATE, AccessFlags.STATIC),
     returnType = "Ljava/util/List;",
     parameters = listOf("L", "Z"),
-    filters = listOf(opcode(Opcode.CHECK_CAST)),
-    custom = { method, _ ->
-        method.instructions.any { instruction ->
-            instruction.opcode == Opcode.CHECK_CAST &&
-                instruction.getReference<TypeReference>()?.type == sharedBrowseRowType
-        }
-    },
+    filters = listOf(checkCast(sharedBrowseRowType)),
 )
 
 // Library pagination responses
