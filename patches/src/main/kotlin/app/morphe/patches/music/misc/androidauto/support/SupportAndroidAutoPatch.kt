@@ -24,6 +24,7 @@ import app.morphe.util.findFreeRegister
 import app.morphe.util.findInstructionIndicesReversedOrThrow
 import app.morphe.util.findMutableMethodOf
 import app.morphe.util.getReference
+import app.morphe.util.indexOfFirstInstructionOrThrow
 import app.morphe.util.p0Register
 import app.morphe.util.toPublicAccessFlags
 import com.android.tools.smali.dexlib2.AccessFlags
@@ -176,12 +177,12 @@ private fun BytecodePatchContext.patchPhoneBrowseRequests() {
     }.flatMap { classDef -> classDef.methods.asSequence() }
     val clickTrackingParamsSetterMethod = browseRequestMethods
         // Some builds also have a public byte[] overload; use the protected request setter.
-        .firstOrNull { method ->
+        .singleOrNull { method ->
             AccessFlags.PROTECTED.isSet(method.accessFlags) &&
                 method.returnType == "V" &&
                 method.parameterTypes.map(CharSequence::toString) == listOf("[B")
         }
-        ?: throw PatchException("Could not resolve the click tracking parameter setter")
+        ?: throw PatchException("Could not uniquely resolve the click tracking parameter setter")
     val setRequestBrowseIdMethod = setRequestBrowseIdFingerprint(
         requestBrowseIdField,
     ).originalMethod
@@ -425,21 +426,31 @@ private fun BytecodePatchContext.addOpenedPlaylistHeaderPlayMediaIdGetter(
     encodeActionMediaIdMethod: Method,
 ) {
     val playActionType = encodeActionMediaIdMethod.parameterTypes.single().toString()
-    val playButtonProtoExtensionInitializer = playButtonRendererFingerprint(
-        playActionType,
-    ).originalMethod
-    val buttonRendererType = playButtonProtoExtensionInitializer.instructions
-        .first { instruction -> instruction.opcode == Opcode.CONST_CLASS }
-        .getReference<TypeReference>()!!
-        .type
-    val playlistHeaderType = playButtonProtoExtensionInitializer.instructions
-        .asSequence()
-        .filter { instruction -> instruction.opcode == Opcode.SGET_OBJECT }
-        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
-        .first { field -> field.definingClass == field.type }
-        .type
-    val playButtonExtensionField = playButtonProtoExtensionInitializer.instructions
-        .first { instruction -> instruction.opcode == Opcode.SPUT_OBJECT }
+    val extensionMatch = playButtonRendererFingerprint(playActionType)
+    val initializer = extensionMatch.originalMethod
+    val extensionIdIndex = extensionMatch.instructionMatches.single().index
+    // This initializer registers two protobuf fields. Only inspect the instructions that register the Play button.
+    val registrationStart = initializer.instructions.take(extensionIdIndex)
+        .indexOfLast { instruction -> instruction.opcode == Opcode.SPUT_OBJECT } + 1
+    val registrationEnd = initializer.indexOfFirstInstructionOrThrow(extensionIdIndex, Opcode.SPUT_OBJECT)
+    val registrationInstructions = initializer.instructions
+        .drop(registrationStart).take(registrationEnd - registrationStart + 1)
+    val buttonRendererType = registrationInstructions
+        .singleOrNull { instruction -> instruction.opcode == Opcode.CONST_CLASS }
+        ?.getReference<TypeReference>()?.type
+        ?: throw PatchException("Could not uniquely resolve the Play button's message type")
+    val createExtensionInstruction = registrationInstructions.singleOrNull { instruction ->
+        instruction.getReference<MethodReference>()?.name == "newSingularGeneratedExtension"
+    } as? RegisterRangeInstruction
+        ?: throw PatchException("Could not resolve the Play button's extension registration call")
+    // newSingularGeneratedExtension takes the data type containing the Play button as its first argument.
+    val containerMessageRegister = createExtensionInstruction.startRegister
+    val playlistHeaderType = registrationInstructions.singleOrNull { instruction ->
+        instruction.opcode == Opcode.SGET_OBJECT &&
+            (instruction as OneRegisterInstruction).registerA == containerMessageRegister
+    }?.getReference<FieldReference>()?.type
+        ?: throw PatchException("Could not uniquely resolve the playlist data containing the Play button")
+    val playButtonExtensionField = initializer.getInstruction<Instruction>(registrationEnd)
         .getReference<FieldReference>()!!
     val decodePlayButtonMethod = decodeButtonRendererFingerprint(
         playlistHeaderType,
@@ -452,7 +463,9 @@ private fun BytecodePatchContext.addOpenedPlaylistHeaderPlayMediaIdGetter(
         playActionType,
     ).matchAll()
         .map { match ->
-            val (playButtonActionReadMatch, _) = match.instructionMatches
+            val playButtonActionReadMatch = match.instructionMatches.single { instructionMatch ->
+                instructionMatch.instruction.opcode == Opcode.IGET_OBJECT
+            }
             playButtonActionReadMatch.instruction.getReference<FieldReference>()!!
         }
         .distinct()
