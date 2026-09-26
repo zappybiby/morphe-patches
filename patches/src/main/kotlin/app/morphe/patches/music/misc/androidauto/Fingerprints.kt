@@ -39,7 +39,7 @@ import com.android.tools.smali.dexlib2.iface.reference.MethodReference
  * Library pagination: [gridPaginationCommandsFingerprint], [LibraryPaginationDecoderFingerprint].
  * Titles and artwork: [formatTextFingerprint], [androidAutoMediaDescriptionFingerprint].
  * Playlist playback: [AndroidAutoPlayFromMediaIdFingerprint], [decodeButtonRendererFingerprint].
- * Playlist edits: [EditPlaylistRequestFingerprint], [playlistEditFutureFingerprint].
+ * Library changes: [libraryChangeRequestFingerprint], [libraryChangeFutureFingerprint].
  */
 
 private const val PHONE_BROWSE_TABS_PROTO_FIELD = 58_173_949L
@@ -129,19 +129,21 @@ internal object SendEmptyAndroidAutoMediaItemsFingerprint : Fingerprint(
     strings = listOf("Invalid media id: "),
 )
 
-// Refresh after playlist edits
+// Refresh after Library changes
 
-/** YTM's request for adding or removing playlist songs. */
-internal object EditPlaylistRequestFingerprint : Fingerprint(
+/** YTM's request for a playlist edit, Like, or removal, identified by its server endpoint. */
+internal fun libraryChangeRequestFingerprint(endpoint: String) = Fingerprint(
     name = "<init>",
     returnType = "V",
-    strings = listOf("browse/edit_playlist"),
+    strings = listOf(endpoint),
 )
 
-/** Sends a playlist edit and returns a future reporting completion. */
-internal fun playlistEditFutureFingerprint(requestType: String) = Fingerprint(
+/** Sends the Library change and returns a future reporting completion. */
+internal fun libraryChangeFutureFingerprint(requestType: String) = Fingerprint(
     returnType = "Lcom/google/common/util/concurrent/ListenableFuture;",
     parameters = listOf(requestType, "Ljava/util/concurrent/Executor;"),
+    // 9.15 also declares the Like methods on an interface; inject into the implementation.
+    custom = { method, _ -> method.implementation != null },
 )
 
 /** Refreshes the requested Android Auto list through its existing connection. */
