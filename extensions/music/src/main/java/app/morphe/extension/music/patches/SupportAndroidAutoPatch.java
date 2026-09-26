@@ -72,7 +72,7 @@ public final class SupportAndroidAutoPatch {
     private static final String ANDROID_AUTO_ROOT_MEDIA_ID = "com.google.android.projection.gearhead";
     private static final String PODCASTS_MEDIA_ID = "morphe:aa:podcasts";
     private static final String PODCASTS_TITLE_RESOURCE_NAME = "offline_podcasts_shelf_title";
-    private static final String SINGLE_ITEM_HINT = "android.media.browse.CONTENT_STYLE_SINGLE_ITEM_HINT";
+    private static final String UPGRADE_PROMPT_MEDIA_ID = "promotion_version_1";
     private static final Executor BACKGROUND_EXECUTOR = Utils::runOnBackgroundThread;
     // A user's playlist can also be named "Playlists"; do not use these title matches for playback.
     private static final Set<String> PLAYLISTS_TITLE_MATCH_MEDIA_IDS =
@@ -603,13 +603,11 @@ public final class SupportAndroidAutoPatch {
     private static void cacheAndroidAutoPodcastFolders(List<MediaBrowserCompat.MediaItem> homeItems) {
         List<MediaBrowserCompat.MediaItem> folders = new ArrayList<>();
         for (MediaBrowserCompat.MediaItem item : homeItems) {
-            Bundle descriptionExtras = item.a.f;
-            boolean browsable = item.b();
-            // Android Auto Home marks podcast folders and Speed dial with this layout hint.
-            // TODO: Investigate why Android Auto Speed dial returns only podcasts.
-            if (browsable && descriptionExtras != null && descriptionExtras.containsKey(SINGLE_ITEM_HINT)) {
-                folders.add(item);
-            }
+            // YTM also marks its upgrade prompt as browsable; it is not podcast content.
+            if (!item.b() || UPGRADE_PROMPT_MEDIA_ID.equals(item.a())) continue;
+            // Layout hints vary between Home results, so do not use them to select folders.
+            // TODO: The server omits songs and playlists from Android Auto Speed dial; obtain them from phone Home.
+            folders.add(item);
         }
         cachedAndroidAutoPodcastFolders = folders;
     }
