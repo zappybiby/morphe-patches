@@ -11,6 +11,7 @@ import android.media.session.MediaSession;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.support.v4.media.MediaBrowserCompat;
 import android.support.v4.media.MediaDescriptionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
@@ -74,6 +75,7 @@ public final class SupportAndroidAutoPatch {
     private static final String PODCASTS_TITLE_RESOURCE_NAME = "offline_podcasts_shelf_title";
     private static final String UPGRADE_PROMPT_MEDIA_ID = "promotion_version_1";
     private static final Executor BACKGROUND_EXECUTOR = Utils::runOnBackgroundThread;
+    private static final Handler REFRESH_HANDLER = new Handler(Looper.getMainLooper());
     // A user's playlist can also be named "Playlists"; do not use these title matches for playback.
     private static final Set<String> PLAYLISTS_TITLE_MATCH_MEDIA_IDS =
             ConcurrentHashMap.newKeySet();
@@ -624,12 +626,13 @@ public final class SupportAndroidAutoPatch {
         AndroidAutoSubscription subscription = podcastsSubscription;
         if (subscription == null) return;
         // Android Auto can cache an empty Podcasts result before Home arrives; send it the loaded folders.
-        Utils.runOnMainThread(() -> {
+        // Always queue the reload so handleAndroidAutoBrowseResult releases its lock first.
+        REFRESH_HANDLER.post(() -> {
             synchronized (SupportAndroidAutoPatch.class) {
                 // A new root or connection makes this saved request obsolete.
                 if (podcastsSubscription != subscription) return;
-                subscription.reload();
             }
+            subscription.reload();
         });
     }
 
