@@ -32,12 +32,19 @@ import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 /**
  * Matches YTM's existing request, playlist, and playback code for the Android Auto patches.
  *
- * Certificate checks: [CheckCertificateFingerprint], [IsGoogleSignedFingerprint].
- * Library and playlist requests: [CreatePhoneBrowseRequestFingerprint], [PhoneBrowseResponseTabsFingerprint].
- * Library pagination: [gridPaginationCommandsFingerprint], [LibraryPaginationDecoderFingerprint].
- * Titles and artwork: [formatTextFingerprint], [androidAutoMediaDescriptionFingerprint].
- * Playlist playback: [AndroidAutoPlayFromMediaIdFingerprint], [decodeButtonRendererFingerprint].
- * Playlist edits: [EditPlaylistRequestFingerprint], [playlistEditFutureFingerprint].
+ * [bypassCertificateChecksPatch] uses [CheckCertificateFingerprint] and [IsGoogleSignedFingerprint].
+ * [supportAndroidAutoPatch] reuses the matched code to:
+ * - Identify Playlists and return Android Auto items: [BuildAndroidAutoMediaItemFingerprint],
+ *   [SendEmptyAndroidAutoMediaItemsFingerprint].
+ * - Fetch the phone Library and selected playlists: [CreatePhoneBrowseRequestFingerprint],
+ *   [PhoneBrowseResponseTabsFingerprint], [gridPaginationCommandsFingerprint], [LibraryPaginationDecoderFingerprint].
+ * - Read titles and artwork: [formatTextFingerprint], [phoneBrowseItemArtworkFingerprint],
+ *   [androidAutoMediaDescriptionFingerprint].
+ * - Read item commands: [PhoneBrowseItemFingerprint], [phoneBrowseItemSingleTapCommandFingerprint].
+ * - Read the playlist's Play button and intercept playback: [decodeButtonRendererFingerprint],
+ *   [AndroidAutoPlayFromMediaIdFingerprint].
+ * - Observe Library changes and refresh Android Auto: [libraryChangeFutureFingerprint],
+ *   [mediaBrowserReloadFingerprint].
  */
 
 private const val PHONE_BROWSE_TABS_PROTO_FIELD = 58_173_949L
@@ -127,19 +134,22 @@ internal object SendEmptyAndroidAutoMediaItemsFingerprint : Fingerprint(
     strings = listOf("Invalid media id: "),
 )
 
-// Refresh after playlist edits
+// Refresh after Library changes
 
-/** YTM's request for adding or removing playlist songs. */
-internal object EditPlaylistRequestFingerprint : Fingerprint(
+/** YTM's requests for playlist edits, song Likes/unlikes, and saving/removing shows. */
+internal fun libraryChangeRequestFingerprint(endpoint: String) = Fingerprint(
     name = "<init>",
     returnType = "V",
-    strings = listOf("browse/edit_playlist"),
+    strings = listOf(endpoint),
 )
 
-/** Sends a playlist edit and returns a future reporting completion. */
-internal fun playlistEditFutureFingerprint(requestType: String) = Fingerprint(
+/** Sends a playlist edit or Like/unlike request and returns a future reporting completion. */
+internal fun libraryChangeFutureFingerprint(requestType: String) = Fingerprint(
     returnType = "Lcom/google/common/util/concurrent/ListenableFuture;",
     parameters = listOf(requestType, "Ljava/util/concurrent/Executor;"),
+    // 9.31 and earlier have two matches for each Like/unlike method. Select the one that sends the request.
+    // From 9.32, that is the only match.
+    custom = { method, _ -> method.implementation != null },
 )
 
 /** Repeats an Android Auto list request using the connection that made it. */

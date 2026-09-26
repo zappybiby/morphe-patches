@@ -85,25 +85,20 @@ private const val PLAY_BUTTON_CONTAINER_FIELD_NAME = "q"
  * Supplies Android Auto with the playlists available in YTM's phone Library
  * and adds a Podcasts tab using the podcast lists returned for Android Auto Home.
  *
- * Playlist folder loading:
- * - Intercept Android Auto requests: Java handleAndroidAutoPlaylists(); Kotlin [patchAndroidAutoPlaylists].
- * - Request and load playlists: Java requestLibraryPage() and collectPlaylistsFromGrid();
- *   Kotlin [installPhoneBrowseClientBridges] and [patchPhoneBrowseResponses].
- * - Pagination: Java requestLibraryPage(), appendPaginatedLibraryPlaylists(), firstPaginationCommand();
- *   Kotlin [addLibraryPaginationRequestMethod] and [addPaginatedLibraryGridDecoder].
- * - Return playlists to Android Auto: Java deliverAndroidAutoPlaylists();
- *   Kotlin [addAndroidAutoBrowseRequestInterface].
- *
- * - Playlist titles and artwork: Java addLibraryPlaylist() and artworkUriOrNull();
- *   Kotlin [patchPhoneBrowseItem], [addTextGetter], and [addArtworkUriGetter].
- * - Play a selected playlist: Java handlePlayFromMediaId() and PlaylistPlaybackRequest;
- *   Kotlin [addPlaylistPlayButtonMediaIdGetter], [installPlaybackCallbackBridges],
- *   and [addCommandMediaIdGetter] for Liked Music.
- * - Check playlist contents: Java findFirstPlayableSong() and showNoPlayableSongsNotice();
- *   Kotlin [addVideoIdCheck] and [addPlaybackSessionAccess].
- * - Podcasts: Java handleAndroidAutoBrowseResult() and refreshPodcastsAfterHomeLoad();
- *   Kotlin [patchAndroidAutoPodcastItems] and [installAndroidAutoFolderRefresh].
- * - Refresh after playlist edits: Java watchPlaylistEdit(); Kotlin [installAndroidAutoFolderRefresh].
+ * Installation order during patching, before the app runs:
+ * 1. [hookPlaylistsTitleMediaIds] identifies Playlists in Android Auto's Library by its translated title.
+ * 2. [installPhoneBrowseClientBridges] lets Java fetch the phone Library and selected playlists
+ *    through YTM's existing request methods, including Library pagination.
+ * 3. [patchPhoneBrowseResponses] lets Java extract Library items, playlist songs, and the playlist's
+ *    Play button from the data those requests return.
+ * 4. [patchPhoneBrowseItem] provides playlist IDs, titles, and artwork, and distinguishes songs
+ *    from the Add a song button.
+ * 5. [patchAndroidAutoPlaylists] lets Java answer requests for Playlists instead of returning YTM's empty list.
+ * 6. [installAndroidAutoFolderRefresh] lets Java refresh the connected Android Auto after playlist edits,
+ *    song Likes/unlikes, and saving/removing shows.
+ * 7. [patchAndroidAutoPodcastItems] adds Podcasts to Android Auto's tabs and fills it with lists from Home.
+ * 8. [installPlaybackCallbackBridges] lets Java load a selected playlist before asking YTM to play it,
+ *    cancel pending playback on Pause/Stop, and show a message when the playlist is empty.
  */
 @Suppress("unused")
 val supportAndroidAutoPatch = bytecodePatch(
@@ -1233,7 +1228,12 @@ private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
 
 // region Android Auto connections and folder refresh
 
-// Adds folder refreshes for Podcasts loading and completed playlist edits.
+/**
+ * Lets completed playlist edits, Likes/unlikes, and show saves/removals update Android Auto without reconnecting.
+ * [hookLibraryChangeCompletion] passes the returned future to Java. The method installed by
+ * [addAndroidAutoFolderReload] lets Java repeat saved Android Auto requests after success.
+ * [addAndroidAutoRequestConnectionGetter] identifies which connection each result belongs to.
+ */
 private fun BytecodePatchContext.installAndroidAutoFolderRefresh() {
     // Android Auto requests list updates through MediaBrowserServiceCompat.
     // MediaBrowserService.notifyChildrenChanged does not reach that connection, so refresh through the compat service.
@@ -1245,7 +1245,9 @@ private fun BytecodePatchContext.installAndroidAutoFolderRefresh() {
 
     addAndroidAutoRequestConnectionGetter(reloadMethod)
     addAndroidAutoFolderReload(baseServiceType, reloadMethod)
-    hookPlaylistEditCompletion()
+    for (endpoint in listOf("browse/edit_playlist", "like/like", "like/removelike")) {
+        hookLibraryChangeCompletion(endpoint)
+    }
 }
 
 /** Gives Java the connection to compare loads for the same Playlists list, leaving other connections independent. */
@@ -1296,7 +1298,12 @@ private fun BytecodePatchContext.addAndroidAutoRequestConnectionGetter(reloadMet
     )
 }
 
-// Saves the requesting connection and lets Java refresh Playlists or Podcasts on that connection.
+/**
+ * Saves the requested Android Auto list and connection in Java's `rememberAndroidAutoSubscription`.
+ * `patch_reloadFolder` repeats the request through YTM. The hook installed by [patchAndroidAutoPlaylists]
+ * fetches the phone Library again for Playlists; Home results pass through the hook installed by
+ * [patchAndroidAutoPodcastItems].
+ */
 private fun BytecodePatchContext.addAndroidAutoFolderReload(
     baseServiceType: String,
     reloadMethod: Method,
@@ -1312,8 +1319,7 @@ private fun BytecodePatchContext.addAndroidAutoFolderReload(
         registerCount = 4,
         instructions = """
             check-cast p2, $connectionType
-            const/4 v0, 0x0
-            invoke-virtual { p0, p1, p2, v0 }, $reloadMethod
+            invoke-virtual { p0, p1, p2, p3 }, $reloadMethod
             return-void
         """,
     )
@@ -1328,23 +1334,22 @@ private fun BytecodePatchContext.addAndroidAutoFolderReload(
     )
 }
 
-// Watches whether a phone playlist edit succeeds before refreshing Android Auto's Playlists folder.
-private fun BytecodePatchContext.hookPlaylistEditCompletion() {
-    val editRequestType = EditPlaylistRequestFingerprint.originalMethod.definingClass
-    val sendEditMethod = playlistEditFutureFingerprint(editRequestType).originalMethod
-    val mutableSendEditMethod = mutableClassDefBy(sendEditMethod.definingClass)
-        .findMutableMethodOf(sendEditMethod)
-    // The returned future reports whether the playlist edit succeeded.
-    val returnIndex = mutableSendEditMethod.instructions.withIndex()
-        .singleOrNull { (_, instruction) -> instruction.opcode == Opcode.RETURN_OBJECT }
-        ?.index
-        ?: throw PatchException("Could not find the playlist edit result")
-    val editFutureRegister = mutableSendEditMethod
+/**
+ * Gives Java's `watchLibraryChange` the future returned by a playlist edit, Like/unlike, or show save/removal.
+ * Java refreshes Android Auto only when that future completes successfully.
+ */
+private fun BytecodePatchContext.hookLibraryChangeCompletion(endpoint: String) {
+    val requestType = libraryChangeRequestFingerprint(endpoint).originalMethod.definingClass
+    val mutableSendChangeMethod = libraryChangeFutureFingerprint(requestType).method
+    val returnIndex = mutableSendChangeMethod.findInstructionIndicesReversed(Opcode.RETURN_OBJECT)
+        .singleOrNull()
+        ?: throw PatchException("Could not find the completion result for $endpoint")
+    val changeFutureRegister = mutableSendChangeMethod
         .getInstruction<OneRegisterInstruction>(returnIndex).registerA
-    mutableSendEditMethod.addInstructions(
+    mutableSendChangeMethod.addInstructions(
         returnIndex,
         """
-            invoke-static/range { v$editFutureRegister .. v$editFutureRegister }, $EXTENSION_CLASS->watchPlaylistEdit(Lcom/google/common/util/concurrent/ListenableFuture;)V
+            invoke-static/range { v$changeFutureRegister .. v$changeFutureRegister }, $EXTENSION_CLASS->watchLibraryChange(Lcom/google/common/util/concurrent/ListenableFuture;)V
         """,
     )
 }
