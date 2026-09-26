@@ -60,8 +60,8 @@ private const val EXTENSION_PLAYLIST_CONTENTS_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$PlaylistContents;"
 private const val EXTENSION_ANDROID_AUTO_BROWSE_REQUEST_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$AndroidAutoBrowseRequest;"
-private const val EXTENSION_ANDROID_AUTO_PLAYLISTS_RELOAD_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$AndroidAutoPlaylistsReload;"
+private const val EXTENSION_ANDROID_AUTO_FOLDER_RELOAD_INTERFACE =
+    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$AndroidAutoFolderReload;"
 private const val EXTENSION_PLAYBACK_CALLBACK_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$PlaybackCallback;"
 private const val EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE =
@@ -104,8 +104,9 @@ private const val PLAY_BUTTON_CONTAINER_FIELD_NAME = "q"
  *   and [addCommandMediaIdGetter] for Liked Music.
  * - Check playlist contents: Java findFirstPlayableSong() and showNoPlayableSongsNotice();
  *   Kotlin [addVideoIdCheck] and [addPlaybackSessionAccess].
- * - Podcasts: Java handleAndroidAutoBrowseResult(); Kotlin [patchAndroidAutoPodcastItems].
- * - Refresh after playlist edits: Java watchPlaylistEdit(); Kotlin [installPlaylistsFolderRefresh].
+ * - Podcasts: Java handleAndroidAutoBrowseResult() and refreshPodcastsAfterHomeLoad();
+ *   Kotlin [patchAndroidAutoPodcastItems] and [installAndroidAutoFolderRefresh].
+ * - Refresh after playlist edits: Java watchPlaylistEdit(); Kotlin [installAndroidAutoFolderRefresh].
  */
 @Suppress("unused")
 val supportAndroidAutoPatch = bytecodePatch(
@@ -122,7 +123,7 @@ val supportAndroidAutoPatch = bytecodePatch(
         patchPhoneBrowseResponses()
         patchPhoneBrowseItem()
         patchAndroidAutoPlaylists()
-        installPlaylistsFolderRefresh()
+        installAndroidAutoFolderRefresh()
         patchAndroidAutoPodcastItems()
         installPlaybackCallbackBridges()
     }
@@ -1164,8 +1165,8 @@ private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
 
 // region Android Auto connections and folder refresh
 
-// Refreshes Android Auto's Playlists folder after a successful playlist edit on the phone.
-private fun BytecodePatchContext.installPlaylistsFolderRefresh() {
+// Adds folder refreshes for Podcasts loading and completed playlist edits.
+private fun BytecodePatchContext.installAndroidAutoFolderRefresh() {
     // Android Auto requests list updates through MediaBrowserServiceCompat.
     // MediaBrowserService.notifyChildrenChanged does not reach that connection, so refresh through the compat service.
     val serviceSuperclass = classDefBy(MUSIC_BROWSER_SERVICE_CLASS).superclass
@@ -1175,7 +1176,7 @@ private fun BytecodePatchContext.installPlaylistsFolderRefresh() {
     val reloadMethod = mediaBrowserReloadFingerprint(baseServiceType).originalMethod
 
     addAndroidAutoRequestConnectionGetter(reloadMethod)
-    addPlaylistsFolderReload(baseServiceType, reloadMethod)
+    addAndroidAutoFolderReload(baseServiceType, reloadMethod)
     hookPlaylistEditCompletion()
 }
 
@@ -1227,18 +1228,18 @@ private fun BytecodePatchContext.addAndroidAutoRequestConnectionGetter(reloadMet
     )
 }
 
-// Saves the Android Auto connection and Playlists folder ID so playlist edits can refresh that folder.
-private fun BytecodePatchContext.addPlaylistsFolderReload(
+// Saves the requesting connection and lets Java refresh Playlists or Podcasts on that connection.
+private fun BytecodePatchContext.addAndroidAutoFolderReload(
     baseServiceType: String,
     reloadMethod: Method,
 ) {
     val connectionType = reloadMethod.parameterTypes[1].toString()
     val baseServiceClass = mutableClassDefBy(baseServiceType)
-    baseServiceClass.interfaces.add(EXTENSION_ANDROID_AUTO_PLAYLISTS_RELOAD_INTERFACE)
+    baseServiceClass.interfaces.add(EXTENSION_ANDROID_AUTO_FOLDER_RELOAD_INTERFACE)
     baseServiceClass.addInterfaceMethod(
         interfaceMethod = extensionInterfaceMethod(
-            EXTENSION_ANDROID_AUTO_PLAYLISTS_RELOAD_INTERFACE,
-            "patch_reloadPlaylistsFolder",
+            EXTENSION_ANDROID_AUTO_FOLDER_RELOAD_INTERFACE,
+            "patch_reloadFolder",
         ),
         registerCount = 4,
         instructions = """
@@ -1248,8 +1249,8 @@ private fun BytecodePatchContext.addPlaylistsFolderReload(
             return-void
         """,
     )
-    val rememberSubscriptionMethod = "$EXTENSION_CLASS->rememberPlaylistsSubscription(" +
-        EXTENSION_ANDROID_AUTO_PLAYLISTS_RELOAD_INTERFACE +
+    val rememberSubscriptionMethod = "$EXTENSION_CLASS->rememberAndroidAutoSubscription(" +
+        EXTENSION_ANDROID_AUTO_FOLDER_RELOAD_INTERFACE +
         "Ljava/lang/String;Ljava/lang/Object;)V"
     baseServiceClass.findMutableMethodOf(reloadMethod).addInstructions(
         0,
