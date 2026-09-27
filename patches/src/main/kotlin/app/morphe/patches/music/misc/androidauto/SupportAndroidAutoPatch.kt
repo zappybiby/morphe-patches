@@ -736,7 +736,7 @@ private fun BytecodePatchContext.addPlaylistContentsInterface() {
 /**
  * YTM uses one item type for Library content, playlist songs, and the Add a song button.
  * [addPlaylistBrowseIdGetter] identifies playlists among Library items; [addVideoIdCheck] identifies
- * songs among playlist contents. [addTextGetter] and [addArtworkUriGetter] provide their titles and images.
+ * songs among playlist contents. [addTextGetter] and [addArtworkUriGetter] provide titles and artwork URIs.
  * Playback through [addCommandMediaIdGetter] uses i, or k when i is null;
  * the song ID check must inspect that same command.
  */
@@ -1120,7 +1120,10 @@ private fun BytecodePatchContext.patchAndroidAutoPlaylists() {
     )
 }
 
-/** Lets Java identify what Android Auto requested and return a list through YTM's existing response method. */
+/**
+ * Lets Java identify what Android Auto requested and return a list through YTM's existing response method.
+ * That delivery also passes through the Podcasts hook installed by [patchAndroidAutoPodcastItems].
+ */
 private fun BytecodePatchContext.addAndroidAutoBrowseRequestInterface(
     sendEmptyAndroidAutoMediaItemsMethod: Method,
 ) {
@@ -1221,8 +1224,9 @@ private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
 
 /**
  * Lets completed playlist edits, Likes/unlikes, and show saves/removals update Android Auto without reconnecting.
- * [hookLibraryChangeCompletion] passes the returned future to Java; [addAndroidAutoFolderReload] repeats the saved
- * Android Auto requests. [addAndroidAutoRequestConnectionGetter] keeps results from separate connections apart.
+ * [hookLibraryChangeCompletion] passes the returned future to Java. The method installed by
+ * [addAndroidAutoFolderReload] lets Java repeat saved Android Auto requests after success.
+ * [addAndroidAutoRequestConnectionGetter] identifies which connection each result belongs to.
  */
 private fun BytecodePatchContext.installAndroidAutoFolderRefresh() {
     // Android Auto requests list updates through MediaBrowserServiceCompat.
@@ -1290,8 +1294,9 @@ private fun BytecodePatchContext.addAndroidAutoRequestConnectionGetter(reloadMet
 
 /**
  * Saves the requested Android Auto list and connection in Java's `rememberAndroidAutoSubscription`.
- * `patch_reloadFolder` repeats that request after a Library change, so [patchAndroidAutoPlaylists]
- * fetches Playlists again and [patchAndroidAutoPodcastItems] receives updated Home content.
+ * `patch_reloadFolder` repeats the request through YTM. The hook installed by [patchAndroidAutoPlaylists]
+ * fetches the phone Library again for Playlists; Home results pass through the hook installed by
+ * [patchAndroidAutoPodcastItems].
  */
 private fun BytecodePatchContext.addAndroidAutoFolderReload(
     baseServiceType: String,
@@ -1583,7 +1588,8 @@ private fun hookPlaylistPlayback(playFromMediaIdMethod: MutableMethod) {
 }
 
 /**
- * Hooks Pause/Stop to cancel pending playback and empty-playlist messages through Java's `cancelPendingPlaylistPlayback`.
+ * Hooks Pause/Stop so Java's `cancelPendingPlaylistPlayback` prevents a pending selection
+ * from starting playback or showing its empty-playlist message.
  */
 private fun hookPlaylistPlaybackCancellation(callbackClass: MutableClass) {
     // onPause/onStop are Android callback names and are not obfuscated.

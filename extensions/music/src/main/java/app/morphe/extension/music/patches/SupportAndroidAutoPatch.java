@@ -58,8 +58,8 @@ import app.morphe.extension.shared.Utils;
  * fetches its songs and Play button, then asks YTM to start playback or shows the empty-playlist message.
  *
  * <p>{@link #handleAndroidAutoBrowseResult} adds Podcasts alongside Home and Library, then fills it with
- * the podcast lists YTM returns for Android Auto Home. If Podcasts opens before Home finishes loading,
- * {@link #refreshPodcastsAfterHomeLoad} updates it when those lists arrive.
+ * the podcast lists YTM returns for Android Auto Home. Each Home result calls
+ * {@link #refreshPodcastsAfterHomeLoad} to update Podcasts if it has been opened.
  *
  * <p>{@link #watchLibraryChange} registers a listener for playlist edits, song Likes/unlikes, and show saves/removals.
  * After success, {@link #refreshAndroidAutoLibrary} repeats the Playlists and Home requests saved by
@@ -130,8 +130,9 @@ public final class SupportAndroidAutoPatch {
 
     /**
      * Data returned by a request for the phone Library or a playlist's contents.
-     * YTM nests the returned items under TabRenderer data, then sections, then Library items or playlist songs.
-     * These groups describe the phone page, not Android Auto's Home/Library/Podcasts tabs.
+     * The first Library response and playlist contents use TabRenderer data, then sections containing the items.
+     * Later Library pages use {@link #patch_getPaginatedLibraryGrid} instead.
+     * TabRenderer describes the phone page, not Android Auto's Home/Library/Podcasts tabs.
      */
     public interface PhoneBrowseResponse {
         // Wrappers for the TabRenderer data containing the first Library result or playlist contents.
@@ -312,10 +313,11 @@ public final class SupportAndroidAutoPatch {
     // Playlist loading and pagination
 
     /**
-     * Loads the Library one page at a time. Background listeners use {@link #collectPlaylistsFromGrid}
-     * to keep the playlists from each response. Follow pagination until YTM returns no command for more items,
-     * then {@link #deliverAndroidAutoPlaylists} sends the list.
-     * A failure or timeout sends the playlists already collected and stops further collection.
+     * Loads the Library one page at a time. Background listeners read the first response with
+     * {@link #appendInitialLibraryPlaylists} and later responses with {@link #appendPaginatedLibraryPlaylists}.
+     * Both collect playlists through {@link #collectPlaylistsFromGrid} and return a pagination command if available.
+     * A command requests the next page; otherwise {@link #deliverAndroidAutoPlaylists} returns the collected list.
+     * Failure and timeout also return the playlists collected so far.
      */
     private static void requestLibraryPage(
             AndroidAutoBrowseRequest androidAutoRequest, PlaylistsFolderLoad load,
@@ -390,7 +392,10 @@ public final class SupportAndroidAutoPatch {
         return firstPaginationCommand(gridRenderer);
     }
 
-    /** Skips an unreadable Library item without discarding the remaining playlists. */
+    /**
+     * {@link #addLibraryPlaylist} keeps playlist IDs, titles, and artwork from each Library item.
+     * Skip an unreadable item without discarding the remaining playlists.
+     */
     private static void collectPlaylistsFromGrid(
             GridRenderer gridRenderer, PlaylistsFolderLoad load) {
         for (Object libraryItem : gridRenderer.patch_getItems()) {
@@ -670,8 +675,8 @@ public final class SupportAndroidAutoPatch {
      * Injection point. Add the Podcasts tab.
      * {@link #initializeAndroidAutoTabs} inserts Podcasts into YTM's Home/Library tab list.
      * {@link #cacheAndroidAutoPodcastFolders} keeps the podcast lists returned for Home;
-     * these become the contents of Podcasts. {@link #refreshPodcastsAfterHomeLoad} updates
-     * an open Podcasts tab if it was requested before Home finished loading.
+     * these become the contents of Podcasts. {@link #refreshPodcastsAfterHomeLoad} refreshes
+     * a previously opened Podcasts tab whenever new Home results arrive.
      */
     @Nullable
     public static synchronized List<MediaBrowserCompat.MediaItem> handleAndroidAutoBrowseResult(
@@ -776,7 +781,7 @@ public final class SupportAndroidAutoPatch {
     }
 
     /**
-     * Injection point. Cancel pending playlist playback and messages when Pause/Stop is pressed.
+     * Injection point. Prevent a pending playlist selection from starting playback or showing its message after Pause/Stop.
      */
     public static void cancelPendingPlaylistPlayback() {
         // YTM cannot cancel a playback command it has not received yet.
@@ -845,8 +850,9 @@ public final class SupportAndroidAutoPatch {
         }
 
         /**
-         * Checks for songs before requesting playback; an empty playlist can still have a Play button.
-         * Liked Music has no Play button and uses the first song's command instead.
+         * {@link SupportAndroidAutoPatch#findFirstPlayableSong} checks for songs; an empty playlist can still have a Play button.
+         * Liked Music has no Play button, so it uses the first song's command.
+         * Pass playback or the empty-playlist message to {@link #postToPlaybackThread}.
          */
         private void readResponse(
                 ListenableFuture<PhoneBrowseResponse> future, Handler callbackHandler,
@@ -881,6 +887,7 @@ public final class SupportAndroidAutoPatch {
             }
         }
 
+        /** Runs on YTM's playback thread only if the selection and original {@link PhoneBrowseClient} are unchanged. */
         private void postToPlaybackThread(Handler callbackHandler, Runnable task) {
             callbackHandler.post(() -> {
                 if (requestGeneration != PLAY_REQUEST_GENERATION.get()) return;

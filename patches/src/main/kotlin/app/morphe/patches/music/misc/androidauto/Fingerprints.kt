@@ -276,7 +276,7 @@ internal fun setRequestBrowseIdFingerprint(requestBrowseIdField: FieldReference)
 )
 
 // Read the contents returned by Library and playlist requests
-// YTM nests phone Library items and playlist songs inside TabRenderer and section data.
+// The first Library response and playlist contents use TabRenderer and section data; pagination has a separate parser.
 
 /** Returns YTM's wrappers for TabRenderer data containing Library items or playlist songs. */
 internal object PhoneBrowseResponseTabsFingerprint : Fingerprint(
