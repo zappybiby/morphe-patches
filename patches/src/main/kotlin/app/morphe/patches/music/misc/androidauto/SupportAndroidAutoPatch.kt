@@ -357,7 +357,7 @@ private fun BytecodePatchContext.capturePhoneBrowseClientOnServiceCreate(phoneBr
  * YTM nests the lists inside TabRenderer and section data. [addPhoneBrowsePageInterfaces] installs
  * PhoneBrowseTab and SectionList on the YTM objects that read this data, so Java can reach the lists.
  * [addGridRendererInterface] provides Library items; [addPlaylistContentsInterface] provides playlist songs.
- * Pagination may return Library items directly or inside a section; [addPhoneBrowseResponseInterface] handles both.
+ * Pagination may return Library items directly or in its first section; [addPhoneBrowseResponseInterface] handles both.
  */
 private fun BytecodePatchContext.patchPhoneBrowseResponses() {
     addPhoneBrowseResponseInterface()
@@ -368,7 +368,10 @@ private fun BytecodePatchContext.patchPhoneBrowseResponses() {
 
 // Library pagination responses
 
-/** Reuses YTM's Library pagination parser without creating the phone's Library list UI. */
+/**
+ * Reuses YTM's Library pagination parser without creating the phone's Library list UI.
+ * It reads items directly or from the first section. An unrecognized result returns null.
+ */
 private fun BytecodePatchContext.addPaginatedLibraryGridDecoder(
     decodePaginatedLibraryGridMethod: Method,
 ): Method {
@@ -1037,8 +1040,8 @@ private fun MutableClass.addTextGetter(
 }
 
 /**
- * Extracts the thumbnail details stored with a Library item and uses YTM's Android Auto code
- * to turn them into an image URI. Android Auto loads the artwork from that URI.
+ * Uses the thumbnail URL already included with a Library item. YTM's Android Auto code
+ * selects a thumbnail and creates its URI; Android Auto loads the image from that URI.
  * [decodeThumbnailFingerprint] identifies YTM's artwork parser;
  * [androidAutoMediaDescriptionFingerprint] locates an Android Auto item builder that uses the URI conversion.
  */

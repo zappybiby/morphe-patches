@@ -173,6 +173,7 @@ public final class SupportAndroidAutoPatch {
         /**
          * Sends the list through YTM. {@link SupportAndroidAutoPatch#handleAndroidAutoBrowseResult}
          * can add the Podcasts tab or supply its contents before Android Auto receives the list.
+         * YTM may remove items to keep the returned list within its byte limit.
          */
         void patch_deliverAndroidAutoItems(
                 @NonNull List<MediaBrowserCompat.MediaItem> androidAutoItems);
@@ -379,6 +380,7 @@ public final class SupportAndroidAutoPatch {
     private static Object appendPaginatedLibraryPlaylists(
             PhoneBrowseResponse libraryResponse, PlaylistsFolderLoad load) {
         GridRenderer gridRenderer = libraryResponse.patch_getPaginatedLibraryGrid();
+        // An unrecognized pagination result ends loading; keep the playlists collected so far.
         if (gridRenderer == null) return null;
         collectPlaylistsFromGrid(gridRenderer, load);
         synchronized (load) {
