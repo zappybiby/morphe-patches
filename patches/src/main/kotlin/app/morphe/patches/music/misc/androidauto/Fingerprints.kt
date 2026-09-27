@@ -195,19 +195,6 @@ internal object AndroidAutoPlayFromMediaIdFingerprint : Fingerprint(
     },
 )
 
-/** Updates YTM's playback status and sends it to Android Auto. */
-internal object MediaSessionCompatPlaybackStateSetterFingerprint : Fingerprint(
-    returnType = "V",
-    parameters = listOf("Landroid/support/v4/media/session/PlaybackStateCompat;"),
-    filters = listOf(
-        methodCall(
-            definingClass = "Landroid/media/session/MediaSession;",
-            name = "setPlaybackState",
-            parameters = listOf("Landroid/media/session/PlaybackState;"),
-        ),
-    ),
-)
-
 // Request Library and playlist pages through YTM
 
 /** MusicBrowserService initialization, where the patch obtains YTM's object for Library and playlist requests. */

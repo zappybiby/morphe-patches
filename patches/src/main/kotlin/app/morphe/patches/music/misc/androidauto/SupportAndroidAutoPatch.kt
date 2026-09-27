@@ -65,8 +65,6 @@ private const val EXTENSION_ANDROID_AUTO_FOLDER_RELOAD_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$AndroidAutoFolderReload;"
 private const val EXTENSION_PLAYBACK_CALLBACK_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$PlaybackCallback;"
-private const val EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$PlaybackStateSession;"
 private const val EXTENSION_PHONE_BROWSE_ITEM_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/SupportAndroidAutoPatch$PhoneBrowseItem;"
 private const val MUSIC_BROWSER_SERVICE_CLASS =
@@ -98,7 +96,7 @@ private const val PLAY_BUTTON_CONTAINER_FIELD_NAME = "q"
  * 6. [installAndroidAutoFolderRefresh] lets Java refresh Android Auto after Library changes.
  * 7. [patchAndroidAutoPodcastItems] adds Podcasts to Android Auto's tabs and fills it with lists from Home.
  * 8. [installPlaybackCallbackBridges] lets Java load a selected playlist before asking YTM to play it,
- *    cancel pending playback on Pause/Stop, and show a message when the playlist is empty.
+ *    and cancel pending playback on Pause/Stop.
  */
 @Suppress("unused")
 val supportAndroidAutoPatch = bytecodePatch(
@@ -1425,13 +1423,12 @@ private fun BytecodePatchContext.patchAndroidAutoPodcastItems() {
 
 // endregion
 
-// region Playback callbacks and empty playlists
+// region Playback callbacks
 
 /**
  * [hookPlaylistPlayback] lets Java turn a selected playlist into YTM's playback media ID.
  * [hookPlaylistPlaybackCancellation] prevents a pending playlist selection from starting after Pause/Stop.
- * [addPlaybackCallbackAccess] keeps playback on YTM's own thread; [addPlaybackSessionAccess]
- * lets an empty-playlist message reach Android Auto through YTM's playback state.
+ * [addPlaybackCallbackAccess] keeps playback on YTM's own thread.
  */
 private fun BytecodePatchContext.installPlaybackCallbackBridges() {
     val playFromMediaIdMethod = AndroidAutoPlayFromMediaIdFingerprint.method
@@ -1442,125 +1439,12 @@ private fun BytecodePatchContext.installPlaybackCallbackBridges() {
         .distinct()
         .single { field -> field.definingClass == callbackClass.type }
 
-    addPlaybackSessionAccess(delegateField.type)
     addPlaybackCallbackAccess(callbackClass, delegateField)
     hookPlaylistPlayback(playFromMediaIdMethod)
     hookPlaylistPlaybackCancellation(callbackClass)
 }
 
-/** Android Auto displays messages from playback state; expose YTM's stored state and its method for updating it. */
-private fun BytecodePatchContext.addPlaybackSessionAccess(callbackDelegateType: String) {
-    // YTM's method for updating playback status, position, and any error message.
-    val playbackStateSetter = MediaSessionCompatPlaybackStateSetterFingerprint.originalMethod
-    val sessionClass = mutableClassDefBy(playbackStateSetter.definingClass)
-    val playbackStateField = playbackStateSetter.instructions.asSequence()
-        .filter { instruction -> instruction.opcode == Opcode.IPUT_OBJECT }
-        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
-        .singleOrNull { field ->
-            field.type == "Landroid/support/v4/media/session/PlaybackStateCompat;"
-        } ?: throw PatchException("Could not find the field storing PlaybackStateCompat")
-    val stateStoredOnSession = playbackStateField.definingClass == sessionClass.type
-    sessionClass.interfaces.add(EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE)
-    // Decompiled setters, using the class/field names from 9.31 and 9.32:
-    // < 9.32: jk.n(state) writes this.f = state; the callback references the session (jk).
-    // >= 9.32: fd.k(state) writes ((ey) this.c).e = state; the callback references that ey object.
-    // Map the object storing the state back to its session so the callback can update Android Auto's message.
-    if (stateStoredOnSession) {
-        addDirectPlaybackSessionAccess(sessionClass, playbackStateField)
-    } else {
-        addIndirectPlaybackSessionAccess(
-            sessionClass,
-            playbackStateSetter,
-            playbackStateField,
-            callbackDelegateType,
-        )
-    }
-
-    // Call YTM's update method so Android Auto also receives the new playback status and error message.
-    sessionClass.addInterfaceMethod(
-        extensionInterfaceMethod(EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE, "patch_setPlaybackState"),
-        registerCount = 2,
-        instructions = """
-            invoke-virtual { p0, p1 }, $playbackStateSetter
-            return-void
-        """,
-    )
-}
-
-/** The callback already references this session, so Java's `resolvePlaybackSession` can return it directly. */
-private fun BytecodePatchContext.addDirectPlaybackSessionAccess(
-    sessionClass: MutableClass,
-    playbackStateField: FieldReference,
-) {
-    sessionClass.addInterfaceMethod(
-        extensionInterfaceMethod(EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE, "patch_getPlaybackStateHolder"),
-        registerCount = 2,
-        instructions = "return-object p0",
-    )
-    sessionClass.addInterfaceMethod(
-        extensionInterfaceMethod(EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE, "patch_getPlaybackState"),
-        registerCount = 2,
-        instructions = """
-            iget-object v0, p0, $playbackStateField
-            return-object v0
-        """,
-    )
-}
-
-/**
- * The callback references the object storing PlaybackStateCompat, but messages must be published through its session.
- * Java's `registerPlaybackSession` records which session contains that object when YTM sets up the callback.
- */
-private fun BytecodePatchContext.addIndirectPlaybackSessionAccess(
-    sessionClass: MutableClass,
-    playbackStateSetter: Method,
-    playbackStateField: FieldReference,
-    callbackDelegateType: String,
-) {
-    // YTM casts the Object field before storing state, e.g. ((ey) this.c).e = state.
-    // Apply the same cast when reading PlaybackStateCompat.
-    val playbackStateHolderField = playbackStateSetter.instructions.asSequence()
-        .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
-        .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
-        .distinct()
-        .singleOrNull { field ->
-            field.definingClass == sessionClass.type && field.type == "Ljava/lang/Object;"
-        } ?: throw PatchException("Could not find the object storing PlaybackStateCompat")
-    sessionClass.addInterfaceMethod(
-        extensionInterfaceMethod(EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE, "patch_getPlaybackStateHolder"),
-        registerCount = 2,
-        instructions = """
-            iget-object v0, p0, $playbackStateHolderField
-            return-object v0
-        """,
-    )
-    sessionClass.addInterfaceMethod(
-        extensionInterfaceMethod(EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE, "patch_getPlaybackState"),
-        registerCount = 2,
-        instructions = """
-            iget-object v0, p0, $playbackStateHolderField
-            check-cast v0, ${playbackStateField.definingClass}
-            iget-object v0, v0, $playbackStateField
-            return-object v0
-        """,
-    )
-
-    val setCallbackMethod = sessionClass.methods.singleOrNull { method ->
-        method.returnType == "V" &&
-            method.parameterTypes.map { it.toString() } == listOf(
-                callbackDelegateType, "Landroid/os/Handler;",
-            )
-    } ?: throw PatchException("Could not find compat media session callback setup")
-    setCallbackMethod.addInstructions(
-        0,
-        "invoke-static/range { p0 .. p0 }, $EXTENSION_CLASS->registerPlaybackSession($EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE)V",
-    )
-}
-
-/**
- * Playback and messages must run on YTM's playback thread, using this callback's Handler.
- * Java's `resolvePlaybackSession` uses the object held by its weak reference to find the session that publishes messages.
- */
+/** Exposes the callback's Handler so playlist playback runs on YTM's playback thread. */
 private fun BytecodePatchContext.addPlaybackCallbackAccess(
     callbackClass: MutableClass,
     delegateField: FieldReference,
@@ -1569,10 +1453,6 @@ private fun BytecodePatchContext.addPlaybackCallbackAccess(
     val handlerField = delegateClass.fields.singleOrNull { field ->
         classDefByOrNull(field.type)?.superclass == "Landroid/os/Handler;"
     } ?: throw PatchException("Could not find media session callback Handler")
-    // This weak reference holds the same object returned by patch_getPlaybackStateHolder.
-    val callbackStateHolderReferenceField = delegateClass.fields.singleOrNull { field ->
-        field.type == "Ljava/lang/ref/WeakReference;"
-    } ?: throw PatchException("Could not find the callback's reference to the playback state holder")
     callbackClass.interfaces.add(EXTENSION_PLAYBACK_CALLBACK_INTERFACE)
     callbackClass.addInterfaceMethod(
         interfaceMethod = extensionInterfaceMethod(
@@ -1586,27 +1466,6 @@ private fun BytecodePatchContext.addPlaybackCallbackAccess(
             iget-object v0, v0, $handlerField
             return-object v0
             :no_handler
-            const/4 v0, 0x0
-            return-object v0
-        """,
-    )
-    callbackClass.addInterfaceMethod(
-        interfaceMethod = extensionInterfaceMethod(
-            EXTENSION_PLAYBACK_CALLBACK_INTERFACE,
-            "patch_getPlaybackStateSession",
-        ),
-        registerCount = 2,
-        instructions = """
-            iget-object v0, p0, $delegateField
-            if-eqz v0, :no_session
-            iget-object v0, v0, $callbackStateHolderReferenceField
-            if-eqz v0, :no_session
-            invoke-virtual { v0 }, Ljava/lang/ref/WeakReference;->get()Ljava/lang/Object;
-            move-result-object v0
-            invoke-static { v0 }, $EXTENSION_CLASS->resolvePlaybackSession(Ljava/lang/Object;)$EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE
-            move-result-object v0
-            return-object v0
-            :no_session
             const/4 v0, 0x0
             return-object v0
         """,
@@ -1637,7 +1496,7 @@ private fun hookPlaylistPlayback(playFromMediaIdMethod: MutableMethod) {
 
 /**
  * Hooks Pause/Stop so Java's `cancelPendingPlaylistPlayback` prevents a pending selection
- * from starting playback or showing its empty-playlist message.
+ * from starting playback.
  */
 private fun hookPlaylistPlaybackCancellation(callbackClass: MutableClass) {
     // onPause/onStop are Android callback names and are not obfuscated.

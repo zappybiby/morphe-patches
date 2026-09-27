@@ -14,7 +14,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.support.v4.media.MediaBrowserCompat;
 import android.support.v4.media.MediaDescriptionCompat;
-import android.support.v4.media.session.PlaybackStateCompat;
 
 import androidx.annotation.GuardedBy;
 import androidx.annotation.NonNull;
@@ -55,7 +54,7 @@ import app.morphe.extension.shared.Utils;
  * {@link #deliverAndroidAutoPlaylists} returns them when loading finishes, fails, or times out.
  *
  * <p>Selecting a playlist calls {@link #handlePlayFromMediaId}. {@link PlaylistPlaybackRequest}
- * fetches its songs and Play button, then asks YTM to start playback or shows the empty-playlist message.
+ * fetches its songs and Play button, then asks YTM to start playback if it contains songs.
  *
  * <p>{@link #handleAndroidAutoBrowseResult} adds Podcasts alongside Home and Library, then fills it with
  * the podcast lists YTM returns for Android Auto Home. Each Home result calls
@@ -79,9 +78,6 @@ public final class SupportAndroidAutoPatch {
     private static final int ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS = 30_000;
     private static final int SELECTED_PLAYLIST_LOAD_TIMEOUT_MILLISECONDS = 30_000;
     private static final int LIBRARY_REFRESH_DELAY_MILLISECONDS = 5_000;
-    private static final int NO_TRACKS_NOTICE_MILLISECONDS = 8_000;
-    private static final int EMPTY_PLAYLIST_ERROR_CODE = 1;
-    private static final String NO_TRACKS_MESSAGE_RESOURCE_NAME = "sideloaded_playlists_no_tracks";
     private static final String ANDROID_AUTO_ROOT_MEDIA_ID = "com.google.android.projection.gearhead";
     private static final String PODCASTS_MEDIA_ID = "morphe:aa:podcasts";
     private static final String PODCASTS_TITLE_RESOURCE_NAME = "offline_podcasts_shelf_title";
@@ -101,9 +97,6 @@ public final class SupportAndroidAutoPatch {
     @GuardedBy("itself")
     private static final WeakHashMap<Object, Map<String, PlaylistsFolderDelivery>>
             playlistsFolderDeliveries = new WeakHashMap<>();
-    @GuardedBy("itself")
-    private static final WeakHashMap<Object, WeakReference<PlaybackStateSession>>
-            playbackSessions = new WeakHashMap<>();
     // Android Auto's saved request to receive updates for the Playlists folder.
     @Nullable
     @GuardedBy("SupportAndroidAutoPatch.class")
@@ -186,24 +179,9 @@ public final class SupportAndroidAutoPatch {
                 @NonNull String parentMediaId, @NonNull Object connection, @Nullable Bundle options);
     }
 
-    /** Methods installed on YTM's {@link MediaSession.Callback} to use its playback thread and media session. */
+    /** Methods installed on YTM's {@link MediaSession.Callback} to use its playback thread. */
     public interface PlaybackCallback {
         @Nullable Handler patch_getCallbackHandler();
-        /** Follows the callback's weak reference; {@link SupportAndroidAutoPatch#resolvePlaybackSession} obtains its session. */
-        @Nullable PlaybackStateSession patch_getPlaybackStateSession();
-    }
-
-    /** YTM's media session, which publishes playback status and error messages to Android Auto. */
-    public interface PlaybackStateSession {
-        /**
-         * Returns the session or the object storing its PlaybackStateCompat, whichever the callback references.
-         * For a separate object, {@link SupportAndroidAutoPatch#registerPlaybackSession}
-         * records which session it belongs to so the callback can retrieve that session.
-         */
-        @NonNull Object patch_getPlaybackStateHolder();
-        @Nullable PlaybackStateCompat patch_getPlaybackState();
-        // Publish the changed state through YTM so Android Auto receives the message.
-        void patch_setPlaybackState(@NonNull PlaybackStateCompat state);
     }
 
     /** YTM's item type for Library content, playlist songs, and the "Add a song" button. */
@@ -777,8 +755,7 @@ public final class SupportAndroidAutoPatch {
     /**
      * Injection point. Convert this patch's playlist media ID into YTM's command to start playback.
      *
-     * <p>Show YTM's message for an empty playlist when no playable songs are found.
-     * Request errors, timeouts, and missing Play commands are logged; playback is left unchanged.
+     * <p>Empty playlists, request errors, timeouts, and missing Play commands are logged; playback is left unchanged.
      *
      * @return true for this patch's media IDs, including failed or pending requests;
      *         false for YTM's own IDs. YTM cannot decode this patch's IDs.
@@ -803,7 +780,7 @@ public final class SupportAndroidAutoPatch {
     }
 
     /**
-     * Injection point. Prevent a pending playlist selection from starting playback or showing its message after Pause/Stop.
+     * Injection point. Prevent a pending playlist selection from starting playback after Pause/Stop.
      */
     public static void cancelPendingPlaylistPlayback() {
         // YTM cannot cancel a playback command it has not received yet.
@@ -814,17 +791,17 @@ public final class SupportAndroidAutoPatch {
      * Loads one selected playlist and asks YTM to play it if it contains songs.
      * {@link #start} calls YTM's request method on the caller's thread; the completed response
      * runs through {@link #readResponse} on {@link SupportAndroidAutoPatch#BACKGROUND_EXECUTOR}.
-     * {@link #postToPlaybackThread} runs playback and the empty-playlist message on YTM's playback thread.
+     * {@link #postToPlaybackThread} runs playback on YTM's playback thread.
      * The timeout runs on the main thread and discards responses that arrive too late.
      */
     private static final class PlaylistPlaybackRequest {
         private final MediaSession.Callback callback;
-        // Same object as callback; the added interface exposes its playback thread and session.
+        // Same object as callback; the added interface exposes its playback thread.
         private final PlaybackCallback callbackAccess;
         private final String playlistBrowseId;
-        // Reject this selection's playback and message after another selection or Pause/Stop.
+        // Reject this selection after another selection or Pause/Stop.
         private final long requestGeneration;
-        // Discard this selection's playback and message if YTM replaces the original request client.
+        // Discard this selection if YTM replaces the original request client.
         private final PhoneBrowseClient browseClientAtStart;
 
         private PlaylistPlaybackRequest(
@@ -873,7 +850,7 @@ public final class SupportAndroidAutoPatch {
         /**
          * {@link SupportAndroidAutoPatch#findFirstPlayableSong} checks for songs; an empty playlist can still have a Play button.
          * Liked Music has no Play button, so it uses the first song's command.
-         * Pass playback or the empty-playlist message to {@link #postToPlaybackThread}.
+         * Pass playback to {@link #postToPlaybackThread}.
          */
         private void readResponse(
                 ListenableFuture<PhoneBrowseResponse> future, Handler callbackHandler,
@@ -884,8 +861,6 @@ public final class SupportAndroidAutoPatch {
                 if (firstPlayableSong == null) {
                     Logger.printDebug(() ->
                             "Selected Android Auto playlist has no playable songs");
-                    postToPlaybackThread(callbackHandler, () ->
-                            showNoPlayableSongsNotice(callbackAccess, callbackHandler));
                     return;
                 }
                 String ytmPlaybackMediaId = LIKED_MUSIC_BROWSE_ID.equals(playlistBrowseId)
@@ -942,89 +917,4 @@ public final class SupportAndroidAutoPatch {
         }
         return null;
     }
-
-    // Message for an empty playlist
-
-    /**
-     * Injection point. Associate the object storing PlaybackStateCompat with its media session.
-     * {@link #resolvePlaybackSession} uses this when the callback does not reference the session directly.
-     */
-    public static void registerPlaybackSession(@NonNull PlaybackStateSession session) {
-        synchronized (playbackSessions) {
-            playbackSessions.put(
-                    session.patch_getPlaybackStateHolder(), new WeakReference<>(session));
-        }
-    }
-
-    /**
-     * Injection point. Return the referenced session, or look up the session when the callback
-     * references the separate object storing its playback state.
-     */
-    @Nullable
-    public static PlaybackStateSession resolvePlaybackSession(@Nullable Object stateHolder) {
-        if (stateHolder instanceof PlaybackStateSession) return (PlaybackStateSession) stateHolder;
-        if (stateHolder == null) return null;
-        synchronized (playbackSessions) {
-            WeakReference<PlaybackStateSession> session = playbackSessions.get(stateHolder);
-            return session == null ? null : session.get();
-        }
-    }
-
-    /**
-     * Displays the empty-playlist message through YTM's playback state on its playback thread.
-     * {@link #copyPlaybackStateWithNotice} preserves playback while adding the message;
-     * remove the message after the delay only if YTM has not supplied a newer state.
-     */
-    private static void showNoPlayableSongsNotice(
-            PlaybackCallback callback, Handler callbackHandler) {
-        try {
-            PlaybackStateSession session = callback.patch_getPlaybackStateSession();
-            if (session == null) return;
-            PlaybackStateCompat currentPlaybackState = session.patch_getPlaybackState();
-            if (currentPlaybackState == null) {
-                // TODO: Show the message for an empty playlist before YTM has provided any playback state.
-                Logger.printDebug(() -> "No playback state for no-tracks notice");
-                return;
-            }
-            int currentErrorCode = currentPlaybackState.f;
-            // Zero means no error; preserve any error YTM is already reporting.
-            if (currentErrorCode != 0) return;
-            CharSequence message = ResourceUtils.getString(NO_TRACKS_MESSAGE_RESOURCE_NAME);
-            PlaybackStateCompat stateWithNotice =
-                    copyPlaybackStateWithNotice(currentPlaybackState, message);
-            session.patch_setPlaybackState(stateWithNotice);
-            callbackHandler.postDelayed(() -> {
-                try {
-                    // Remove this message without overwriting a newer playback state or error from YTM.
-                    if (session.patch_getPlaybackState() == stateWithNotice)
-                        session.patch_setPlaybackState(currentPlaybackState);
-                } catch (RuntimeException ex) {
-                    Logger.printException(() -> "Could not clear no-tracks notice", ex);
-                }
-            }, NO_TRACKS_NOTICE_MILLISECONDS);
-        } catch (RuntimeException ex) {
-            Logger.printException(() -> "Could not show no-tracks notice", ex);
-        }
-    }
-
-    /**
-     * Android Auto displays the empty playlist message through PlaybackStateCompat's error fields.
-     * Keep the playing/paused status and all other fields unchanged.
-     */
-    private static PlaybackStateCompat copyPlaybackStateWithNotice(
-            PlaybackStateCompat currentPlaybackState, CharSequence message) {
-        return new PlaybackStateCompat(
-                currentPlaybackState.a, // Playback status
-                currentPlaybackState.b, // Position
-                currentPlaybackState.c, // Buffered position
-                currentPlaybackState.d, // Playback speed
-                currentPlaybackState.e, // Available playback actions
-                EMPTY_PLAYLIST_ERROR_CODE, // Temporary error code
-                message, // Temporary error message
-                currentPlaybackState.h, // Position update time
-                currentPlaybackState.i, // Custom actions
-                currentPlaybackState.j, // Active queue item ID
-                currentPlaybackState.k); // Extras
-    }
-
 }
