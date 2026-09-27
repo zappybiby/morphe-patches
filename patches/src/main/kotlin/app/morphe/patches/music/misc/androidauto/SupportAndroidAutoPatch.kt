@@ -537,6 +537,7 @@ private fun BytecodePatchContext.addPlaylistPlayButtonMediaIdGetter(
 ) {
     val commandType = encodeCommandMediaIdMethod.parameterTypes.single().toString()
     val playButton = findPlaylistPlayButton(commandType)
+    // Exclude the cached tab list to select the original response containing the Play button.
     val phoneBrowseResponseProtoField = getTabsMethod.instructions
         .asSequence()
         .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
@@ -1068,6 +1069,8 @@ private fun BytecodePatchContext.addArtworkUriGetter(
         .filter { instruction -> instruction.opcode == Opcode.IGET_OBJECT }
         .mapNotNull { instruction -> instruction.getReference<FieldReference>()?.type }
         .toSet()
+    // Phone Library thumbnails and Android Auto artwork use the same thumbnail data type.
+    // Match the URI converter that accepts it.
     val createArtworkUriMethod = androidAutoMediaDescriptionMethod.instructions
         .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
         .filter { method ->
@@ -1360,6 +1363,7 @@ private fun BytecodePatchContext.hookLibraryChangeCompletion(endpoint: String) {
 private fun BytecodePatchContext.patchAndroidAutoPodcastItems() {
     val androidAutoRequestType =
         SendEmptyAndroidAutoMediaItemsFingerprint.originalMethod.parameterTypes.first().toString()
+    // The overload taking only a List forwards here; hook this method to cover both paths.
     val deliverAndroidAutoMediaItemsMethod = mutableClassDefBy(androidAutoRequestType).methods.single { method ->
         method.returnType == "V" &&
             method.parameterTypes.size == 2 &&
@@ -1392,6 +1396,7 @@ private fun BytecodePatchContext.patchAndroidAutoPodcastItems() {
 private fun BytecodePatchContext.installPlaybackCallbackBridges() {
     val playFromMediaIdMethod = AndroidAutoPlayFromMediaIdFingerprint.method
     val callbackClass = mutableClassDefBy(playFromMediaIdMethod.definingClass)
+    // YTM forwards onPlayFromMediaId to the object stored in this field.
     val delegateField = playFromMediaIdMethod.instructions.asSequence()
         .mapNotNull { instruction -> instruction.getReference<FieldReference>() }
         .distinct()
