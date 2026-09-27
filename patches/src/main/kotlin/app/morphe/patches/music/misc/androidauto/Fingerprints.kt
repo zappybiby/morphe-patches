@@ -79,10 +79,9 @@ internal object GoogleCertificatesRemoteFingerprint : Fingerprint(
 )
 
 /**
- * [GoogleSignatureVerifier.c(String)][defpackage.tcn.c] — the boolean entry-point
- * that [AllowlistManager.g][defpackage.kxo.g] calls to decide whether the caller
- * is Google-signed.  Scoped to [GoogleCertificatesRemoteFingerprint] so the
- * patcher never picks up an unrelated `(String)→boolean` method.
+ * `GoogleSignatureVerifier.c(String)` (`defpackage.tcn.c`) checks whether the caller is Google-signed.
+ * Called by `AllowlistManager.g` (`defpackage.kxo.g`); restricted to [GoogleCertificatesRemoteFingerprint]
+ * to exclude unrelated `(String) -> boolean` methods.
  */
 internal object IsGoogleSignedFingerprint : Fingerprint(
     classFingerprint = GoogleCertificatesRemoteFingerprint,
