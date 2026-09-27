@@ -61,8 +61,10 @@ import app.morphe.extension.shared.Utils;
  * the podcast lists YTM returns for Android Auto Home. Each Home result calls
  * {@link #refreshPodcastsAfterHomeLoad} to update Podcasts if it has been opened.
  *
- * <p>{@link #watchLibraryChange} registers a listener for playlist edits, song Likes/unlikes, and show saves/removals.
- * After success, {@link #refreshAndroidAutoLibrary} repeats the Playlists and Home requests saved by
+ * <p>Library changes include creating, deleting, and editing playlists, liking/unliking songs,
+ * and saving/removing playlists or shows. Successful changes reach {@link #scheduleLibraryRefresh}
+ * through {@link #watchLibraryChange} or YTM's success callbacks.
+ * {@link #refreshAndroidAutoLibrary} repeats the Playlists and Home requests saved by
  * {@link #rememberAndroidAutoSubscription}. Updated Home lists also refresh Podcasts.
  */
 @SuppressWarnings("unused")
@@ -283,7 +285,7 @@ public final class SupportAndroidAutoPatch {
                     // Without the connection, there is no way to identify other requests for this same folder.
                     folderDelivery = new PlaylistsFolderDelivery();
                 } else {
-                    // Reopening Playlists or editing a playlist on the phone can start another load
+                    // Reopening Playlists or refreshing after Library changes can start another load
                     // before this one finishes.
                     folderDelivery = playlistsFolderDeliveries
                             .computeIfAbsent(connection, ignored -> new HashMap<>())
@@ -594,8 +596,7 @@ public final class SupportAndroidAutoPatch {
     }
 
     /**
-     * Injection point. Schedule an Android Auto refresh when a playlist edit,
-     * song Like/unlike, or saving/removing a show completes successfully.
+     * Injection point. Schedule an Android Auto refresh after a successful Library change.
      * {@link #scheduleLibraryRefresh} combines changes made close together into one refresh.
      */
     public static void watchLibraryChange(@Nullable ListenableFuture<?> changeResult) {
@@ -622,8 +623,10 @@ public final class SupportAndroidAutoPatch {
         }
     }
 
-    private static synchronized void scheduleLibraryRefresh() {
-        // Wait for updated playlist artwork and combine edits made close together into one refresh.
+    /** Injection point. Combine completed Library changes into one delayed refresh. */
+    public static synchronized void scheduleLibraryRefresh() {
+        if (playlistsSubscription == null && homeSubscription == null) return;
+        // Wait for updated playlist artwork before refreshing.
         refreshHandler.removeCallbacks(REFRESH_LIBRARY);
         refreshHandler.postDelayed(REFRESH_LIBRARY, LIBRARY_REFRESH_DELAY_MILLISECONDS);
     }
@@ -743,7 +746,7 @@ public final class SupportAndroidAutoPatch {
     private static void refreshPodcastsAfterHomeLoad() {
         AndroidAutoSubscription subscription = podcastsSubscription;
         if (subscription == null) return;
-        // New Home results contain updated podcast folder IDs, including after saving or removing a show.
+        // New Home results can change the podcast folder IDs.
         // Always queue the reload so handleAndroidAutoBrowseResult releases its lock first.
         refreshHandler.post(() -> {
             synchronized (SupportAndroidAutoPatch.class) {

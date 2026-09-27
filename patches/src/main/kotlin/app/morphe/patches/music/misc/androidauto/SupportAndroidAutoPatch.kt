@@ -21,6 +21,7 @@ import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.util.cloneMutable
+import app.morphe.util.cloneParameters
 import app.morphe.util.findFreeRegister
 import app.morphe.util.findInstructionIndicesReversed
 import app.morphe.util.findInstructionIndicesReversedOrThrow
@@ -94,8 +95,7 @@ private const val PLAY_BUTTON_CONTAINER_FIELD_NAME = "q"
  * 4. [patchPhoneBrowseItem] provides playlist IDs, titles, and artwork, and distinguishes songs
  *    from the Add a song button.
  * 5. [patchAndroidAutoPlaylists] lets Java answer requests for Playlists instead of returning YTM's empty list.
- * 6. [installAndroidAutoFolderRefresh] lets Java refresh the connected Android Auto after playlist edits,
- *    song Likes/unlikes, and saving/removing shows.
+ * 6. [installAndroidAutoFolderRefresh] lets Java refresh Android Auto after Library changes.
  * 7. [patchAndroidAutoPodcastItems] adds Podcasts to Android Auto's tabs and fills it with lists from Home.
  * 8. [installPlaybackCallbackBridges] lets Java load a selected playlist before asking YTM to play it,
  *    cancel pending playback on Pause/Stop, and show a message when the playlist is empty.
@@ -1229,9 +1229,10 @@ private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
 // region Android Auto connections and folder refresh
 
 /**
- * Lets completed playlist edits, Likes/unlikes, and show saves/removals update Android Auto without reconnecting.
- * [hookLibraryChangeCompletion] passes the returned future to Java. The method installed by
- * [addAndroidAutoFolderReload] lets Java repeat saved Android Auto requests after success.
+ * Refreshes Android Auto after Library changes.
+ * [hookLibraryChangeCompletion] schedules the refresh only after a request succeeds.
+ * Creation and deletion report success through callbacks, hooked by [hookPlaylistCreationAndDeletion].
+ * [addAndroidAutoFolderReload] requests updated Playlists and Home lists without reconnecting Android Auto.
  * [addAndroidAutoRequestConnectionGetter] identifies which connection each result belongs to.
  */
 private fun BytecodePatchContext.installAndroidAutoFolderRefresh() {
@@ -1248,6 +1249,7 @@ private fun BytecodePatchContext.installAndroidAutoFolderRefresh() {
     for (endpoint in listOf("browse/edit_playlist", "like/like", "like/removelike")) {
         hookLibraryChangeCompletion(endpoint)
     }
+    hookPlaylistCreationAndDeletion()
 }
 
 /** Gives Java the connection to compare loads for the same Playlists list, leaving other connections independent. */
@@ -1334,10 +1336,7 @@ private fun BytecodePatchContext.addAndroidAutoFolderReload(
     )
 }
 
-/**
- * Gives Java's `watchLibraryChange` the future returned by a playlist edit, Like/unlike, or show save/removal.
- * Java refreshes Android Auto only when that future completes successfully.
- */
+/** Uses Java's `watchLibraryChange` to refresh Android Auto when YTM's request succeeds. */
 private fun BytecodePatchContext.hookLibraryChangeCompletion(endpoint: String) {
     val requestType = libraryChangeRequestFingerprint(endpoint).originalMethod.definingClass
     val mutableSendChangeMethod = libraryChangeFutureFingerprint(requestType).method
@@ -1352,6 +1351,43 @@ private fun BytecodePatchContext.hookLibraryChangeCompletion(endpoint: String) {
             invoke-static/range { v$changeFutureRegister .. v$changeFutureRegister }, $EXTENSION_CLASS->watchLibraryChange(Lcom/google/common/util/concurrent/ListenableFuture;)V
         """,
     )
+}
+
+/** Refreshes Android Auto after playlist creation or deletion. */
+private fun BytecodePatchContext.hookPlaylistCreationAndDeletion() {
+    val createRequestType = libraryChangeRequestFingerprint("playlist/create").originalMethod.definingClass
+    val deleteRequestType = libraryChangeRequestFingerprint("playlist/delete").originalMethod.definingClass
+    val requestBaseType = classDefBy(createRequestType).superclass
+        ?: throw PatchException("Could not resolve the playlist request base class")
+    if (classDefBy(deleteRequestType).superclass != requestBaseType) {
+        throw PatchException("Playlist creation and deletion use different request base classes")
+    }
+
+    // The request factory can select different success callbacks (e.g. apht.y selects apia or apic).
+    // Hook every matching success method so either path refreshes Android Auto.
+    playlistChangeSuccessFingerprint(requestBaseType).matchAll().forEach { match ->
+        // Some callbacks have only the two parameter registers, p0 and p1.
+        // Copy their values before using a register for the request-type checks.
+        val successMethod = match.method.cloneParameters()
+        val requestField = classDefBy(successMethod.definingClass).instanceFields.single { field ->
+            field.type == requestBaseType
+        }
+        val requestRegister = successMethod.findFreeRegister(0)
+        successMethod.addInstructionsWithLabels(
+            0,
+            """
+                iget-object v$requestRegister, p0, $requestField
+                instance-of v$requestRegister, v$requestRegister, $createRequestType
+                if-nez v$requestRegister, :refresh_library
+                iget-object v$requestRegister, p0, $requestField
+                instance-of v$requestRegister, v$requestRegister, $deleteRequestType
+                if-eqz v$requestRegister, :resume
+                :refresh_library
+                invoke-static {}, $EXTENSION_CLASS->scheduleLibraryRefresh()V
+            """,
+            ExternalLabel("resume", successMethod.getInstruction<Instruction>(0)),
+        )
+    }
 }
 
 // endregion
@@ -1425,8 +1461,10 @@ private fun BytecodePatchContext.addPlaybackSessionAccess(callbackDelegateType: 
         } ?: throw PatchException("Could not find the field storing PlaybackStateCompat")
     val stateStoredOnSession = playbackStateField.definingClass == sessionClass.type
     sessionClass.interfaces.add(EXTENSION_PLAYBACK_STATE_SESSION_INTERFACE)
-    // 9.15-9.31: the callback references the session, which stores PlaybackStateCompat itself.
-    // 9.32+: it references a separate object storing the state; the patch maps that object back to its session.
+    // Decompiled setters, using the class/field names from 9.31 and 9.32:
+    // < 9.32: jk.n(state) writes this.f = state; the callback references the session (jk).
+    // >= 9.32: fd.k(state) writes ((ey) this.c).e = state; the callback references that ey object.
+    // Map the object storing the state back to its session so the callback can update Android Auto's message.
     if (stateStoredOnSession) {
         addDirectPlaybackSessionAccess(sessionClass, playbackStateField)
     } else {
