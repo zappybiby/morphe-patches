@@ -85,26 +85,23 @@ private const val PLAYLIST_BROWSE_ID_PREFIX = "VL"
 private const val PLAY_BUTTON_CONTAINER_FIELD_NAME = "q"
 
 /**
- * Routes Android Auto's Playlists requests through YTM's phone Library requests
- * and fills an added Podcasts tab with folders from Android Auto Home.
+ * Supplies Android Auto with the playlists available in YTM's phone Library
+ * and adds a Podcasts tab using the podcast lists returned for Android Auto Home.
  *
  * Installation order during patching, before the app runs:
- * 1. [hookPlaylistsTitleMediaIds] hooks folder creation to identify Playlists by its translated title.
- * 2. [installPhoneBrowseClientBridges] adds Library and playlist requests, including pagination through
- *    [addLibraryPaginationRequestMethod]. [capturePhoneBrowseClientOnServiceCreate] hooks service initialization
- *    to supply the client to Java.
- * 3. [patchPhoneBrowseResponses] makes the returned data readable through [addPhoneBrowseResponseInterface]
- *    and [addPhoneBrowsePageInterfaces]. [addPlaylistPlayButtonMediaIdGetter] adds access to the Play command.
- * 4. [patchPhoneBrowseItem] exposes Library and playlist items: [addPlaylistBrowseIdGetter] checks playlist IDs,
- *    [addVideoIdCheck] distinguishes songs, and [addTextGetter]/[addArtworkUriGetter] provide titles and artwork.
- * 5. [patchAndroidAutoPlaylists] intercepts Playlists requests through [hookAndroidAutoPlaylistsRequest].
- *    [addAndroidAutoBrowseRequestInterface] lets Java read the requested folder ID and return playlists.
- * 6. [installAndroidAutoFolderRefresh] tracks connections through [addAndroidAutoFolderReload] and observes
- *    Library changes through [hookLibraryChangeCompletion]. Java waits for success before scheduling a refresh.
- * 7. [patchAndroidAutoPodcastItems] hooks delivered Android Auto lists so Java can add Podcasts and reuse
- *    Home's podcast folders when Home results arrive.
- * 8. [installPlaybackCallbackBridges] hooks playlist selections and Pause/Stop through [hookPlaylistPlayback] and
- *    [hookPlaylistPlaybackCancellation]. [addPlaybackSessionAccess] lets Java show a message for an empty playlist.
+ * 1. [hookPlaylistsTitleMediaIds] identifies Playlists in Android Auto's Library by its translated title.
+ * 2. [installPhoneBrowseClientBridges] lets Java fetch the phone Library and selected playlists
+ *    through YTM's existing request methods, including Library pagination.
+ * 3. [patchPhoneBrowseResponses] lets Java extract Library items, playlist songs, and the playlist's
+ *    Play button from the data those requests return.
+ * 4. [patchPhoneBrowseItem] provides playlist IDs, titles, and artwork, and distinguishes songs
+ *    from the Add a song button.
+ * 5. [patchAndroidAutoPlaylists] lets Java answer requests for Playlists instead of returning YTM's empty list.
+ * 6. [installAndroidAutoFolderRefresh] lets Java refresh the connected Android Auto after playlist edits,
+ *    song Likes/unlikes, and saving/removing shows.
+ * 7. [patchAndroidAutoPodcastItems] adds Podcasts to Android Auto's tabs and fills it with lists from Home.
+ * 8. [installPlaybackCallbackBridges] lets Java load a selected playlist before asking YTM to play it,
+ *    cancel pending playback on Pause/Stop, and show a message when the playlist is empty.
  */
 @Suppress("unused")
 val supportAndroidAutoPatch = bytecodePatch(
@@ -129,7 +126,10 @@ val supportAndroidAutoPatch = bytecodePatch(
 
 // region Identify the Playlists folder in Android Auto's Library
 
-/** Passes Android Auto item IDs and titles to Java's `rememberPlaylistsTitleMatch` to identify Playlists. */
+/**
+ * Playlists has no fixed Android Auto media ID. Pass item IDs and titles to Java's
+ * `rememberPlaylistsTitleMatch`, which recognizes it by its translated title.
+ */
 private fun BytecodePatchContext.hookPlaylistsTitleMediaIds() {
     val buildAndroidAutoMediaItemMethod = BuildAndroidAutoMediaItemFingerprint.method
 
@@ -160,9 +160,9 @@ private fun BytecodePatchContext.hookPlaylistsTitleMediaIds() {
 // region Request the Library and selected playlists
 
 /**
- * Adds methods for Library, playlist, and pagination requests through
- * [addPhoneBrowseRequestMethod] and [addLibraryPaginationRequestMethod].
- * [capturePhoneBrowseClientOnServiceCreate] supplies that client to Java when MusicBrowserService starts.
+ * Reuses the YTM object that sends requests for the phone's Library and playlist contents.
+ * [addPhoneBrowseRequestMethod] requests either by page ID; [addLibraryPaginationRequestMethod]
+ * requests more Library items. [capturePhoneBrowseClientOnServiceCreate] saves the object for Java to call.
  */
 private fun BytecodePatchContext.installPhoneBrowseClientBridges() {
     val createRequestFromBrowseEndpointMethod = CreatePhoneBrowseRequestFingerprint.originalMethod
@@ -203,7 +203,10 @@ private fun BytecodePatchContext.installPhoneBrowseClientBridges() {
     capturePhoneBrowseClientOnServiceCreate(phoneBrowseClientType)
 }
 
-/** Adds a method to request the Library or a playlist using the page ID that YTM calls a Browse ID. */
+/**
+ * Lets Java fetch the phone Library or a selected playlist by its Browse ID (YTM's page ID).
+ * YTM creates and sends the request; the returned future contains the Library items or playlist contents.
+ */
 private fun BytecodePatchContext.addPhoneBrowseRequestMethod(
     phoneBrowseClientClass: MutableClass,
     createPhoneBrowseRequestMethod: MethodReference,
@@ -250,7 +253,7 @@ private fun BytecodePatchContext.addPhoneBrowseRequestMethod(
 
 // Library pagination requests
 
-/** Adds a method to request more Library items using the previous page's pagination command. */
+/** Requests the next Library page using the pagination command from the previous response. */
 private fun BytecodePatchContext.addLibraryPaginationRequestMethod(
     phoneBrowseClientClass: MutableClass,
     phoneBrowseRequestType: String,
@@ -291,7 +294,10 @@ private fun BytecodePatchContext.addLibraryPaginationRequestMethod(
 
 // Obtain YTM's object for sending Library and playlist requests
 
-/** Hooks MusicBrowserService initialization to pass its request client to Java's `setPhoneBrowseClient`. */
+/**
+ * Saves the object YTM creates for Library and playlist requests when MusicBrowserService starts.
+ * Java's `setPhoneBrowseClient` keeps it for requests made while Android Auto is connected.
+ */
 private fun BytecodePatchContext.capturePhoneBrowseClientOnServiceCreate(phoneBrowseClientType: String) {
     val phoneBrowseClientProviderCandidates =
         phoneBrowseClientProviderFingerprint(phoneBrowseClientType)
@@ -347,10 +353,11 @@ private fun BytecodePatchContext.capturePhoneBrowseClientOnServiceCreate(phoneBr
 // region Read Library and playlist responses
 
 /**
- * Adds readers for Library and playlist responses. Initial pages use tabs and sections through
- * [addPhoneBrowsePageInterfaces]; Library pagination returns a grid through [addPhoneBrowseResponseInterface].
- * [addGridRendererInterface] exposes Library items and pagination commands;
- * [addPlaylistContentsInterface] exposes songs and the Add a song button.
+ * Lets Java extract the lists returned by YTM's phone Library and playlist requests.
+ * YTM nests the lists inside TabRenderer and section data. [addPhoneBrowsePageInterfaces] installs
+ * PhoneBrowseTab and SectionList on the YTM objects that read this data, so Java can reach the lists.
+ * [addGridRendererInterface] provides Library items; [addPlaylistContentsInterface] provides playlist songs.
+ * Pagination may return Library items directly or inside a section; [addPhoneBrowseResponseInterface] handles both.
  */
 private fun BytecodePatchContext.patchPhoneBrowseResponses() {
     addPhoneBrowseResponseInterface()
@@ -361,7 +368,7 @@ private fun BytecodePatchContext.patchPhoneBrowseResponses() {
 
 // Library pagination responses
 
-/** Copies YTM's method for reading Library items from pagination responses. */
+/** Reuses YTM's Library pagination parser without creating the phone's Library list UI. */
 private fun BytecodePatchContext.addPaginatedLibraryGridDecoder(
     decodePaginatedLibraryGridMethod: Method,
 ): Method {
@@ -385,9 +392,9 @@ private fun BytecodePatchContext.addPaginatedLibraryGridDecoder(
 // Read returned Library and playlist data
 
 /**
- * Adds response getters for tab data, Library pagination, and the playlist's Play button.
- * [addPaginatedLibraryGridDecoder] supplies the pagination decoder;
- * [addPlaylistPlayButtonMediaIdGetter] exposes the command used to play the selected playlist.
+ * Gives Java access to the lists and playlist Play button in YTM's returned phone data.
+ * The pagination getter uses YTM's parser copied by [addPaginatedLibraryGridDecoder].
+ * [addPlaylistPlayButtonMediaIdGetter] adds access to a media ID that starts the selected playlist.
  */
 private fun BytecodePatchContext.addPhoneBrowseResponseInterface() {
     val getTabsMethod = PhoneBrowseResponseTabsFingerprint.originalMethod
@@ -441,7 +448,7 @@ private fun BytecodePatchContext.addPhoneBrowseResponseInterface() {
 
 // Play a selected playlist: the Play button above the song list
 
-/** YTM types and methods used to read the playlist's Play button and what it does when pressed. */
+/** YTM types and methods used to read a playlist's Play button. */
 private data class PlaylistPlayButton(
     val containingMessageType: String,
     val decodeMethod: Method,
@@ -449,8 +456,9 @@ private data class PlaylistPlayButton(
 )
 
 /**
- * Resolves YTM's decoder and command field for the Play button above the songs.
- * [addPlaylistPlayButtonMediaIdGetter] uses these matches to add the runtime getter.
+ * Locates YTM's method that extracts the Play button from returned playlist data,
+ * then identifies the field containing what YTM runs when Play is pressed.
+ * [addPlaylistPlayButtonMediaIdGetter] uses it to reproduce a press of the phone's Play button.
  */
 private fun BytecodePatchContext.findPlaylistPlayButton(commandType: String): PlaylistPlayButton {
     val playButtonRegistrationMatch = playButtonRendererFingerprint(commandType)
@@ -502,7 +510,6 @@ private fun BytecodePatchContext.findPlaylistPlayButton(commandType: String): Pl
             }
             playButtonCommandReadMatch.instruction.getReference<FieldReference>()!!
         }
-    // All matching methods must read the same field before it can be used for playlist playback.
     val playCommandField = copiedPlayCommandFields
         .distinct()
         .singleOrNull()
@@ -516,8 +523,9 @@ private fun BytecodePatchContext.findPlaylistPlayButton(commandType: String): Pl
 }
 
 /**
- * Adds a getter using the decoder and command field from [findPlaylistPlayButton].
- * The generated getter returns the Play command as an Android Auto media ID, or null if the button or command is absent.
+ * Gives Java a media ID that starts the playlist as if its phone Play button were pressed.
+ * [findPlaylistPlayButton] identifies the button data. YTM's encoder converts its playback
+ * command into the string accepted by onPlayFromMediaId; a missing button or command returns null.
  */
 private fun BytecodePatchContext.addPlaylistPlayButtonMediaIdGetter(
     phoneBrowseResponseClass: MutableClass,
@@ -574,7 +582,7 @@ private fun BytecodePatchContext.addPlaylistPlayButtonMediaIdGetter(
 
 // Read Library items and playlist songs
 
-/** Exposes the tab and section data that contains Library lists or playlist songs. */
+/** Connects Java's PhoneBrowseTab and SectionList methods to the nested lists in YTM's phone response. */
 private fun BytecodePatchContext.addPhoneBrowsePageInterfaces() {
     val getTabsMethod = PhoneBrowseResponseTabsFingerprint.originalMethod
     val tabMapperMatch = PhoneBrowseResponseTabsFingerprint.instructionMatches.single { match ->
@@ -603,7 +611,7 @@ private fun BytecodePatchContext.addPhoneBrowsePageInterfaces() {
     addSectionListInterface(getSectionContentsMethod)
 }
 
-/** Adds access to the sections in YTM's tab data, even without a visible tab bar. */
+/** Provides the section list inside a TabRenderer; [addSectionListInterface] reads the Library items or songs inside it. */
 private fun BytecodePatchContext.addPhoneBrowseTabInterface(
     getSectionListMethod: Method,
 ) {
@@ -624,7 +632,7 @@ private fun BytecodePatchContext.addPhoneBrowseTabInterface(
     )
 }
 
-/** Adds a getter for the Library lists or playlist song lists stored in the page's sections. */
+/** Lets Java distinguish sections containing Library items from sections containing a playlist's songs. */
 private fun BytecodePatchContext.addSectionListInterface(
     getSectionContentsMethod: Method,
 ) {
@@ -644,7 +652,7 @@ private fun BytecodePatchContext.addSectionListInterface(
     )
 }
 
-/** Adds getters for Library items and pagination commands. */
+/** Provides the Library's playlists, artists, and podcasts, plus the commands used to load more of them. */
 private fun BytecodePatchContext.addGridRendererInterface() {
     val getItemsMethod = GridRendererItemsFingerprint.originalMethod
     val getPaginationCommandsMethod = gridPaginationCommandsFingerprint(getItemsMethod).originalMethod
@@ -684,7 +692,7 @@ private fun BytecodePatchContext.addGridRendererInterface() {
     )
 }
 
-/** Adds a getter for playlist songs and the "Add a song" button without creating the phone's UI objects. */
+/** Keeps playlist songs in their original data type so Java can inspect them without creating phone UI objects. */
 private fun BytecodePatchContext.addPlaylistContentsInterface() {
     val phoneBrowseItemType = PhoneBrowseItemFingerprint
         .instructionMatches
@@ -723,10 +731,11 @@ private fun BytecodePatchContext.addPlaylistContentsInterface() {
 // region Library and playlist items
 
 /**
- * Adds getters to YTM's item type for playlists, songs, and Add a song.
- * [addPlaylistBrowseIdGetter] rejects conflicting playlist IDs in i and k.
- * [addCommandMediaIdGetter] and [addVideoIdCheck] both use i, falling back to k only when i is null.
- * [addTextGetter] and [addArtworkUriGetter] read display data from the same item.
+ * YTM uses one item type for Library content, playlist songs, and the Add a song button.
+ * [addPlaylistBrowseIdGetter] identifies playlists among Library items; [addVideoIdCheck] identifies
+ * songs among playlist contents. [addTextGetter] and [addArtworkUriGetter] provide their titles and images.
+ * Playback through [addCommandMediaIdGetter] uses i, or k when i is null;
+ * the song ID check must inspect that same command.
  */
 private fun BytecodePatchContext.patchPhoneBrowseItem() {
     val phoneBrowseItemType = PhoneBrowseItemFingerprint
@@ -811,7 +820,11 @@ private fun BytecodePatchContext.patchPhoneBrowseItem() {
     addArtworkUriGetter(phoneBrowseItemClass, artworkContainerField)
 }
 
-/** Adds a getter that accepts a playlist ID from i or k and rejects conflicting IDs. */
+/**
+ * Identifies playlist pages by their VL prefix so Library artists and shows are excluded.
+ * Either command field, i or k, can contain the playlist ID. If they identify different playlists,
+ * return null so Java skips the item instead of choosing which playlist to play.
+ */
 private fun MutableClass.addPlaylistBrowseIdGetter(
     interfaceMethod: Method,
     commandFieldI: FieldReference,
@@ -868,7 +881,10 @@ private fun MutableClass.addPlaylistBrowseIdGetter(
 
 // Read the playback command attached to a song
 
-/** Adds a getter that encodes an item's command in the format YTM accepts from Android Auto. */
+/**
+ * Encodes an item's command for YTM's onPlayFromMediaId callback.
+ * This also accepts the Add a song button; [addVideoIdCheck] determines whether the item identifies a song.
+ */
 private fun MutableClass.addCommandMediaIdGetter(
     interfaceMethod: Method,
     readItemCommand: String,
@@ -898,7 +914,6 @@ private fun MutableClass.addCommandMediaIdGetter(
 
 /**
  * WatchEndpoint identifies the song or video to play. YTM uses video IDs for songs too.
- * This class groups the YTM fields and methods the patch needs to read that ID.
  */
 private data class WatchEndpointAccess(
     val protobufExtensionField: FieldReference,
@@ -962,8 +977,9 @@ private fun BytecodePatchContext.findWatchEndpointAccess(commandType: String): W
 }
 
 /**
- * Adds a song ID check using [findWatchEndpointAccess], excluding the Add a song button.
- * [readItemCommand] is also used by [addCommandMediaIdGetter] so both inspect the same command.
+ * The Add a song button can have a media ID, so an ID alone does not prove a playlist contains songs.
+ * [findWatchEndpointAccess] locates the song ID inside a playback command.
+ * Use the same command as [addCommandMediaIdGetter] when checking for that ID.
  */
 private fun MutableClass.addVideoIdCheck(
     interfaceMethod: Method,
@@ -1000,7 +1016,7 @@ private fun MutableClass.addVideoIdCheck(
 
 // Read playlist titles and artwork
 
-/** Adds a getter that uses YTM's text formatter for an item's title or subtitle. */
+/** Titles and subtitles are stored as YTM text objects; use its formatter to read them. */
 private fun MutableClass.addTextGetter(
     interfaceMethod: Method,
     textField: FieldReference,
@@ -1021,8 +1037,10 @@ private fun MutableClass.addTextGetter(
 }
 
 /**
- * Adds an artwork getter using YTM's decoder and Android Auto image URI conversion.
- * [decodeThumbnailFingerprint] matches the decoder; [androidAutoMediaDescriptionFingerprint] identifies the conversion.
+ * Extracts the thumbnail details stored with a Library item and uses YTM's Android Auto code
+ * to turn them into an image URI. Android Auto loads the artwork from that URI.
+ * [decodeThumbnailFingerprint] identifies YTM's artwork parser;
+ * [androidAutoMediaDescriptionFingerprint] locates an Android Auto item builder that uses the URI conversion.
  */
 private fun BytecodePatchContext.addArtworkUriGetter(
     itemClass: MutableClass,
@@ -1089,7 +1107,7 @@ private fun BytecodePatchContext.addArtworkUriGetter(
 
 // region Intercept Android Auto playlist requests
 
-/** Intercepts requests for the Playlists folder, which YTM would otherwise leave empty. */
+/** Replaces YTM's empty Playlists result with playlists fetched from the phone Library by Java. */
 private fun BytecodePatchContext.patchAndroidAutoPlaylists() {
     val sendEmptyAndroidAutoMediaItemsMethod = SendEmptyAndroidAutoMediaItemsFingerprint.originalMethod
     addAndroidAutoBrowseRequestInterface(sendEmptyAndroidAutoMediaItemsMethod)
@@ -1099,7 +1117,7 @@ private fun BytecodePatchContext.patchAndroidAutoPlaylists() {
     )
 }
 
-/** Adds methods to read the requested Android Auto media ID and return media items. */
+/** Lets Java identify what Android Auto requested and return a list through YTM's existing response method. */
 private fun BytecodePatchContext.addAndroidAutoBrowseRequestInterface(
     sendEmptyAndroidAutoMediaItemsMethod: Method,
 ) {
@@ -1166,8 +1184,9 @@ private fun BytecodePatchContext.addAndroidAutoBrowseRequestInterface(
 }
 
 /**
- * Calls Java's `handleAndroidAutoPlaylists` before YTM's folder handler.
- * A true return prevents YTM from also answering, including while playlists load; false lets YTM handle the request.
+ * Gives Java's `handleAndroidAutoPlaylists` the request before YTM can return an empty Playlists list.
+ * If Java accepts it, stop here while Java loads the phone Library and returns the playlists.
+ * Otherwise continue YTM's code for the requested Android Auto list.
  */
 private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
     androidAutoRequestHandlerType: String,
@@ -1198,8 +1217,9 @@ private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
 // region Android Auto connections and folder refresh
 
 /**
- * Hooks Library changes through [hookLibraryChangeCompletion] and enables refreshes through [addAndroidAutoFolderReload].
- * [addAndroidAutoRequestConnectionGetter] identifies which connection requested the Playlists folder.
+ * Lets completed playlist edits, Likes/unlikes, and show saves/removals update Android Auto without reconnecting.
+ * [hookLibraryChangeCompletion] passes the returned future to Java; [addAndroidAutoFolderReload] repeats the saved
+ * Android Auto requests. [addAndroidAutoRequestConnectionGetter] keeps results from separate connections apart.
  */
 private fun BytecodePatchContext.installAndroidAutoFolderRefresh() {
     // Android Auto requests list updates through MediaBrowserServiceCompat.
@@ -1217,7 +1237,7 @@ private fun BytecodePatchContext.installAndroidAutoFolderRefresh() {
     }
 }
 
-/** Identifies the requesting Android Auto connection so older results cannot replace newer ones. */
+/** Gives Java the connection to compare loads for the same Playlists list, leaving other connections independent. */
 private fun BytecodePatchContext.addAndroidAutoRequestConnectionGetter(reloadMethod: Method) {
     val connectionType = reloadMethod.parameterTypes[1].toString()
     // YTM passes the Android Auto connection to the object that returns the list.
@@ -1266,10 +1286,9 @@ private fun BytecodePatchContext.addAndroidAutoRequestConnectionGetter(reloadMet
 }
 
 /**
- * Saves each folder's connection through Java's `rememberAndroidAutoSubscription`
- * and adds `patch_reloadFolder` to call YTM's folder loading method again.
- * Refreshed requests and results reach the hooks installed by [patchAndroidAutoPlaylists]
- * and [patchAndroidAutoPodcastItems].
+ * Saves the requested Android Auto list and connection in Java's `rememberAndroidAutoSubscription`.
+ * `patch_reloadFolder` repeats that request after a Library change, so [patchAndroidAutoPlaylists]
+ * fetches Playlists again and [patchAndroidAutoPodcastItems] receives updated Home content.
  */
 private fun BytecodePatchContext.addAndroidAutoFolderReload(
     baseServiceType: String,
@@ -1301,11 +1320,13 @@ private fun BytecodePatchContext.addAndroidAutoFolderReload(
     )
 }
 
-/** Passes Library change futures to Java's `watchLibraryChange`, which refreshes Android Auto after success. */
+/**
+ * Gives Java's `watchLibraryChange` the future returned by a playlist edit, Like/unlike, or show save/removal.
+ * Java refreshes Android Auto only when that future completes successfully.
+ */
 private fun BytecodePatchContext.hookLibraryChangeCompletion(endpoint: String) {
     val requestType = libraryChangeRequestFingerprint(endpoint).originalMethod.definingClass
     val mutableSendChangeMethod = libraryChangeFutureFingerprint(requestType).method
-    // The returned future reports whether the change succeeded.
     val returnIndex = mutableSendChangeMethod.findInstructionIndicesReversed(Opcode.RETURN_OBJECT)
         .singleOrNull()
         ?: throw PatchException("Could not find the completion result for $endpoint")
@@ -1324,8 +1345,9 @@ private fun BytecodePatchContext.hookLibraryChangeCompletion(endpoint: String) {
 // region Podcasts
 
 /**
- * Hooks YTM's Android Auto result delivery. Java's `handleAndroidAutoBrowseResult` adds the Podcasts tab
- * to the root, saves Home's podcast folders, and supplies those folders when Podcasts is opened.
+ * Lets Java change the lists YTM is about to send to Android Auto.
+ * `handleAndroidAutoBrowseResult` adds Podcasts alongside Home and Library, saves the podcast lists
+ * returned for Home, and returns those saved lists when Android Auto opens Podcasts.
  */
 private fun BytecodePatchContext.patchAndroidAutoPodcastItems() {
     val androidAutoRequestType =
@@ -1354,9 +1376,10 @@ private fun BytecodePatchContext.patchAndroidAutoPodcastItems() {
 // region Playback callbacks and empty playlists
 
 /**
- * Connects the playback callback to its session through [addPlaybackSessionAccess] and [addPlaybackCallbackAccess].
- * [hookPlaylistPlayback] intercepts playlist selections; [hookPlaylistPlaybackCancellation] cancels pending
- * playback on Pause/Stop. The session getters and setter support the empty-playlist message.
+ * [hookPlaylistPlayback] lets Java turn a selected playlist into YTM's playback media ID.
+ * [hookPlaylistPlaybackCancellation] prevents a pending playlist selection from starting after Pause/Stop.
+ * [addPlaybackCallbackAccess] keeps playback on YTM's own thread; [addPlaybackSessionAccess]
+ * lets an empty-playlist message reach Android Auto through YTM's playback state.
  */
 private fun BytecodePatchContext.installPlaybackCallbackBridges() {
     val playFromMediaIdMethod = AndroidAutoPlayFromMediaIdFingerprint.method
@@ -1372,7 +1395,7 @@ private fun BytecodePatchContext.installPlaybackCallbackBridges() {
     hookPlaylistPlaybackCancellation(callbackClass)
 }
 
-/** Adds access to YTM's playback status so the patch can show a message when a playlist is empty. */
+/** Android Auto displays messages from playback state; expose YTM's stored state and its method for updating it. */
 private fun BytecodePatchContext.addPlaybackSessionAccess(callbackDelegateType: String) {
     // YTM's method for updating playback status, position, and any error message.
     val playbackStateSetter = MediaSessionCompatPlaybackStateSetterFingerprint.originalMethod
@@ -1430,8 +1453,8 @@ private fun BytecodePatchContext.addDirectPlaybackSessionAccess(
 }
 
 /**
- * Adds getters for playback state stored on a separate object.
- * Hooks callback setup to call Java's `registerPlaybackSession`, which records that object's session.
+ * The callback references the object storing PlaybackStateCompat, but messages must be published through its session.
+ * Java's `registerPlaybackSession` records which session contains that object when YTM sets up the callback.
  */
 private fun BytecodePatchContext.addIndirectPlaybackSessionAccess(
     sessionClass: MutableClass,
@@ -1479,15 +1502,14 @@ private fun BytecodePatchContext.addIndirectPlaybackSessionAccess(
 }
 
 /**
- * Adds access to the Handler that runs YTM's playback commands.
- * Passes the callback's referenced object to Java's `resolvePlaybackSession` to obtain its media session.
+ * Playback and messages must run on YTM's playback thread, using this callback's Handler.
+ * Java's `resolvePlaybackSession` uses the object held by its weak reference to find the session that publishes messages.
  */
 private fun BytecodePatchContext.addPlaybackCallbackAccess(
     callbackClass: MutableClass,
     delegateField: FieldReference,
 ) {
     val delegateClass = classDefBy(delegateField.type)
-    // Use the callback's Handler so playlist playback runs on YTM's playback thread.
     val handlerField = delegateClass.fields.singleOrNull { field ->
         classDefByOrNull(field.type)?.superclass == "Landroid/os/Handler;"
     } ?: throw PatchException("Could not find media session callback Handler")
@@ -1536,14 +1558,14 @@ private fun BytecodePatchContext.addPlaybackCallbackAccess(
 }
 
 /**
- * Calls Java's `handlePlayFromMediaId` before YTM's playback handler.
- * A true return stops YTM from interpreting the patch's media ID; false lets YTM handle its own IDs.
+ * The patch's playlist media IDs contain a page ID that YTM cannot play directly.
+ * Java's `handlePlayFromMediaId` loads that playlist and obtains a YTM playback media ID first.
+ * A true return stops the original call; false lets YTM play an ID it already understands.
  */
 private fun hookPlaylistPlayback(playFromMediaIdMethod: MutableMethod) {
     val handlePlaylistSelectionMethod = "$EXTENSION_CLASS->handlePlayFromMediaId(" +
         "Landroid/media/session/MediaSession${'$'}Callback;" +
         "Ljava/lang/String;Landroid/os/Bundle;)Z"
-    // YTM cannot decode this patch's media IDs; resolve them before its playback handler runs.
     val handledRegister = playFromMediaIdMethod.findFreeRegister(0)
     playFromMediaIdMethod.addInstructionsWithLabels(
         0,
@@ -1577,14 +1599,13 @@ private fun hookPlaylistPlaybackCancellation(callbackClass: MutableClass) {
 
 // region Add the methods declared in the Java interfaces to YTM classes
 
-/** Looks up the method declaration in the patch's Java interface. */
 private fun BytecodePatchContext.extensionInterfaceMethod(
     interfaceType: String,
     name: String,
 ) = classDefBy(interfaceType).methods.singleOrNull { method -> method.name == name }
     ?: throw PatchException("Could not resolve $name in $interfaceType")
 
-/** Adds the declared Java method to a YTM class with the supplied bytecode. */
+/** Copies the Java declaration's signature so calls through the interface reach the method installed on YTM. */
 private fun MutableClass.addInterfaceMethod(
     interfaceMethod: Method,
     registerCount: Int,
