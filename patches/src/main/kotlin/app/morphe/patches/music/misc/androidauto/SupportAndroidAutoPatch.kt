@@ -100,7 +100,7 @@ private const val PLAY_BUTTON_CONTAINER_FIELD_NAME = "q"
  * 5. [patchAndroidAutoPlaylists] intercepts Playlists requests through [hookAndroidAutoPlaylistsRequest].
  *    [addAndroidAutoBrowseRequestInterface] lets Java read the requested folder ID and return playlists.
  * 6. [installAndroidAutoFolderRefresh] tracks connections through [addAndroidAutoFolderReload] and observes
- *    completed Library changes through [hookLibraryChangeCompletion], allowing Java to refresh Android Auto.
+ *    Library changes through [hookLibraryChangeCompletion]. Java waits for success before scheduling a refresh.
  * 7. [patchAndroidAutoPodcastItems] hooks delivered Android Auto lists so Java can add Podcasts and reuse
  *    Home's podcast folders when Home results arrive.
  * 8. [installPlaybackCallbackBridges] hooks playlist selections and Pause/Stop through [hookPlaylistPlayback] and
@@ -129,7 +129,7 @@ val supportAndroidAutoPatch = bytecodePatch(
 
 // region Identify the Playlists folder in Android Auto's Library
 
-/** Identifies the Playlists folder by its translated title because its ID varies. */
+/** Passes Android Auto item IDs and titles to Java's `rememberPlaylistsTitleMatch` to identify Playlists. */
 private fun BytecodePatchContext.hookPlaylistsTitleMediaIds() {
     val buildAndroidAutoMediaItemMethod = BuildAndroidAutoMediaItemFingerprint.method
 
@@ -291,7 +291,7 @@ private fun BytecodePatchContext.addLibraryPaginationRequestMethod(
 
 // Obtain YTM's object for sending Library and playlist requests
 
-/** Hooks MusicBrowserService initialization to save YTM's Library and playlist request client. */
+/** Hooks MusicBrowserService initialization to pass its request client to Java's `setPhoneBrowseClient`. */
 private fun BytecodePatchContext.capturePhoneBrowseClientOnServiceCreate(phoneBrowseClientType: String) {
     val phoneBrowseClientProviderCandidates =
         phoneBrowseClientProviderFingerprint(phoneBrowseClientType)
@@ -603,7 +603,7 @@ private fun BytecodePatchContext.addPhoneBrowsePageInterfaces() {
     addSectionListInterface(getSectionContentsMethod)
 }
 
-/** Adds a getter for Library lists or playlist songs stored in YTM's tab data, even without a visible tab bar. */
+/** Adds access to the sections in YTM's tab data, even without a visible tab bar. */
 private fun BytecodePatchContext.addPhoneBrowseTabInterface(
     getSectionListMethod: Method,
 ) {
@@ -1266,7 +1266,8 @@ private fun BytecodePatchContext.addAndroidAutoRequestConnectionGetter(reloadMet
 }
 
 /**
- * Reuses YTM's folder loading method for refreshes and saves each folder's connection.
+ * Saves each folder's connection through Java's `rememberAndroidAutoSubscription`
+ * and adds `patch_reloadFolder` to call YTM's folder loading method again.
  * Refreshed requests and results reach the hooks installed by [patchAndroidAutoPlaylists]
  * and [patchAndroidAutoPodcastItems].
  */
@@ -1408,7 +1409,7 @@ private fun BytecodePatchContext.addPlaybackSessionAccess(callbackDelegateType: 
     )
 }
 
-/** The callback already references this session, so resolvePlaybackSession can return it directly. */
+/** The callback already references this session, so Java's `resolvePlaybackSession` can return it directly. */
 private fun BytecodePatchContext.addDirectPlaybackSessionAccess(
     sessionClass: MutableClass,
     playbackStateField: FieldReference,
@@ -1428,7 +1429,10 @@ private fun BytecodePatchContext.addDirectPlaybackSessionAccess(
     )
 }
 
-/** Adds getters for state stored on a separate object and links that object to its session. */
+/**
+ * Adds getters for playback state stored on a separate object.
+ * Hooks callback setup to call Java's `registerPlaybackSession`, which records that object's session.
+ */
 private fun BytecodePatchContext.addIndirectPlaybackSessionAccess(
     sessionClass: MutableClass,
     playbackStateSetter: Method,
@@ -1462,7 +1466,6 @@ private fun BytecodePatchContext.addIndirectPlaybackSessionAccess(
         """,
     )
 
-    // Map the callback's referenced object to this session for resolvePlaybackSession.
     val setCallbackMethod = sessionClass.methods.singleOrNull { method ->
         method.returnType == "V" &&
             method.parameterTypes.map { it.toString() } == listOf(
@@ -1475,7 +1478,10 @@ private fun BytecodePatchContext.addIndirectPlaybackSessionAccess(
     )
 }
 
-/** Adds access to the Handler that runs YTM's playback commands and the media session that stores playback status. */
+/**
+ * Adds access to the Handler that runs YTM's playback commands.
+ * Passes the callback's referenced object to Java's `resolvePlaybackSession` to obtain its media session.
+ */
 private fun BytecodePatchContext.addPlaybackCallbackAccess(
     callbackClass: MutableClass,
     delegateField: FieldReference,
@@ -1551,7 +1557,9 @@ private fun hookPlaylistPlayback(playFromMediaIdMethod: MutableMethod) {
     )
 }
 
-/** Cancels playlist selections still loading when Pause or Stop is pressed. */
+/**
+ * Hooks Pause/Stop to cancel pending playback and empty-playlist messages through Java's `cancelPendingPlaylistPlayback`.
+ */
 private fun hookPlaylistPlaybackCancellation(callbackClass: MutableClass) {
     // onPause/onStop are Android callback names and are not obfuscated.
     for (name in listOf("onPause", "onStop")) {

@@ -46,7 +46,7 @@ import app.morphe.extension.shared.Utils;
  * Adds YT Music support in Android Auto by intercepting requests for the Playlists folder,
  * loading playlists from the phone Library, and filling a Podcasts tab from Android Auto Home.
  *
- * Setup: {@link #setPhoneBrowseClient} saves YTM's request client during service initialization;
+ * <p>Setup: {@link #setPhoneBrowseClient} saves YTM's request client during service initialization;
  * {@link #rememberPlaylistsTitleMatch} identifies Android Auto's Playlists folder.
  *
  * <p>Load playlists: {@link #handleAndroidAutoPlaylists} starts {@link #requestLibraryPage},
@@ -61,7 +61,7 @@ import app.morphe.extension.shared.Utils;
  * Home and Podcasts may load in either order; {@link #refreshPodcastsAfterHomeLoad} updates the tab.
  *
  * <p>Library changes: {@link #rememberAndroidAutoSubscription} saves Android Auto's folder requests for refreshes.
- * After a successful Library change, {@link #watchLibraryChange} schedules {@link #refreshAndroidAutoLibrary},
+ * {@link #watchLibraryChange} waits for a successful change, then schedules {@link #refreshAndroidAutoLibrary},
  * which requests Playlists and Home again. The new Home results update Podcasts through the path above.
  */
 @SuppressWarnings("unused")
@@ -165,6 +165,10 @@ public final class SupportAndroidAutoPatch {
         @Nullable String patch_getRequestedMediaId();
         // The Android Auto connection for this request, or null if unknown.
         @Nullable Object patch_getBrowserConnection();
+        /**
+         * Calls YTM's delivery method, which passes the items through
+         * {@link SupportAndroidAutoPatch#handleAndroidAutoBrowseResult} before sending them to Android Auto.
+         */
         void patch_deliverAndroidAutoItems(
                 @NonNull List<MediaBrowserCompat.MediaItem> androidAutoItems);
     }
@@ -862,6 +866,7 @@ public final class SupportAndroidAutoPatch {
                     Logger.printDebug(() -> "Selected Android Auto playlist has no playback command");
                     return;
                 }
+                // Call the same callback with YTM's media ID; the hook then lets YTM handle playback.
                 postToPlaybackThread(callbackHandler, () ->
                         callback.onPlayFromMediaId(ytmPlaybackMediaId, playbackExtras));
             } catch (InterruptedException ex) {
