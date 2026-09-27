@@ -460,7 +460,8 @@ public final class SupportAndroidAutoPatch {
         try {
             CharSequence subtitle = libraryItem.patch_getSubtitle();
             return subtitle == null ? "" : subtitle.toString();
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException ex) {
+            Logger.printInfo(() -> "Could not read playlist subtitle; leaving it blank", ex);
             return "";
         }
     }
@@ -468,7 +469,8 @@ public final class SupportAndroidAutoPatch {
     private static Uri artworkUriOrNull(PhoneBrowseItem libraryItem) {
         try {
             return libraryItem.patch_getArtworkUri();
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException ex) {
+            Logger.printInfo(() -> "Could not read playlist artwork; leaving it unset", ex);
             return null;
         }
     }
@@ -791,7 +793,12 @@ public final class SupportAndroidAutoPatch {
         }
         long requestGeneration = playRequestGeneration.incrementAndGet();
         String playlistBrowseId = mediaId.substring(DEFERRED_PLAYLIST_MEDIA_ID_PREFIX.length());
-        new PlaylistPlaybackRequest(callback, playlistBrowseId, requestGeneration).start(extras);
+        try {
+            new PlaylistPlaybackRequest(callback, playlistBrowseId, requestGeneration).start(extras);
+        } catch (Exception ex) {
+            Logger.printException(() -> "Could not start Android Auto playlist request: " +
+                    playlistBrowseId, ex);
+        }
         return true;
     }
 
@@ -907,7 +914,12 @@ public final class SupportAndroidAutoPatch {
             callbackHandler.post(() -> {
                 if (requestGeneration != playRequestGeneration.get()) return;
                 if (browseClientAtStart != phoneBrowseClient) return;
-                task.run();
+                try {
+                    task.run();
+                } catch (Exception ex) {
+                    Logger.printException(() -> "Could not play Android Auto playlist: " +
+                            playlistBrowseId, ex);
+                }
             });
         }
     }
