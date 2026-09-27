@@ -1,6 +1,6 @@
 /*
  * Copyright 2026 Morphe.
- * https://github.com/MorpheApp/morphe-patches/pull/2489
+ * https://github.com/MorpheApp/morphe-patches/pull/3341
  *
  * See the included NOTICE file for GPLv3 Section 7 terms that apply to this code.
  */
@@ -99,7 +99,7 @@ private const val PLAY_BUTTON_CONTAINER_FIELD_NAME = "q"
  */
 @Suppress("unused")
 val supportAndroidAutoPatch = bytecodePatch(
-    name = "Restore playlists and podcasts in Android Auto",
+    name = "Support Android Auto",
     description = "Restores YouTube Music playlists and podcasts in Android Auto.",
 ) {
     extendWith("extensions/android-auto-support.mpe")
