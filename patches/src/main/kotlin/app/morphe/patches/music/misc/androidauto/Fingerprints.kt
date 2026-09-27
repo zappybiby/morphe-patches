@@ -42,7 +42,7 @@ import com.android.tools.smali.dexlib2.iface.reference.MethodReference
  * - Read the playlist's Play button and intercept playback: [decodeButtonRendererFingerprint],
  *   [AndroidAutoPlayFromMediaIdFingerprint].
  * - Observe Library changes and refresh Android Auto: [libraryChangeFutureFingerprint],
- *   [mediaBrowserReloadFingerprint].
+ *   [playlistChangeSuccessFingerprint], [mediaBrowserReloadFingerprint].
  */
 
 private const val PHONE_BROWSE_TABS_PROTO_FIELD = 58_173_949L
@@ -133,7 +133,7 @@ internal object SendEmptyAndroidAutoMediaItemsFingerprint : Fingerprint(
 
 // Refresh after Library changes
 
-/** YTM's requests for playlist edits, song Likes/unlikes, and saving/removing shows. */
+/** YTM's requests that change the Library. */
 internal fun libraryChangeRequestFingerprint(endpoint: String) = Fingerprint(
     name = "<init>",
     returnType = "V",
@@ -144,9 +144,30 @@ internal fun libraryChangeRequestFingerprint(endpoint: String) = Fingerprint(
 internal fun libraryChangeFutureFingerprint(requestType: String) = Fingerprint(
     returnType = "Lcom/google/common/util/concurrent/ListenableFuture;",
     parameters = listOf(requestType, "Ljava/util/concurrent/Executor;"),
-    // 9.31 and earlier have two matches for each Like/unlike method. Select the one that sends the request.
-    // From 9.32, that is the only match.
+    // Decompiled Like/unlike methods, using the names from 9.31 and 9.32:
+    // < 9.32: arig.j/k are interface methods; arib.j/k return this.b.b(...) / this.d.b(...).
+    // >= 9.32: only vtq.g/h match; they return this.d.b(...) / this.f.b(...).
+    // Hook the implementation that sends the request, not the interface.
     custom = { method, _ -> method.implementation != null },
+)
+
+/** Calls the request's success callback with its response. */
+internal fun playlistChangeSuccessFingerprint(requestBaseType: String) = Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "V",
+    parameters = listOf("Lcom/google/protobuf/MessageLite;"),
+    filters = listOf(
+        methodCall(
+            opcode = Opcode.INVOKE_INTERFACE,
+            parameters = listOf("Ljava/lang/Object;"),
+            returnType = "V",
+        ),
+    ),
+    custom = { method, classDef ->
+        !AccessFlags.STATIC.isSet(method.accessFlags) && classDef.instanceFields.any { field ->
+            field.type == requestBaseType
+        }
+    },
 )
 
 /** Repeats an Android Auto list request using the connection that made it. */
