@@ -34,6 +34,7 @@ settings {
 }
 
 include(":patches:stub")
+include(":aa-support-patch")
 
 // Include morphe-patcher as composite builds if they exist locally
 mapOf(
