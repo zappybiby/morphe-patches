@@ -22,6 +22,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -39,21 +40,21 @@ import app.morphe.extension.shared.ResourceUtils;
 import app.morphe.extension.shared.Utils;
 
 /**
- * Supplies Android Auto with playlists from YTM's phone Library.
+ * Supplies Android Auto with phone search results and Library playlists.
  *
  * <p>In YTM's two-tab Home/Library layout, Library opens playlists directly and a separate
- * Podcasts tab shows the podcast lists returned for Home. The nested Playlists folder is also supported.
+ * Podcasts tab shows the podcast page links returned for Home. The Playlists page inside Library is also supported.
  *
  * <p>{@link #handleAndroidAutoPlaylists} requests the phone Library through YTM, follows pagination,
  * and returns playable playlist cards. Selecting a card lets YTM load the playlist's queue.
  *
  * <p>Successful Library changes trigger {@link #refreshAndroidAutoLibrary}, which reloads the saved
- * Library or Playlists request and Home through YTM's browser service. New Home results update Podcasts.
+ * Library or Playlists page and Home. New Home results update Podcasts.
  */
 @SuppressWarnings("unused")
 public final class AndroidAutoPatch {
 
-    /** Added to YTM's phone browse client to request the Library and its later pages. */
+    /** Added to YTM's phone request client to load the Library and later playlist pages. */
     public interface PhoneBrowseClient {
         ListenableFuture<PhoneBrowseResponse> patch_requestBrowse(
                 String browseId, Executor executor);
@@ -62,21 +63,20 @@ public final class AndroidAutoPatch {
     }
 
     /**
-     * Added to YTM's Library response class. The first page contains TabRenderer wrappers and sections;
-     * later pages use {@link #patch_getPaginatedLibraryGrid}. TabRenderer describes the phone page,
-     * not Android Auto's tabs.
+     * Added to YTM's phone Library response. The first page groups its contents by tab;
+     * later pages use {@link #patch_getPaginatedLibraryGrid}.
      */
     public interface PhoneBrowseResponse {
         Iterable<PhoneBrowseTab> patch_getTabs();
         @Nullable GridRenderer patch_getPaginatedLibraryGrid();
     }
 
-    /** Added to YTM's TabRenderer wrapper to read its section contents, including Library grids. */
+    /** Added to YTM's phone Library tab to read its contents, including playlists. */
     public interface PhoneBrowseTab {
         @Nullable Iterable<?> patch_getSectionContents();
     }
 
-    /** Added to YTM's Library grid to read its items and pagination commands. */
+    /** Added to YTM's Library list to read its entries and pagination commands. */
     public interface GridRenderer {
         /**
          * Includes artists and podcasts as well as playlists; filter before returning playlists to Android Auto.
@@ -88,7 +88,7 @@ public final class AndroidAutoPatch {
         Iterable<?> patch_getPaginationCommands();
     }
 
-    /** Added to YTM's Android Auto request class to read the requested ID and return its contents. */
+    /** Added to YTM's page request to read the page ID and return its contents to Android Auto. */
     public interface AndroidAutoBrowseRequest {
         @Nullable String patch_getRequestedMediaId();
 
@@ -98,16 +98,14 @@ public final class AndroidAutoPatch {
         @Nullable Object patch_getBrowserConnection();
 
         /**
-         * Sends the list through YTM, including the hook for
-         * {@link AndroidAutoPatch#handleAndroidAutoBrowseResult}.
-         * YTM may remove items to keep the returned list within its byte limit.
+         * Returns the page contents through YTM, which may trim the list to its transfer size limit.
          */
-        void patch_deliverAndroidAutoItems(List<MediaBrowserCompat.MediaItem> androidAutoItems);
+        void patch_deliverAndroidAutoItems(List<MediaBrowserCompat.MediaItem> pageEntries);
     }
 
-    /** Added to YTM's browser service to repeat saved Android Auto folder requests. */
-    public interface AndroidAutoFolderReload {
-        void patch_reloadFolder(String parentMediaId, Object connection, @Nullable Bundle options);
+    /** Added to YTM's Android Auto service to reload pages after Library changes. */
+    public interface AndroidAutoPageReload {
+        void patch_reloadPage(String pageMediaId, Object connection, @Nullable Bundle options);
     }
 
     /** Added to YTM's Library item class to read playlist IDs, titles, subtitles, and artwork. */
@@ -123,12 +121,12 @@ public final class AndroidAutoPatch {
         @Nullable CharSequence patch_getSubtitle();
     }
 
-    /** Stores playable items collected for one Android Auto Library or Playlists request. */
-    private static final class PlaylistsFolderLoad {
+    /** Collects playable playlist entries for one Android Auto Library or Playlists request. */
+    private static final class LibraryPlaylistsLoad {
         // Use the same YTM object throughout pagination, even if MusicBrowserService restarts.
         private final PhoneBrowseClient phoneBrowseClient;
         private final long loadNumber = playlistsLoadCounter.incrementAndGet();
-        private final PlaylistsFolderDelivery folderDelivery;
+        private final LibraryPlaylistsDelivery playlistDelivery;
         @GuardedBy("this")
         private final List<MediaBrowserCompat.MediaItem> libraryPlaylists = new ArrayList<>();
         @GuardedBy("this")
@@ -136,9 +134,9 @@ public final class AndroidAutoPatch {
         @GuardedBy("this")
         private boolean deliveryPreparationStarted;
 
-        private PlaylistsFolderLoad(PhoneBrowseClient browseClient, PlaylistsFolderDelivery folderDelivery) {
-            this.phoneBrowseClient = browseClient;
-            this.folderDelivery = folderDelivery;
+        private LibraryPlaylistsLoad(PhoneBrowseClient libraryClient, LibraryPlaylistsDelivery playlistDelivery) {
+            this.phoneBrowseClient = libraryClient;
+            this.playlistDelivery = playlistDelivery;
         }
 
         /**
@@ -154,20 +152,20 @@ public final class AndroidAutoPatch {
         }
     }
 
-    /** Prevents older results from replacing newer results for the same folder and Android Auto connection. */
-    private static final class PlaylistsFolderDelivery {
+    /** Prevents older playlists from replacing newer playlists on the same Android Auto page and connection. */
+    private static final class LibraryPlaylistsDelivery {
         @GuardedBy("this")
         private long lastDeliveredLoadNumber;
 
         // Keep the check, send, and update together so another load cannot send between them.
         private synchronized void deliver(long loadNumber, AndroidAutoBrowseRequest androidAutoRequest,
-                                          List<MediaBrowserCompat.MediaItem> androidAutoPlaylistItems, String logReason) {
+                                          List<MediaBrowserCompat.MediaItem> playlistItems, String logReason) {
             // A newer load still in progress does not prevent this one from returning playlists.
             if (loadNumber < lastDeliveredLoadNumber) return;
             Logger.printDebug(() -> "YTM Library: " + logReason + "; returning: " +
-                    androidAutoPlaylistItems.size() + " playlists");
+                    playlistItems.size() + " playlists");
             try {
-                androidAutoRequest.patch_deliverAndroidAutoItems(androidAutoPlaylistItems);
+                androidAutoRequest.patch_deliverAndroidAutoItems(playlistItems);
                 // A failed send must not prevent an older load from returning its playlists.
                 lastDeliveredLoadNumber = loadNumber;
             } catch (RuntimeException ex) {
@@ -179,29 +177,29 @@ public final class AndroidAutoPatch {
     }
 
     /**
-     * Saves an Android Auto list's ID, service, and connection so its contents can be requested again.
+     * Keeps enough information to reload an Android Auto page after Library changes.
      */
-    private record AndroidAutoSubscription(WeakReference<AndroidAutoFolderReload> browserService,
-                                           String parentMediaId, WeakReference<Object> connection) {
-        private AndroidAutoSubscription(AndroidAutoFolderReload browserService,
-                                        String parentMediaId, Object connection) {
-            this(new WeakReference<>(browserService), parentMediaId, new WeakReference<>(connection));
+    private record SavedPageRequest(WeakReference<AndroidAutoPageReload> musicService,
+                                    String pageMediaId, WeakReference<Object> connection) {
+        private SavedPageRequest(AndroidAutoPageReload musicService,
+                                 String pageMediaId, Object connection) {
+            this(new WeakReference<>(musicService), pageMediaId, new WeakReference<>(connection));
         }
 
         private void reload(boolean forceRefresh) {
-            AndroidAutoFolderReload service = browserService.get();
-            Object connectedBrowser = connection.get();
-            // Weak references allow the browser service and connection to be released after disconnection.
-            if (service == null || connectedBrowser == null) return;
+            AndroidAutoPageReload service = musicService.get();
+            Object connectedAuto = connection.get();
+            // Do not keep YTM's service or the car connection alive after disconnection.
+            if (service == null || connectedAuto == null) return;
             try {
                 Bundle options = null;
                 if (forceRefresh) {
                     options = new Bundle();
                     options.putBoolean(FORCE_REFRESH, true);
                 }
-                service.patch_reloadFolder(parentMediaId, connectedBrowser, options);
+                service.patch_reloadPage(pageMediaId, connectedAuto, options);
             } catch (RuntimeException ex) {
-                Logger.printException(() -> "Could not refresh Android Auto folder: " + parentMediaId, ex);
+                Logger.printException(() -> "Could not refresh Android Auto page: " + pageMediaId, ex);
             }
         }
     }
@@ -211,44 +209,46 @@ public final class AndroidAutoPatch {
     public static final String PLAYLISTS_TITLE_RESOURCE_STRING
             = ResourceUtils.getString("library_playlists_shelf_title");
     // Return collected playlists when this timeout expires.
-    private static final int ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS = 30_000;
+    private static final int PLAYLISTS_TIMEOUT_MILLISECONDS = 30_000;
     private static final int LIBRARY_REFRESH_DELAY_MILLISECONDS = 5_000;
-    private static final String ANDROID_AUTO_ROOT_MEDIA_ID = "com.google.android.projection.gearhead";
+    private static final String ROOT_MEDIA_ID = "com.google.android.projection.gearhead";
     private static final String PODCASTS_MEDIA_ID = "morphe:aa:podcasts";
     private static final String PODCASTS_TITLE_RESOURCE_NAME = "offline_podcasts_shelf_title";
     private static final String UPGRADE_PROMPT_MEDIA_ID = "promotion_version_1";
     private static final String FORCE_REFRESH = "com.google.android.apps.youtube.music.mediabrowser.force_refresh";
     
-    private static final Executor BACKGROUND_EXECUTOR = Utils::runOnBackgroundThread;
-    private static final Handler refreshHandler = new Handler(Looper.getMainLooper());
+    static final Executor BACKGROUND_EXECUTOR = Utils::runOnBackgroundThread;
+    // Keep a Handler so typing delays, timeouts, and refreshes can be cancelled.
+    static final Handler refreshHandler = new Handler(Looper.getMainLooper());
     private static final Runnable REFRESH_LIBRARY = AndroidAutoPatch::refreshAndroidAutoLibrary;
     
     // A user's playlist can also be named "Playlists"; do not use these title matches for playback.
     private static final Set<String> playlistsTitleMatchMediaIds = ConcurrentHashMap.newKeySet();
     // Give each Library load a number to distinguish earlier requests from later requests.
     private static final AtomicLong playlistsLoadCounter = new AtomicLong();
-    // Remember which Library load last updated each folder on each Android Auto connection.
+    // Remember which Library load last updated each page on each Android Auto connection.
     
     @GuardedBy("itself")
-    private static final WeakHashMap<Object, Map<String, PlaylistsFolderDelivery>>
-            playlistsFolderDeliveries = new WeakHashMap<>();
+    private static final WeakHashMap<Object, Map<String, LibraryPlaylistsDelivery>>
+            playlistDeliveriesByConnection = new WeakHashMap<>();
     
-    // Saved request for playlist updates from Library or the nested Playlists folder.
+    // Pages to refresh after the phone Library changes.
     @Nullable
     @GuardedBy("AndroidAutoPatch.class")
-    private static AndroidAutoSubscription playlistsSubscription;
+    private static SavedPageRequest savedPlaylistsRequest;
     @Nullable
     @GuardedBy("AndroidAutoPatch.class")
-    private static AndroidAutoSubscription podcastsSubscription;
+    private static SavedPageRequest savedPodcastsRequest;
     @Nullable
     @GuardedBy("AndroidAutoPatch.class")
-    private static AndroidAutoSubscription homeSubscription;
+    private static SavedPageRequest savedHomeRequest;
     @GuardedBy("AndroidAutoPatch.class")
     private static String androidAutoHomeMediaId;
     @Nullable
     private static volatile String androidAutoLibraryMediaId;
+    // Links from Home that open podcast pages; reuse them in the Podcasts tab.
     @GuardedBy("AndroidAutoPatch.class")
-    private static List<MediaBrowserCompat.MediaItem> cachedAndroidAutoPodcastFolders = Collections.emptyList();
+    private static List<MediaBrowserCompat.MediaItem> cachedPodcastPageLinks = Collections.emptyList();
 
     @Nullable
     private static volatile PhoneBrowseClient phoneBrowseClient;
@@ -256,38 +256,38 @@ public final class AndroidAutoPatch {
     private AndroidAutoPatch() {
     }
 
-    // Capture YTM's Library request methods and identify the Playlists folder
+    // Capture YTM's Library request methods and identify the link to Playlists
 
     /**
-     * Injection point. Save the phone browse client obtained during MusicBrowserService initialization.
+     * Injection point. Save YTM's Library request client when its Android Auto service starts.
      * Clear saved requests and pending refreshes so they cannot use the previous service's connection.
      */
     public static synchronized void setPhoneBrowseClient(PhoneBrowseClient client) {
         phoneBrowseClient = client;
         androidAutoLibraryMediaId = null;
-        playlistsSubscription = null;
-        podcastsSubscription = null;
-        homeSubscription = null;
+        savedPlaylistsRequest = null;
+        savedPodcastsRequest = null;
+        savedHomeRequest = null;
         refreshHandler.removeCallbacks(REFRESH_LIBRARY);
         Logger.printDebug(() -> "Ready to request phone Library contents: " +
                 client.getClass().getName());
     }
 
     /**
-     * Injection point. Identify the Playlists folder by its translated title; its ID varies.
+     * Injection point. Find the link to Playlists by its translated title; its ID varies.
      */
-    public static void rememberPlaylistsTitleMatch(@Nullable String androidAutoMediaId,
+    public static void rememberPlaylistsTitleMatch(@Nullable String mediaId,
                                                    @Nullable CharSequence title) {
         if (title == null || (PLAYLISTS_TITLE_RESOURCE_STRING != null
                 && !PLAYLISTS_TITLE_RESOURCE_STRING.contentEquals(title))) return;
-        if (androidAutoMediaId != null) playlistsTitleMatchMediaIds.add(androidAutoMediaId);
+        if (mediaId != null) playlistsTitleMatchMediaIds.add(mediaId);
     }
 
-    // Intercept Android Auto requests for Library or the Playlists folder
+    // Intercept Android Auto requests for Library or the Playlists list
 
     /**
      * Injection point. Load playlists for the Library ID saved by {@link #initializeAndroidAutoTabs}
-     * or a Playlists folder identified by {@link #rememberPlaylistsTitleMatch}.
+     * or the Playlists link identified by {@link #rememberPlaylistsTitleMatch}.
      * YTM has already called detach() on Android Auto's result object, so the list can be sent after this method returns.
      *
      * <p>Library responses are read in the background. Failure or timeout returns the playlists collected so far,
@@ -298,32 +298,32 @@ public final class AndroidAutoPatch {
      */
     public static boolean handleAndroidAutoPlaylists(AndroidAutoBrowseRequest androidAutoRequest) {
         try {
-            PhoneBrowseClient browseClient = phoneBrowseClient;
-            if (browseClient == null) return false;
+            PhoneBrowseClient libraryClient = phoneBrowseClient;
+            if (libraryClient == null) return false;
             String requestedMediaId = androidAutoRequest.patch_getRequestedMediaId();
             if (requestedMediaId == null) return false;
             if (!requestedMediaId.equals(androidAutoLibraryMediaId)
                     && !playlistsTitleMatchMediaIds.contains(requestedMediaId)) return false;
 
             Object connection = androidAutoRequest.patch_getBrowserConnection();
-            PlaylistsFolderDelivery folderDelivery;
-            synchronized (playlistsFolderDeliveries) {
+            LibraryPlaylistsDelivery playlistDelivery;
+            synchronized (playlistDeliveriesByConnection) {
                 if (connection == null) {
-                    // Without the connection, there is no way to identify other requests for this same folder.
-                    folderDelivery = new PlaylistsFolderDelivery();
+                    // Without the connection, other requests for the same page cannot be identified.
+                    playlistDelivery = new LibraryPlaylistsDelivery();
                 } else {
                     // Reopening Library or Playlists, or refreshing either, can overlap an unfinished load.
-                    folderDelivery = playlistsFolderDeliveries
+                    playlistDelivery = playlistDeliveriesByConnection
                             .computeIfAbsent(connection, ignored -> new HashMap<>())
-                            .computeIfAbsent(requestedMediaId, ignored -> new PlaylistsFolderDelivery());
+                            .computeIfAbsent(requestedMediaId, ignored -> new LibraryPlaylistsDelivery());
                 }
             }
 
-            PlaylistsFolderLoad load = new PlaylistsFolderLoad(browseClient, folderDelivery);
+            LibraryPlaylistsLoad load = new LibraryPlaylistsLoad(libraryClient, playlistDelivery);
             try {
                 Utils.runOnMainThreadDelayed(
                         () -> deliverAndroidAutoPlaylists(androidAutoRequest, load, "timed out"),
-                        ANDROID_AUTO_PLAYLISTS_TIMEOUT_MILLISECONDS);
+                        PLAYLISTS_TIMEOUT_MILLISECONDS);
                 requestLibraryPage(androidAutoRequest, load, null);
             } catch (RuntimeException ex) {
                 // Only this patch should answer the request, including after failure.
@@ -344,7 +344,7 @@ public final class AndroidAutoPatch {
      * The first page and later pages have different response formats and need separate parsers.
      */
     private static void requestLibraryPage(AndroidAutoBrowseRequest androidAutoRequest,
-                                           PlaylistsFolderLoad load,
+                                           LibraryPlaylistsLoad load,
                                            @Nullable Object paginationCommand) {
         boolean firstPage = paginationCommand == null;
         ListenableFuture<PhoneBrowseResponse> libraryResponseFuture = firstPage
@@ -382,7 +382,7 @@ public final class AndroidAutoPatch {
     }
 
     private static Object appendInitialLibraryPlaylists(PhoneBrowseResponse libraryResponse,
-                                                        PlaylistsFolderLoad load) {
+                                                        LibraryPlaylistsLoad load) {
         Object paginationCommand = null;
         for (PhoneBrowseTab tab : libraryResponse.patch_getTabs()) {
             Iterable<?> sectionContents = tab.patch_getSectionContents();
@@ -405,7 +405,7 @@ public final class AndroidAutoPatch {
     }
 
     private static Object appendPaginatedLibraryPlaylists(PhoneBrowseResponse libraryResponse,
-                                                          PlaylistsFolderLoad load) {
+                                                          LibraryPlaylistsLoad load) {
         GridRenderer gridRenderer = libraryResponse.patch_getPaginatedLibraryGrid();
         // An unrecognized pagination result ends loading; keep the playlists collected so far.
         if (gridRenderer == null) return null;
@@ -420,7 +420,7 @@ public final class AndroidAutoPatch {
 
     /** Skips unreadable Library items so one failure does not discard the remaining playlists. */
     private static void collectPlaylistsFromGrid(GridRenderer gridRenderer,
-                                                 PlaylistsFolderLoad load) {
+                                                 LibraryPlaylistsLoad load) {
         for (Object libraryItem : gridRenderer.patch_getItems()) {
             if (!(libraryItem instanceof PhoneBrowseItem)) continue;
             try {
@@ -456,7 +456,7 @@ public final class AndroidAutoPatch {
      * a song ID, so building a card does not require fetching the playlist's songs.
      */
     private static void addLibraryPlaylist(PhoneBrowseItem libraryItem,
-                                           PlaylistsFolderLoad load) {
+                                           LibraryPlaylistsLoad load) {
         String playlistBrowseId = libraryItem.patch_getPlaylistBrowseId();
         if (playlistBrowseId == null) return;
         // TODO: Verify playlist-ID playback for Episodes for Later (VLSE).
@@ -466,7 +466,7 @@ public final class AndroidAutoPatch {
         String title = titleText == null ? "" : titleText.toString();
         if (title.isEmpty()) return;
         // Phone page IDs prefix playback playlist IDs with "VL".
-        String mediaId = createPlaylistMediaId(playlistBrowseId.substring(2));
+        String mediaId = createPlaylistPlaybackId(playlistBrowseId.substring(2));
         // Keep the playlist available if its subtitle or artwork cannot be read.
         MediaDescriptionCompat description = new MediaDescriptionCompat(
                 mediaId, title, subtitleOrEmpty(libraryItem), null, null,
@@ -507,37 +507,37 @@ public final class AndroidAutoPatch {
      * Stops collection before sending the result so a concurrent timeout cannot send it twice.
      */
     private static void deliverAndroidAutoPlaylists(AndroidAutoBrowseRequest androidAutoRequest,
-                                                    PlaylistsFolderLoad load, String logReason) {
+                                                    LibraryPlaylistsLoad load, String logReason) {
         List<MediaBrowserCompat.MediaItem> collectedPlaylists = load.takePlaylistsForDelivery();
         if (collectedPlaylists == null) return;
-        load.folderDelivery.deliver(load.loadNumber, androidAutoRequest, collectedPlaylists, logReason);
+        load.playlistDelivery.deliver(load.loadNumber, androidAutoRequest, collectedPlaylists, logReason);
     }
 
-    /** Replaced during patching with calls to YTM's playlist command builder and Android Auto media ID encoder. */
-    private static String createPlaylistMediaId(String playlistId) {
+    /** Replaced during patching with YTM's playlist command builder and playback-ID encoder. */
+    private static String createPlaylistPlaybackId(String playlistId) {
         return null;
     }
 
     // Refresh after Library changes
 
     /**
-     * Injection point. Save the Library or Playlists request, plus Home and Podcasts, for later refreshes.
+     * Injection point. Remember how to reload Home, Library, Playlists, or Podcasts after Library changes.
      */
-    public static synchronized void rememberAndroidAutoSubscription(AndroidAutoFolderReload browserService,
-                                                                    @Nullable String parentMediaId,
-                                                                    Object connection) {
+    public static synchronized void rememberPageRequest(AndroidAutoPageReload musicService,
+                                                        @Nullable String pageMediaId,
+                                                        Object connection) {
         try {
-            if (parentMediaId == null) return;
-            if (parentMediaId.equals(androidAutoLibraryMediaId)
-                    || playlistsTitleMatchMediaIds.contains(parentMediaId)) {
-                playlistsSubscription = new AndroidAutoSubscription(browserService, parentMediaId, connection);
-            } else if (PODCASTS_MEDIA_ID.equals(parentMediaId)) {
-                podcastsSubscription = new AndroidAutoSubscription(browserService, parentMediaId, connection);
-            } else if (parentMediaId.equals(androidAutoHomeMediaId)) {
-                homeSubscription = new AndroidAutoSubscription(browserService, parentMediaId, connection);
+            if (pageMediaId == null) return;
+            if (pageMediaId.equals(androidAutoLibraryMediaId)
+                    || playlistsTitleMatchMediaIds.contains(pageMediaId)) {
+                savedPlaylistsRequest = new SavedPageRequest(musicService, pageMediaId, connection);
+            } else if (PODCASTS_MEDIA_ID.equals(pageMediaId)) {
+                savedPodcastsRequest = new SavedPageRequest(musicService, pageMediaId, connection);
+            } else if (pageMediaId.equals(androidAutoHomeMediaId)) {
+                savedHomeRequest = new SavedPageRequest(musicService, pageMediaId, connection);
             }
         } catch (Exception ex) {
-            Logger.printException(() -> "rememberAndroidAutoSubscription failure", ex);
+            Logger.printException(() -> "rememberPageRequest failure", ex);
         }
     }
 
@@ -560,7 +560,7 @@ public final class AndroidAutoPatch {
 
     /** Combines completed Library changes into one delayed refresh. */
     private static synchronized void scheduleLibraryRefresh() {
-        if (playlistsSubscription == null && homeSubscription == null) return;
+        if (savedPlaylistsRequest == null && savedHomeRequest == null) return;
         // Wait for updated playlist artwork before refreshing.
         refreshHandler.removeCallbacks(REFRESH_LIBRARY);
         refreshHandler.postDelayed(REFRESH_LIBRARY, LIBRARY_REFRESH_DELAY_MILLISECONDS);
@@ -571,12 +571,12 @@ public final class AndroidAutoPatch {
      * Reloads Home to obtain updated podcast lists.
      */
     private static void refreshAndroidAutoLibrary() {
-        AndroidAutoSubscription playlists;
-        AndroidAutoSubscription home;
+        SavedPageRequest playlists;
+        SavedPageRequest home;
         // Refresh the current connection if Android Auto reconnected during the delay.
         synchronized (AndroidAutoPatch.class) {
-            playlists = playlistsSubscription;
-            home = homeSubscription;
+            playlists = savedPlaylistsRequest;
+            home = savedHomeRequest;
         }
         // Reloading needs YTM's lock; YTM's result delivery needs this class's lock.
         // Reload outside synchronized to avoid the two threads waiting for each other.
@@ -592,13 +592,13 @@ public final class AndroidAutoPatch {
      * Injection point for YTM's media-ID getter. Returns true for the added Podcasts tab,
      * whose literal string ID cannot be decoded as a Base64-encoded protobuf.
      */
-    public static boolean isAndroidAutoPodcastsMediaId(@Nullable String mediaId) {
+    public static boolean isPodcastsMediaId(@Nullable String mediaId) {
         return PODCASTS_MEDIA_ID.equals(mediaId);
     }
 
     /**
      * Injection point. Modify lists before YTM sends them to Android Auto.
-     * Add a Podcasts tab, cache Home's podcast folders, and return them when that tab is requested.
+     * Add a Podcasts tab using Home's links to podcast pages.
      * New Home results also refresh Podcasts if it has been opened.
      */
     @Nullable
@@ -606,15 +606,15 @@ public final class AndroidAutoPatch {
             AndroidAutoBrowseRequest request, @Nullable List<MediaBrowserCompat.MediaItem> ytmItems) {
         try {
             String parentMediaId = request.patch_getRequestedMediaId();
-            if (ANDROID_AUTO_ROOT_MEDIA_ID.equals(parentMediaId)) {
+            if (ROOT_MEDIA_ID.equals(parentMediaId)) {
                 return initializeAndroidAutoTabs(ytmItems);
             }
             if (PODCASTS_MEDIA_ID.equals(parentMediaId)) {
-                return new ArrayList<>(cachedAndroidAutoPodcastFolders);
+                return new ArrayList<>(cachedPodcastPageLinks);
             }
             if (parentMediaId != null && parentMediaId.equals(androidAutoHomeMediaId)
                     && ytmItems != null) {
-                cacheAndroidAutoPodcastFolders(ytmItems);
+                cachePodcastPageLinks(ytmItems);
                 refreshPodcastsAfterHomeLoad();
             }
         } catch (RuntimeException ex) {
@@ -628,13 +628,13 @@ public final class AndroidAutoPatch {
     private static List<MediaBrowserCompat.MediaItem> initializeAndroidAutoTabs(
             @Nullable List<MediaBrowserCompat.MediaItem> rootTabs) {
         // Do not reuse saved requests or podcast content after the main tabs reload.
-        playlistsSubscription = null;
-        podcastsSubscription = null;
-        homeSubscription = null;
+        savedPlaylistsRequest = null;
+        savedPodcastsRequest = null;
+        savedHomeRequest = null;
         refreshHandler.removeCallbacks(REFRESH_LIBRARY);
         androidAutoHomeMediaId = null;
         androidAutoLibraryMediaId = null;
-        cachedAndroidAutoPodcastFolders = Collections.emptyList();
+        cachedPodcastPageLinks = Collections.emptyList();
 
         // Add Podcasts only when YTM supplies Home and Library without a Podcasts tab.
         if (rootTabs == null || rootTabs.size() != 2) return rootTabs;
@@ -654,29 +654,71 @@ public final class AndroidAutoPatch {
 
     @GuardedBy("AndroidAutoPatch.class")
     private static void refreshPodcastsAfterHomeLoad() {
-        AndroidAutoSubscription subscription = podcastsSubscription;
-        if (subscription == null) return;
-        // New Home results can change the podcast folder IDs.
+        SavedPageRequest savedRequest = savedPodcastsRequest;
+        if (savedRequest == null) return;
+        // New Home results can change the IDs of the podcast page links.
         // Always queue the reload so handleAndroidAutoBrowseResult releases its lock first.
         refreshHandler.post(() -> {
             synchronized (AndroidAutoPatch.class) {
                 // Reloading the main tabs or reconnecting replaces the saved Podcasts request.
-                if (podcastsSubscription != subscription) return;
+                if (savedPodcastsRequest != savedRequest) return;
             }
-            subscription.reload(false);
+            savedRequest.reload(false);
         });
     }
 
     @GuardedBy("AndroidAutoPatch.class")
-    private static void cacheAndroidAutoPodcastFolders(List<MediaBrowserCompat.MediaItem> homeItems) {
-        List<MediaBrowserCompat.MediaItem> folders = new ArrayList<>();
+    private static void cachePodcastPageLinks(List<MediaBrowserCompat.MediaItem> homeItems) {
+        List<MediaBrowserCompat.MediaItem> podcastEntries = new ArrayList<>();
         // TODO: The server omits songs and playlists from Android Auto Speed dial; obtain them from phone Home.
-        // Some podcast lists have no layout hint; include them if they are browsable.
+        // Keep links that open another page, including those with no display preference.
         for (MediaBrowserCompat.MediaItem item : homeItems) {
-            // YTM's upgrade prompt is also browsable; exclude it explicitly.
+            // The upgrade prompt opens a page too; exclude it.
             if (!item.b() || UPGRADE_PROMPT_MEDIA_ID.equals(item.a())) continue;
-            folders.add(item);
+            podcastEntries.add(item);
         }
-        cachedAndroidAutoPodcastFolders = folders;
+        cachedPodcastPageLinks = podcastEntries;
+    }
+
+    // Search results and playback commands
+
+    // Layout preference for one search result; Android Auto chooses the final layout.
+    private static final String RESULT_LAYOUT_KEY = "android.media.browse.CONTENT_STYLE_SINGLE_ITEM_HINT";
+    // Vertical list with one result per row, instead of tiles arranged in a grid.
+    private static final int VERTICAL_LIST_LAYOUT = 1;
+    // Heading above a group of results, such as "Songs" or "Albums".
+    private static final String CATEGORY_HEADING_KEY = "android.media.browse.CONTENT_STYLE_GROUP_TITLE_HINT";
+
+    static List<MediaBrowserCompat.MediaItem> createPlayableSearchResults(List<AndroidAutoResponseParser.SearchResult> results) {
+        List<MediaBrowserCompat.MediaItem> playableResults = new ArrayList<>();
+        List<AndroidAutoResponseParser.SearchResult> sortedResults = new ArrayList<>(results);
+        // Auto renders headings between consecutive search results with different group titles.
+        sortedResults.sort(Comparator.comparing(AndroidAutoResponseParser.SearchResult::category));
+        Set<String> seen = new HashSet<>();
+        for (AndroidAutoResponseParser.SearchResult searchResult : sortedResults) {
+            byte[] playCommandBytes = searchResult.playCommandBytes();
+            var playCommand = new AndroidAutoResponseParser.ProtoMessage(playCommandBytes);
+            if (!AndroidAutoResponseParser.hasPlaybackAction(playCommand)) continue;
+            String playlistId = playCommand.messageField(AndroidAutoResponseParser.WATCH_PLAYLIST).stringField(1);
+            // A menu's playlist action may shuffle; use ordered playback for albums and playlists.
+            // Preserve YTM's "Start radio" action, which plays a generated mix.
+            String playbackMediaId = !searchResult.tapStartsPlayback() && !playlistId.isEmpty() && !playlistId.startsWith("RD")
+                    ? createPlaylistPlaybackId(playlistId) : encodePlaybackId(playCommandBytes);
+            if (playbackMediaId == null || !seen.add(playbackMediaId)) continue;
+            Bundle displayOptions = new Bundle();
+            displayOptions.putInt(RESULT_LAYOUT_KEY, VERTICAL_LIST_LAYOUT);
+            displayOptions.putString(CATEGORY_HEADING_KEY, ResourceUtils.getString(searchResult.category().titleResource));
+            String artwork = searchResult.artworkUrl();
+            playableResults.add(new MediaBrowserCompat.MediaItem(new MediaDescriptionCompat(
+                    playbackMediaId, searchResult.title(), searchResult.subtitle(), null, null,
+                    artwork.isEmpty() ? null : Uri.parse(artwork), displayOptions, null),
+                    MediaBrowserCompat.MediaItem.FLAG_PLAYABLE));
+        }
+        return playableResults;
+    }
+
+    /** Replaced during patching with YTM's command parser and playback-ID encoder. */
+    private static String encodePlaybackId(byte[] playCommand) {
+        throw new UnsupportedOperationException("Android Auto command bridge was not installed");
     }
 }

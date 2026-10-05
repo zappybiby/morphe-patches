@@ -20,6 +20,9 @@ import app.morphe.patcher.util.proxy.mutableTypes.MutableClass
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patcher.util.smali.ExternalLabel
+import app.morphe.patches.all.misc.resources.addResourcesPatch
+import app.morphe.patches.music.interaction.jam.protoDefaultInstanceFingerprint
+import app.morphe.patches.music.interaction.jam.protoParserFingerprint
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
 import app.morphe.util.cloneMutable
@@ -53,8 +56,8 @@ private const val EXTENSION_GRID_RENDERER_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/AndroidAutoPatch$GridRenderer;"
 private const val EXTENSION_ANDROID_AUTO_BROWSE_REQUEST_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/AndroidAutoPatch$AndroidAutoBrowseRequest;"
-private const val EXTENSION_ANDROID_AUTO_FOLDER_RELOAD_INTERFACE =
-    $$"Lapp/morphe/extension/music/patches/AndroidAutoPatch$AndroidAutoFolderReload;"
+private const val EXTENSION_ANDROID_AUTO_PAGE_RELOAD_INTERFACE =
+    $$"Lapp/morphe/extension/music/patches/AndroidAutoPatch$AndroidAutoPageReload;"
 private const val EXTENSION_PHONE_BROWSE_ITEM_INTERFACE =
     $$"Lapp/morphe/extension/music/patches/AndroidAutoPatch$PhoneBrowseItem;"
 private const val MUSIC_BROWSER_SERVICE_CLASS =
@@ -69,20 +72,18 @@ private const val TITLE_FIELD_NAME = "g"
 private const val SUBTITLE_FIELD_NAME = "h"
 
 /**
- * Connects the Java extension to YTM's Library requests, browse results, and playlist playback.
- * Injected interfaces let Java request Library pages and read their playlist IDs, text, and artwork.
- *
- * Java handles Android Auto's Library and Playlists requests using those interfaces.
- * [hookAndroidAutoBrowseResults] lets Java add a Podcasts tab containing Home's podcast lists.
- * [installAndroidAutoFolderRefresh] lets Java reload playlists and podcasts after Library changes.
- * [installPlaylistMediaIdBuilder] supplies the media IDs used to play playlist cards.
+ * Loads phone Library playlists in Android Auto.
+ * [hookAndroidAutoBrowseResults] adds a Podcasts tab containing Home's podcast lists.
+ * [installAndroidAutoBrowseRefresh] reloads playlists and podcasts after Library changes.
+ * [installPlaylistMediaIdBuilder] makes the playlist cards playable.
+ * [patchSearch] supplies phone search results.
  */
 @Suppress("unused")
 val androidAutoPatch = bytecodePatch(
     name = "Android Auto",
-    description = "Restores YouTube Music playlists and podcasts in Android Auto.",
+    description = "Restores YouTube Music search, playlists, and podcasts in Android Auto.",
 ) {
-    dependsOn(sharedExtensionPatch)
+    dependsOn(sharedExtensionPatch, addResourcesPatch)
 
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
 
@@ -92,21 +93,22 @@ val androidAutoPatch = bytecodePatch(
         patchPhoneBrowseResponses()
         val encodeCommandMediaIdMethod = patchPhoneBrowseItem()
         patchAndroidAutoPlaylists()
-        installAndroidAutoFolderRefresh()
+        installAndroidAutoBrowseRefresh()
         installPlaylistMediaIdBuilder(encodeCommandMediaIdMethod)
+        patchCommandEncoder(encodeCommandMediaIdMethod)
+        patchSearch()
     }
 }
 
-// region Identify the Playlists folder in Android Auto's Library
+// region Identify the link to Playlists in Android Auto's Library
 
 /**
- * Playlists has no fixed Android Auto media ID. Pass item IDs and titles to Java's
- * `rememberPlaylistsTitleMatch`, which recognizes it by its translated title.
+ * The link to Playlists has no fixed Android Auto ID, so recognize it by its translated title.
  */
 private fun BytecodePatchContext.hookPlaylistsTitleMediaIds() {
     BuildAndroidAutoMediaItemFingerprint.let {
         it.method.apply {
-            // Capture the Playlists folder ID and title regardless of which branch creates it.
+            // Capture the Playlists entry's ID and title regardless of which branch creates it.
             it.instructionMatches.reversed().forEach { match ->
                 val instructionStartRegister = match.getInstruction<RegisterRangeInstruction>().startRegister
 
@@ -128,9 +130,9 @@ private fun BytecodePatchContext.hookPlaylistsTitleMediaIds() {
 // region Request the Library
 
 /**
- * Reuses the YTM object that sends phone Library requests.
+ * Requests the phone Library and later pages using YTM's own request methods.
  * [addPhoneBrowseRequestMethod] requests the Library; [addLibraryPaginationRequestMethod]
- * requests more Library items. [capturePhoneBrowseClientOnServiceCreate] saves the object for Java to call.
+ * requests more Library items. [hookPhoneClientOnServiceCreate] makes these requests available when Auto starts.
  */
 private fun BytecodePatchContext.installPhoneBrowseClientBridges() {
     val (createPhoneBrowseRequestMethod, setRequestBrowseIdMethod, initializeTrackingMethod, sendPhoneBrowseRequestMethod) =
@@ -154,11 +156,15 @@ private fun BytecodePatchContext.installPhoneBrowseClientBridges() {
         phoneBrowseRequestType,
         sendPhoneBrowseRequestMethod,
     )
-    capturePhoneBrowseClientOnServiceCreate(phoneBrowseClientType)
+    hookPhoneClientOnServiceCreate(
+        phoneBrowseClientType,
+        EXTENSION_PHONE_BROWSE_CLIENT_INTERFACE,
+        "$EXTENSION_CLASS->setPhoneBrowseClient($EXTENSION_PHONE_BROWSE_CLIENT_INTERFACE)V",
+    )
 }
 
 /**
- * Lets Java fetch the phone Library by its Browse ID (YTM's page ID).
+ * Requests the phone Library by its page ID.
  * YTM creates and sends the request; the returned future contains the Library response.
  */
 private fun BytecodePatchContext.addPhoneBrowseRequestMethod(
@@ -229,14 +235,18 @@ private fun BytecodePatchContext.addLibraryPaginationRequestMethod(
     )
 }
 
-// Obtain YTM's phone browse client
+// Obtain YTM's phone request clients
 
 /**
- * Passes YTM's phone browse client to Java's `setPhoneBrowseClient` when MusicBrowserService starts.
+ * Passes YTM's phone browse or search client to the supplied setter when MusicBrowserService starts.
  */
-private fun BytecodePatchContext.capturePhoneBrowseClientOnServiceCreate(phoneBrowseClientType: String) {
-    val phoneBrowseClientProviderCandidates =
-        phoneBrowseClientProviderFingerprint(phoneBrowseClientType)
+internal fun BytecodePatchContext.hookPhoneClientOnServiceCreate(
+    phoneClientType: String,
+    clientInterface: String,
+    setter: String,
+) {
+    val clientProviderCandidates =
+        phoneClientProviderFingerprint(phoneClientType)
             .matchAll()
             .map { match ->
                 val (providerFieldMatch, providerGetMatch) = match.instructionMatches
@@ -247,7 +257,7 @@ private fun BytecodePatchContext.capturePhoneBrowseClientOnServiceCreate(phoneBr
             }
             .distinctBy { (field, _) -> field }
     // Several providers create this request sender. Select the one used when MusicBrowserService starts.
-    val (onCreateMatch, providerField, providerGetMethod) = phoneBrowseClientProviderCandidates
+    val (onCreateMatch, providerField, providerGetMethod) = clientProviderCandidates
         .mapNotNull { (providerField, providerGetMethod) ->
             musicBrowserServiceSuperclassOnCreateFingerprint(
                 MUSIC_BROWSER_SERVICE_CLASS,
@@ -258,7 +268,7 @@ private fun BytecodePatchContext.capturePhoneBrowseClientOnServiceCreate(phoneBr
         }
         .singleOrNull()
         ?: throw PatchException(
-            "Could not resolve MusicBrowserService's BS_GET_BROWSE_DATA provider",
+            "Could not resolve MusicBrowserService's phone client provider: $phoneClientType",
         )
     val mutableOnCreateMethod = onCreateMatch.method
     val generatedComponentReadIndex = onCreateMatch.instructionMatches.single { match ->
@@ -269,7 +279,7 @@ private fun BytecodePatchContext.capturePhoneBrowseClientOnServiceCreate(phoneBr
     val generatedComponentRegister = mutableOnCreateMethod
         .getInstruction<TwoRegisterInstruction>(generatedComponentReadIndex)
         .registerA
-    val phoneBrowseClientRegister = mutableOnCreateMethod.findFreeRegister(
+    val phoneClientRegister = mutableOnCreateMethod.findFreeRegister(
         generatedComponentReadIndex + 1,
         mutableOnCreateMethod.p0Register,
     )
@@ -277,11 +287,11 @@ private fun BytecodePatchContext.capturePhoneBrowseClientOnServiceCreate(phoneBr
     mutableOnCreateMethod.addInstructions(
         generatedComponentReadIndex + 1,
         """
-            iget-object v$phoneBrowseClientRegister, v$generatedComponentRegister, $providerField
-            invoke-interface/range { v$phoneBrowseClientRegister .. v$phoneBrowseClientRegister }, $providerGetMethod
-            move-result-object v$phoneBrowseClientRegister
-            check-cast v$phoneBrowseClientRegister, $EXTENSION_PHONE_BROWSE_CLIENT_INTERFACE
-            invoke-static/range { v$phoneBrowseClientRegister .. v$phoneBrowseClientRegister }, $EXTENSION_CLASS->setPhoneBrowseClient($EXTENSION_PHONE_BROWSE_CLIENT_INTERFACE)V
+            iget-object v$phoneClientRegister, v$generatedComponentRegister, $providerField
+            invoke-interface/range { v$phoneClientRegister .. v$phoneClientRegister }, $providerGetMethod
+            move-result-object v$phoneClientRegister
+            check-cast v$phoneClientRegister, $clientInterface
+            invoke-static/range { v$phoneClientRegister .. v$phoneClientRegister }, $setter
         """
     )
 }
@@ -291,11 +301,8 @@ private fun BytecodePatchContext.capturePhoneBrowseClientOnServiceCreate(phoneBr
 // region Read Library responses
 
 /**
- * Lets Java extract the lists returned by YTM's phone Library requests.
- * YTM nests the lists inside TabRenderer and section data. [addPhoneBrowseTabInterface] lets Java
- * read each tab's section contents through YTM's readers.
- * [addGridRendererInterface] provides Library items.
- * Pagination may return Library items directly or in its first section; [addPhoneBrowseResponseInterface] handles both.
+ * YTM wraps the first Library page in tabs and sections.
+ * Later pages can return items directly or inside the first section.
  */
 private fun BytecodePatchContext.patchPhoneBrowseResponses() {
     addPhoneBrowseResponseInterface()
@@ -334,7 +341,6 @@ private fun BytecodePatchContext.addPaginatedLibraryGridDecoder(
 // Read returned Library data
 
 /**
- * Gives Java access to the lists in YTM's phone Library response.
  * The pagination getter uses YTM's parser copied by [addPaginatedLibraryGridDecoder].
  */
 private fun BytecodePatchContext.addPhoneBrowseResponseInterface() {
@@ -387,7 +393,7 @@ private fun BytecodePatchContext.addPhoneBrowseResponseInterface() {
     )
 }
 
-/** Reads a phone tab's section contents without exposing the section wrapper to Java. */
+/** Unwraps each phone tab's sections to reach the Library lists. */
 private fun BytecodePatchContext.addPhoneBrowseTabInterface() {
     val (getSectionListMethod, getSectionContentsMethod) = PhoneBrowseTabContentsFingerprint
         .instructionMatches.filter { it.instruction.opcode == Opcode.INVOKE_VIRTUAL }
@@ -459,8 +465,8 @@ private fun BytecodePatchContext.addGridRendererInterface() {
 // region Library items
 
 /**
- * Adds getters for a Library item's playlist ID, title, subtitle, and artwork.
- * Returns YTM's media ID encoder for [installPlaylistMediaIdBuilder].
+ * Adds getters for Library playlist details and returns YTM's playback-ID encoder.
+ * Playlists and Search share that encoder.
  */
 private fun BytecodePatchContext.patchPhoneBrowseItem(): MethodReference {
     // The field read after YTM's presence check identifies the class used for Library items.
@@ -539,7 +545,7 @@ private fun BytecodePatchContext.patchPhoneBrowseItem(): MethodReference {
 }
 
 /**
- * Reads page IDs from both tap commands for Java's resolvePlaylistBrowseId to select a playlist.
+ * Reads both tap actions so conflicting playlist IDs can be rejected.
  */
 private fun MutableClass.addPlaylistBrowseIdGetter(
     interfaceMethod: Method,
@@ -598,10 +604,6 @@ private fun MutableClass.addTextGetter(
     )
 }
 
-/**
- * Adds an artwork getter that decodes the Library item's thumbnail data and calls YTM's Android Auto
- * URI converter. Android Auto loads the image from the returned URI.
- */
 private fun BytecodePatchContext.addArtworkUriGetter(
     itemClass: MutableClass,
     artworkContainerField: FieldReference,
@@ -636,9 +638,9 @@ private fun BytecodePatchContext.addArtworkUriGetter(
 
 // endregion
 
-// region Intercept Android Auto playlist requests
+// region Android Auto requests
 
-/** Lets Java answer Library and Playlists requests with playlists fetched from the phone Library. */
+/** Supplies phone Library playlists and adds Podcasts to Android Auto's pages. */
 private fun BytecodePatchContext.patchAndroidAutoPlaylists() {
     val sendEmptyAndroidAutoMediaItemsMethod = SendEmptyAndroidAutoMediaItemsFingerprint.originalMethod
     addAndroidAutoBrowseRequestInterface(sendEmptyAndroidAutoMediaItemsMethod)
@@ -648,10 +650,6 @@ private fun BytecodePatchContext.patchAndroidAutoPlaylists() {
     )
 }
 
-/**
- * Adds methods to read the requested media ID and send results through YTM.
- * Hooks the same result method for the main tabs and Podcasts.
- */
 private fun BytecodePatchContext.addAndroidAutoBrowseRequestInterface(
     sendEmptyAndroidAutoMediaItemsMethod: Method,
 ) {
@@ -710,9 +708,8 @@ private fun BytecodePatchContext.addAndroidAutoBrowseRequestInterface(
 }
 
 /**
- * Hooks YTM's decoded media-ID getter for the Podcasts tab added by this patch.
- * The tab's literal `morphe:aa:podcasts` ID is not a Base64-encoded protobuf, so parsing logs a warning.
- * The hook returns null for this ID, matching the getter's result after a failed parse.
+ * YTM's parser does not recognize the Podcasts tab's identifier.
+ * Return null as it would after a failed parse, avoiding a warning when the tab is opened.
  */
 private fun BytecodePatchContext.skipPodcastsMediaIdDecoding(requestedMediaIdField: FieldReference) {
     val decodedMediaIdMethod = decodedMediaIdFingerprint(requestedMediaIdField.definingClass).method
@@ -721,7 +718,7 @@ private fun BytecodePatchContext.skipPodcastsMediaIdDecoding(requestedMediaIdFie
         0,
         """
             iget-object v$mediaIdRegister, p0, $requestedMediaIdField
-            invoke-static/range { v$mediaIdRegister .. v$mediaIdRegister }, $EXTENSION_CLASS->isAndroidAutoPodcastsMediaId(Ljava/lang/String;)Z
+            invoke-static/range { v$mediaIdRegister .. v$mediaIdRegister }, $EXTENSION_CLASS->isPodcastsMediaId(Ljava/lang/String;)Z
             move-result v$mediaIdRegister
             if-eqz v$mediaIdRegister, :resume
             const/4 v$mediaIdRegister, 0x0
@@ -732,8 +729,7 @@ private fun BytecodePatchContext.skipPodcastsMediaIdDecoding(requestedMediaIdFie
 }
 
 /**
- * Calls Java's `handleAndroidAutoPlaylists` before YTM dispatches the request to its content providers.
- * When Java accepts the request, skip YTM's handlers so only Java returns a result.
+ * When the patch handles a page request, skip YTM's handler to avoid returning two results.
  */
 private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
     androidAutoRequestHandlerType: String,
@@ -758,37 +754,37 @@ private fun BytecodePatchContext.hookAndroidAutoPlaylistsRequest(
 
 // endregion
 
-// region Android Auto connections and folder refresh
+// region Android Auto connections and page refresh
 
 /**
- * Hooks successful Library changes and lets Java reload folders through YTM's browser service.
+ * Reloads Android Auto pages after successful Library changes.
  */
-private fun BytecodePatchContext.installAndroidAutoFolderRefresh() {
+private fun BytecodePatchContext.installAndroidAutoBrowseRefresh() {
     // Android Auto requests list updates through MediaBrowserServiceCompat.
     // MediaBrowserService.notifyChildrenChanged does not reach that connection, so refresh through the compat service.
     val serviceSuperclass = classDefBy(MUSIC_BROWSER_SERVICE_CLASS).superclass
         ?: throw PatchException("Could not resolve MusicBrowserService's superclass")
     val baseServiceType = classDefBy(serviceSuperclass).superclass
-        ?: throw PatchException("Could not resolve the browser service base class above $serviceSuperclass")
+        ?: throw PatchException("Could not resolve YTM's service base class above $serviceSuperclass")
     val reloadMethod = mediaBrowserReloadFingerprint(baseServiceType).originalMethod
 
     addAndroidAutoRequestConnectionGetter(reloadMethod)
-    addAndroidAutoFolderReload(baseServiceType, reloadMethod)
+    addAndroidAutoPageReload(baseServiceType, reloadMethod)
     hookLibraryChangeCompletion()
 }
 
-/** Exposes the connection so Java can identify requests that update the same Android Auto folder. */
+/** Identifies the Android Auto connection so refreshes target the right saved page request. */
 private fun BytecodePatchContext.addAndroidAutoRequestConnectionGetter(reloadMethod: Method) {
     val connectionType = reloadMethod.parameterTypes[1].toString()
     // YTM passes the Android Auto connection to the object that returns the list.
-    val folderResultConstructor = reloadMethod.instructions.asSequence()
+    val browseResultConstructor = reloadMethod.instructions.asSequence()
         .mapNotNull { instruction -> instruction.getReference<MethodReference>() }
         .distinct()
         .single { method ->
             method.name == "<init>" && connectionType in method.parameterTypes
         }
-    val folderResultClass = mutableClassDefBy(folderResultConstructor.definingClass)
-    val resultConnectionField = folderResultClass.fields.single { field ->
+    val browseResultClass = mutableClassDefBy(browseResultConstructor.definingClass)
+    val resultConnectionField = browseResultClass.fields.single { field ->
         field.type == connectionType
     }
 
@@ -796,13 +792,13 @@ private fun BytecodePatchContext.addAndroidAutoRequestConnectionGetter(reloadMet
         SendEmptyAndroidAutoMediaItemsFingerprint.originalMethod.parameterTypes.first().toString()
     val androidAutoRequestClass = mutableClassDefBy(androidAutoRequestType)
     // The request can hold other result types; check for the result object that stores the Android Auto connection.
-    val resultBaseType = folderResultClass.superclass
-        ?: throw PatchException("Could not resolve the Android Auto folder result base class")
+    val resultBaseType = browseResultClass.superclass
+        ?: throw PatchException("Could not resolve the Android Auto browse result base class")
     val requestResultField = androidAutoRequestClass.fields.single { field ->
         field.type == resultBaseType
     }
 
-    folderResultClass.accessFlags = folderResultClass.accessFlags.toPublicAccessFlags()
+    browseResultClass.accessFlags = browseResultClass.accessFlags.toPublicAccessFlags()
     resultConnectionField.accessFlags = resultConnectionField.accessFlags.toPublicAccessFlags()
     androidAutoRequestClass.addInterfaceMethod(
         interfaceMethod = extensionInterfaceMethod(
@@ -812,13 +808,13 @@ private fun BytecodePatchContext.addAndroidAutoRequestConnectionGetter(reloadMet
         registerCount = 3,
         instructions = """
             iget-object v0, p0, $requestResultField
-            instance-of v1, v0, ${folderResultClass.type}
+            instance-of v1, v0, ${browseResultClass.type}
             if-eqz v1, :unknown_connection
-            check-cast v0, ${folderResultClass.type}
+            check-cast v0, ${browseResultClass.type}
             iget-object v0, v0, $resultConnectionField
             return-object v0
             :unknown_connection
-            # Without the connection, the patch cannot tell whether two requests update the same Android Auto folder.
+            # Without the connection, the patch cannot tell whether two requests update the same Android Auto list.
             const/4 v0, 0x0
             return-object v0
         """
@@ -826,20 +822,19 @@ private fun BytecodePatchContext.addAndroidAutoRequestConnectionGetter(reloadMet
 }
 
 /**
- * Passes folder requests and their connections to Java's `rememberAndroidAutoSubscription`.
- * Adds `patch_reloadFolder` to repeat those requests through YTM's existing reload method.
+ * Saves page requests so Library changes can refresh Android Auto without reconnecting.
  */
-private fun BytecodePatchContext.addAndroidAutoFolderReload(
+private fun BytecodePatchContext.addAndroidAutoPageReload(
     baseServiceType: String,
     reloadMethod: Method,
 ) {
     val connectionType = reloadMethod.parameterTypes[1].toString()
     val baseServiceClass = mutableClassDefBy(baseServiceType)
-    baseServiceClass.interfaces.add(EXTENSION_ANDROID_AUTO_FOLDER_RELOAD_INTERFACE)
+    baseServiceClass.interfaces.add(EXTENSION_ANDROID_AUTO_PAGE_RELOAD_INTERFACE)
     baseServiceClass.addInterfaceMethod(
         interfaceMethod = extensionInterfaceMethod(
-            EXTENSION_ANDROID_AUTO_FOLDER_RELOAD_INTERFACE,
-            "patch_reloadFolder",
+            EXTENSION_ANDROID_AUTO_PAGE_RELOAD_INTERFACE,
+            "patch_reloadPage",
         ),
         registerCount = 4,
         instructions = """
@@ -848,13 +843,13 @@ private fun BytecodePatchContext.addAndroidAutoFolderReload(
             return-void
         """
     )
-    val rememberSubscriptionMethod = "$EXTENSION_CLASS->rememberAndroidAutoSubscription(" +
-        EXTENSION_ANDROID_AUTO_FOLDER_RELOAD_INTERFACE +
+    val rememberPageRequestMethod = "$EXTENSION_CLASS->rememberPageRequest(" +
+        EXTENSION_ANDROID_AUTO_PAGE_RELOAD_INTERFACE +
         "Ljava/lang/String;Ljava/lang/Object;)V"
     baseServiceClass.findMutableMethodOf(reloadMethod).addInstructions(
         0,
         """
-            invoke-static/range { p0 .. p2 }, $rememberSubscriptionMethod
+            invoke-static/range { p0 .. p2 }, $rememberPageRequestMethod
         """
     )
 }
@@ -892,10 +887,10 @@ private fun BytecodePatchContext.hookLibraryChangeCompletion() {
 
 // endregion
 
-// region Android Auto browse results
+// region Android Auto page contents
 
 /**
- * Passes browse results through Java's `handleAndroidAutoBrowseResult` before YTM sends them to Android Auto.
+ * Adds Podcasts using the podcast lists returned for Home.
  */
 private fun hookAndroidAutoBrowseResults(deliverAndroidAutoMediaItemsMethod: MutableMethod) {
     val handleAndroidAutoBrowseResultMethod = "$EXTENSION_CLASS->handleAndroidAutoBrowseResult(" +
@@ -916,8 +911,7 @@ private fun hookAndroidAutoBrowseResults(deliverAndroidAutoMediaItemsMethod: Mut
 // region Playlist playback
 
 /**
- * Replaces Java's `createPlaylistMediaId` stub with YTM's playlist command builder and media ID encoder.
- * YTM loads the queue when Android Auto plays the resulting media ID.
+ * Uses YTM's playlist playback command so selecting a card loads the playlist's queue.
  */
 private fun BytecodePatchContext.installPlaylistMediaIdBuilder(encodeCommandMediaIdMethod: MethodReference) {
     val commandType = encodeCommandMediaIdMethod.parameterTypes.single().toString()
@@ -927,7 +921,7 @@ private fun BytecodePatchContext.installPlaylistMediaIdBuilder(encodeCommandMedi
         .distinct()
         .single { method -> method.name == "build" && method.parameterTypes.isEmpty() }
     val extensionClass = mutableClassDefBy(EXTENSION_CLASS)
-    val stub = extensionClass.methods.single { it.name == "createPlaylistMediaId" }
+    val stub = extensionClass.methods.single { it.name == "createPlaylistPlaybackId" }
     val method = stub.cloneMutable(additionalRegisters = 7)
     method.addInstructions(
         0,
@@ -956,16 +950,49 @@ private fun BytecodePatchContext.installPlaylistMediaIdBuilder(encodeCommandMedi
 
 // endregion
 
-// region Add the methods declared in the Java interfaces to YTM classes
+// region Search playback
 
-private fun BytecodePatchContext.extensionInterfaceMethod(
+/**
+ * Parses search-result command bytes with YTM's protobuf registry before encoding them for Android Auto.
+ */
+private fun BytecodePatchContext.patchCommandEncoder(encoder: MethodReference) {
+    val commandType = encoder.parameterTypes.single().toString()
+    val defaultInstance = protoDefaultInstanceFingerprint(commandType).matchSingle().instructionMatches.single()
+        .instruction.getReference<FieldReference>()!!
+    val hierarchy = buildSet {
+        var current: String? = commandType
+        while (current != null && add(current)) current = classDefByOrNull(current)?.superclass
+    }
+    val parser = protoParserFingerprint(hierarchy).matchSingle().originalMethod
+    val patchClass = mutableClassDefBy(EXTENSION_CLASS)
+    val stub = patchClass.methods.single { it.name == "encodePlaybackId" }
+    val method = stub.cloneMutable(additionalRegisters = 2)
+    method.addInstructions(0, """
+        sget-object v0, $defaultInstance
+        invoke-static {}, Lcom/google/protobuf/ExtensionRegistryLite;->getGeneratedRegistry()Lcom/google/protobuf/ExtensionRegistryLite;
+        move-result-object v1
+        invoke-static { v0, p0, v1 }, $parser
+        move-result-object v0
+        check-cast v0, $commandType
+        invoke-static { v0 }, $encoder
+        move-result-object v0
+        return-object v0
+    """)
+    patchClass.methods.remove(stub)
+    patchClass.methods.add(method)
+}
+
+// endregion
+
+// region Methods added to YTM classes
+
+internal fun BytecodePatchContext.extensionInterfaceMethod(
     interfaceType: String,
     name: String,
 ) = classDefBy(interfaceType).methods.singleOrNull { method -> method.name == name }
     ?: throw PatchException("Could not resolve $name in $interfaceType")
 
-/** Copies the Java declaration's signature so calls through the interface reach the method installed on YTM. */
-private fun MutableClass.addInterfaceMethod(
+internal fun MutableClass.addInterfaceMethod(
     interfaceMethod: Method,
     registerCount: Int,
     instructions: String,

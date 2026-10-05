@@ -15,6 +15,9 @@ Second \"item\" text"</string>
 
 -->
 <resources>
+    <!-- misc.androidauto.androidAutoPatch -->
+    <string name="morphe_music_android_auto_videos">Videos</string>
+    <string name="morphe_music_android_auto_other_results">Other results</string>
     <!-- app.morphe.patches.music.interaction.jam -->
     <string name="morphe_music_jam_update_host_controls">Update the host’s Jam patch to use pause and resume</string>
     <string name="morphe_music_jam_probe_title">Jam queue sharing</string>
