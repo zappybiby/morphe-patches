@@ -21,7 +21,6 @@ import com.google.common.util.concurrent.ListenableFuture;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -30,8 +29,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
-import java.util.function.Supplier;
 
 import app.morphe.extension.shared.Logger;
 import app.morphe.extension.shared.Utils;
@@ -66,7 +63,6 @@ public final class AndroidAutoSearchPatch {
 
     private static final long TYPING_DELAY_MS = 250;
     private static final long DEADLINE_MS = 8_000;
-    private static final SharedSearchRequests SHARED_SEARCH_REQUESTS = new SharedSearchRequests();
     @Nullable
     private static SearchLoad pendingSearch;
     private static final Map<AndroidAutoSearchRequest, SearchCompletion> searchCompletions = new WeakHashMap<>();
@@ -84,7 +80,7 @@ public final class AndroidAutoSearchPatch {
         SearchLoad previous;
         synchronized (AndroidAutoSearchPatch.class) {
             previous = pendingSearch;
-            if (previous != null && previous.query.equals(request.patch_query())) previous = null;
+            if (previous != null && previous.key.query().equals(request.patch_query())) previous = null;
         }
         // Clearing the query can return through YTM's local-search path before handleSearch runs.
         if (previous != null) previous.finish(Collections.emptyList());
@@ -142,7 +138,7 @@ public final class AndroidAutoSearchPatch {
             if (completion != null) completion.cancelDeadline();
         }
         SearchKey key = searchKey(client, query);
-        SearchLoad load = new SearchLoad(request, key);
+        SearchLoad load;
         SearchLoad previous;
         synchronized (AndroidAutoSearchPatch.class) {
             previous = pendingSearch;
@@ -151,7 +147,7 @@ public final class AndroidAutoSearchPatch {
                 previous.requests.add(request);
                 return true;
             }
-            pendingSearch = load;
+            pendingSearch = load = new SearchLoad(request, key);
         }
         if (previous != null) previous.finish(Collections.emptyList());
         refreshHandler.postDelayed(load.timeout, DEADLINE_MS);
@@ -159,47 +155,43 @@ public final class AndroidAutoSearchPatch {
         return true;
     }
 
-    /** Completes each search once, even when another search shares the phone request. */
+    /** Repeated queries share this load and its deadline; each caller completes once. */
     private static final class SearchLoad {
         final SearchKey key;
         final AtomicBoolean finished = new AtomicBoolean();
-        volatile SharedSearchRequests.PendingSearchHandle pendingSearchHandle;
+        volatile SearchResponses responses;
         final Runnable timeout = () -> {
-            var handle = pendingSearchHandle;
-            try { finish(handle == null ? null : handle.availableResults()); }
+            var pending = responses;
+            try { finish(pending == null ? null : pending.availableResults()); }
             catch (Exception ex) {
                 Logger.printException(() -> "Could not finish Android Auto search", ex);
                 finish(null);
             }
         };
         final List<AndroidAutoSearchRequest> requests = new ArrayList<>();
-        final String query;
         final Runnable submit;
 
         SearchLoad(AndroidAutoSearchRequest request, SearchKey key) {
             this.key = key;
-            this.query = key.query();
             requests.add(request);
-            submit = () -> {
-                BACKGROUND_EXECUTOR.execute(this::start);
-            };
+            submit = () -> BACKGROUND_EXECUTOR.execute(this::start);
         }
 
         void start() {
             if (finished.get()) return;
             try {
                 if (!current(key)) { finish(Collections.emptyList()); return; }
-                listenForResults(requestSearchResults(key));
+                listenForResults(new SearchResponses(key.client(), key.query()));
             } catch (Exception ex) {
                 Logger.printException(() -> "Could not request Android Auto search", ex);
                 finish(null);
             }
         }
 
-        void listenForResults(SharedSearchRequests.PendingSearchHandle searchHandle) {
-            pendingSearchHandle = searchHandle;
-            if (finished.get()) { searchHandle.close(); return; }
-            searchHandle.resultsFuture.whenComplete((playableResults, error) -> {
+        void listenForResults(SearchResponses pending) {
+            responses = pending;
+            if (finished.get()) { pending.resultsFuture.cancel(true); return; }
+            pending.resultsFuture.whenComplete((playableResults, error) -> {
                 if (finished.get()) return;
                 if (error != null) Logger.printException(() -> "Could not load Android Auto search results", error);
                 finish(error == null ? playableResults : null);
@@ -213,11 +205,8 @@ public final class AndroidAutoSearchPatch {
             synchronized (AndroidAutoSearchPatch.class) {
                 if (pendingSearch == this) pendingSearch = null;
             }
-            var searchHandle = pendingSearchHandle;
-            if (searchHandle != null) {
-                if (!searchHandle.resultsFuture.isDone()) searchHandle.resultsFuture.cancel(true);
-                searchHandle.close();
-            }
+            var pending = responses;
+            if (pending != null && !pending.resultsFuture.isDone()) pending.resultsFuture.cancel(true);
             refreshHandler.post(() -> {
                 try { deliver(playableResults); }
                 catch (Exception ex) { Logger.printException(() -> "Could not deliver Android Auto search results", ex); }
@@ -234,7 +223,7 @@ public final class AndroidAutoSearchPatch {
         }
     }
 
-    // Request sharing and cancellation
+    // Request scope and completion
 
     private record SearchKey(String query, PhoneSearchClient client, Object account, String locale) {
         @Override public boolean equals(Object other) {
@@ -253,12 +242,6 @@ public final class AndroidAutoSearchPatch {
 
     private static boolean current(SearchKey key) {
         return key.client() == phoneSearchClient && key.equals(searchKey(key.client(), key.query()));
-    }
-
-    private static SharedSearchRequests.PendingSearchHandle requestSearchResults(SearchKey key) {
-        // Without an account identity, do not share a request with another caller.
-        return SHARED_SEARCH_REQUESTS.acquire(key.account() == null ? null : key,
-                () -> new SearchResponses(key.client(), key.query()));
     }
 
     /** Keeps catalog or upload results when the other request fails or exceeds the Auto deadline. */
@@ -334,63 +317,4 @@ public final class AndroidAutoSearchPatch {
         }
     }
 
-    /** Shares unfinished searches only within the same client, account, and locale. */
-    private static final class SharedSearchRequests {
-        private final Map<SearchKey, SharedSearch> pendingSearches = new HashMap<>();
-
-        private final class SharedSearch {
-            final SearchKey key;
-            final SearchResponses responses;
-            final CompletableFuture<List<MediaBrowserCompat.MediaItem>> resultsFuture;
-            int waitingSearchCount;
-
-            SharedSearch(SearchKey key, SearchResponses responses) {
-                this.key = key;
-                this.responses = responses;
-                this.resultsFuture = responses.resultsFuture;
-            }
-        }
-
-        final class PendingSearchHandle implements AutoCloseable {
-            final CompletableFuture<List<MediaBrowserCompat.MediaItem>> resultsFuture;
-            private SharedSearch sharedSearch;
-
-            PendingSearchHandle(SharedSearch sharedSearch) {
-                this.sharedSearch = sharedSearch;
-                sharedSearch.waitingSearchCount++;
-                // One search timing out must not cancel another search waiting for the same response.
-                // Cancel the phone request only when no searches are waiting for it.
-                resultsFuture = sharedSearch.resultsFuture.thenApply(Function.identity());
-            }
-
-            @Nullable
-            List<MediaBrowserCompat.MediaItem> availableResults() {
-                synchronized (SharedSearchRequests.this) {
-                    return sharedSearch == null ? null : sharedSearch.responses.availableResults();
-                }
-            }
-
-            @Override
-            public void close() {
-                SharedSearch releasedSearch;
-                synchronized (SharedSearchRequests.this) {
-                    releasedSearch = sharedSearch;
-                    if (releasedSearch == null) return;
-                    sharedSearch = null;
-                    if (--releasedSearch.waitingSearchCount != 0) return;
-                    pendingSearches.remove(releasedSearch.key, releasedSearch);
-                }
-                if (!releasedSearch.resultsFuture.isDone()) releasedSearch.resultsFuture.cancel(true);
-            }
-        }
-
-        synchronized PendingSearchHandle acquire(@Nullable SearchKey key, Supplier<SearchResponses> start) {
-            SharedSearch sharedSearch = key == null ? null : pendingSearches.get(key);
-            if (sharedSearch == null || sharedSearch.resultsFuture.isDone()) {
-                sharedSearch = new SharedSearch(key, start.get());
-                if (key != null) pendingSearches.put(key, sharedSearch);
-            }
-            return new PendingSearchHandle(sharedSearch);
-        }
-    }
 }

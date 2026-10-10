@@ -968,10 +968,12 @@ public final class AndroidAutoPatch {
                 LibraryFolder folder = podcastPage ? null : LibraryFolder.valueOf(id.substring(LIBRARY_PREFIX.length()));
                 String browseId = podcastPage ? Uri.decode(id.substring(PODCAST_COLLECTION_PREFIX.length())) : folder.browseId;
                 PhoneBrowseClient client = (PhoneBrowseClient) scope.client();
-                await(requestItems(id, scope,
-                        () -> client.patch_requestBrowse(browseId, BACKGROUND_EXECUTOR),
-                        response -> AndroidAutoHomeResponseParser.collection(response.patch_responseBytes()),
-                        items -> podcastPage ? mediaItems(items, 1) : libraryMediaItems(folder, items)));
+                await(REQUESTS.acquire(scope.account() == null ? null : new RequestKey(id, scope),
+                        () -> transformFuture(client.patch_requestBrowse(browseId, BACKGROUND_EXECUTOR),
+                                response -> {
+                                    var items = AndroidAutoHomeResponseParser.collection(response.patch_responseBytes());
+                                    return podcastPage ? mediaItems(items, 1) : libraryMediaItems(folder, items);
+                                }, BACKGROUND_EXECUTOR)));
             } catch (Exception ex) {
                 Logger.printException(() -> "Could not load Android Auto Library collection", ex);
                 finish(Collections.emptyList());
@@ -1123,15 +1125,6 @@ public final class AndroidAutoPatch {
             catch (Exception ex) { result.completeExceptionally(ex); }
         }, executor);
         return result;
-    }
-
-    private static <T> Requests<RequestKey, List<MediaBrowserCompat.MediaItem>>.Lease requestItems(
-            String key, Scope scope, Supplier<ListenableFuture<T>> fetch,
-            Function<T, List<AndroidAutoHomeResponseParser.Item>> parse,
-            Function<List<AndroidAutoHomeResponseParser.Item>, List<MediaBrowserCompat.MediaItem>> convert) {
-        return REQUESTS.acquire(scope.account() == null ? null : new RequestKey(key, scope),
-                () -> transformFuture(fetch.get(),
-                        response -> convert.apply(parse.apply(response)), BACKGROUND_EXECUTOR));
     }
 
     /** Each caller completes once and has its own timeout, even when requests are shared. */
