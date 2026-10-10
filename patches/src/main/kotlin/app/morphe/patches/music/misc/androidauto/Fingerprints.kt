@@ -64,11 +64,11 @@ private const val GRID_PHONE_BROWSE_ITEM_PRESENT_FLAG = 0x40000L
 private const val NEXT_COMMAND_PRESENT_FLAG = 0x1L
 private const val RELOAD_COMMAND_PRESENT_FLAG = 0x2L
 
-// Identify the Playlists folder and how YTM returns its contents to Android Auto
+// Identify the link to Playlists and how YTM returns its contents to Android Auto
 
 /**
- * Matches YTM's getter for the decoded media-ID protobuf.
- * It unwraps the lazy decoding result and returns null if that result contains a failure.
+ * Reads the action stored in an Android Auto item's identifier, such as opening a page or playing music.
+ * YTM returns null when it cannot decode the identifier, including those for pages added by this patch.
  */
 internal fun decodedMediaIdFingerprint(mediaIdType: String) = Fingerprint(
     definingClass = mediaIdType,
@@ -89,7 +89,7 @@ internal fun decodedMediaIdFingerprint(mediaIdType: String) = Fingerprint(
 
 /**
  * Matches the constructor that stores an Android Auto item's ID, title, and artwork.
- * [BuildAndroidAutoMediaItemFingerprint] uses it to find where YTM creates the Playlists folder;
+ * [BuildAndroidAutoMediaItemFingerprint] uses it to find where YTM creates the link to Playlists;
  * [androidAutoMediaDescriptionFingerprint] uses it to find YTM's artwork conversion.
  */
 internal val MEDIA_DESCRIPTION_CONSTRUCTOR_CALL = methodCall(
@@ -108,7 +108,7 @@ internal val MEDIA_DESCRIPTION_CONSTRUCTOR_CALL = methodCall(
     )
 )
 
-/** Creates Android Auto media items, including the Playlists folder. */
+/** Creates Android Auto entries, including the link to Playlists. */
 internal object BuildAndroidAutoMediaItemFingerprint : Fingerprint(
     returnType = "Lj$/util/Optional;",
     parameters = listOf("L", "Ljava/util/Set;", "L"),
@@ -120,7 +120,7 @@ internal object BuildAndroidAutoMediaItemFingerprint : Fingerprint(
     )
 )
 
-/** Returns an empty Android Auto list for an unrecognized media ID. */
+/** Returns an empty list when YTM does not recognize the page Android Auto requested. */
 internal object SendEmptyAndroidAutoMediaItemsFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC, AccessFlags.FINAL),
     returnType = "V",
@@ -130,9 +130,12 @@ internal object SendEmptyAndroidAutoMediaItemsFingerprint : Fingerprint(
     )
 )
 
-// Locate YTM's phone browse client and request methods
+// Locate YTM's phone request clients and browse methods
 
-/** MusicBrowserService initialization, where the patch obtains YTM's phone browse client. */
+/**
+ * Initializes MusicBrowserService, which serves YTM's pages and search results to Android Auto.
+ * The patch obtains the phone request clients here so they are available when Auto connects.
+ */
 internal fun musicBrowserServiceSuperclassOnCreateFingerprint(
     musicBrowserServiceType: String,
     generatedComponentType: String
@@ -157,8 +160,8 @@ internal fun musicBrowserServiceSuperclassOnCreateFingerprint(
     )
 )
 
-/** Obtains YTM's object for sending Library and playlist requests. */
-internal fun phoneBrowseClientProviderFingerprint(phoneBrowseClientType: String) = Fingerprint(
+/** Obtains YTM's object for sending phone browse or search requests, depending on the supplied type. */
+internal fun phoneClientProviderFingerprint(phoneClientType: String) = Fingerprint(
     filters = listOf(
         fieldAccess(opcode = Opcode.IGET_OBJECT),
         methodCall(
@@ -168,7 +171,7 @@ internal fun phoneBrowseClientProviderFingerprint(phoneBrowseClientType: String)
             location = MatchAfterImmediately()
         ),
         opcode(Opcode.MOVE_RESULT_OBJECT, location = MatchAfterImmediately()),
-        checkCast(phoneBrowseClientType, location = MatchAfterImmediately())
+        checkCast(phoneClientType, location = MatchAfterImmediately())
     )
 )
 
@@ -191,7 +194,7 @@ internal object CreatePhoneBrowseRequestFingerprint : Fingerprint(
 
 /**
  * Playlist search creates a Browse request, sets its page ID and empty tracking data, then sends it.
- * The Library request bridge reuses these four methods with the Library's page ID.
+ * The phone browse bridge reuses these four methods with the requested page ID.
  */
 internal object PhoneBrowseRequestCallsFingerprint : Fingerprint(
     filters = listOf(
@@ -218,6 +221,22 @@ internal object PhoneBrowseRequestCallsFingerprint : Fingerprint(
             opcode = Opcode.INVOKE_VIRTUAL,
             parameters = listOf("L", "Ljava/util/concurrent/Executor;"),
             returnType = "Lcom/google/common/util/concurrent/ListenableFuture;"
+        )
+    )
+)
+
+/** Identifies the continuation token field in the phone browse request's diagnostic string. */
+internal fun phoneBrowseContinuationFingerprint(requestType: String) = Fingerprint(
+    definingClass = requestType,
+    returnType = "Ljava/lang/String;",
+    parameters = emptyList(),
+    strings = listOf("browseId"),
+    filters = listOf(
+        string("continuation"),
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            type = "Ljava/lang/String;",
+            location = MatchAfterWithin(2)
         )
     )
 )
