@@ -168,13 +168,13 @@ final class AndroidAutoHomeResponseParser {
         }
     }
 
-    private static String textRuns(AndroidAutoProtoMessage text) {
+    static String textRuns(AndroidAutoProtoMessage text) {
         StringBuilder value = new StringBuilder();
         for (AndroidAutoProtoMessage run : text.repeatedMessageField(1)) value.append(run.stringField(1));
         return value.toString();
     }
 
-    private static String artwork(AndroidAutoProtoMessage thumbnails) {
+    static String artwork(AndroidAutoProtoMessage thumbnails) {
         String url = "";
         for (AndroidAutoProtoMessage thumbnail : thumbnails.repeatedMessageField(1)) {
             String candidate = thumbnail.stringField(1);
@@ -221,7 +221,7 @@ final class AndroidAutoHomeResponseParser {
     }
 
     /** Reads an existing play command from the menu, avoiding a separate request for playback details. */
-    private static AndroidAutoProtoMessage menuPlayCommand(AndroidAutoProtoMessage menu) {
+    static AndroidAutoProtoMessage menuPlayCommand(AndroidAutoProtoMessage menu) {
         for (AndroidAutoProtoMessage entry : menu.repeatedMessageField(1)) {
             AndroidAutoProtoMessage command = entry.messagePath(66_441_108, 3);
             if (isPlayable(command)) return command;
@@ -235,7 +235,7 @@ final class AndroidAutoHomeResponseParser {
         return new AndroidAutoProtoMessage(new byte[0]);
     }
 
-    private static AndroidAutoProtoMessage episodePlayCommand(AndroidAutoProtoMessage menu) {
+    static AndroidAutoProtoMessage episodePlayCommand(AndroidAutoProtoMessage menu) {
         // Episode menus wrap Watch in Play next or Add to queue. Keep its context without the queue-insertion action.
         for (AndroidAutoProtoMessage entry : menu.repeatedMessageField(1)) {
             for (int renderer : new int[]{66_441_155, 77_258_115}) {

@@ -19,7 +19,9 @@ import androidx.annotation.Nullable;
 
 import com.google.common.util.concurrent.ListenableFuture;
 
+import java.io.ByteArrayOutputStream;
 import java.lang.ref.WeakReference;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -588,6 +590,36 @@ public final class AndroidAutoPatch {
         return null;
     }
 
+    /** Ordered playlist commands for podcasts and uploaded music. */
+    static byte[] orderedPlaylistCommand(String playlistId, boolean uploaded) {
+        if (playlistId.isEmpty()) return new byte[0];
+        // Auto's ordered WatchPlaylist action distinguishes catalog playlists from uploads.
+        byte[] playbackOptions = {0x10, 0x02};
+        byte[] collectionOptions = {0x10, (byte) (uploaded ? 1 : 2)};
+        return message(AndroidAutoHomeResponseParser.WATCH_PLAYLIST,
+                message(1, playlistId.getBytes(StandardCharsets.UTF_8)),
+                message(7, playbackOptions),
+                message(96_593_618, message(96_593_634, message(2, collectionOptions))));
+    }
+
+    private static byte[] message(int field, byte[]... values) {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        int size = 0;
+        for (byte[] value : values) size += value.length;
+        writeVarint(output, (field << 3) | 2);
+        writeVarint(output, size);
+        for (byte[] value : values) output.write(value, 0, value.length);
+        return output.toByteArray();
+    }
+
+    private static void writeVarint(ByteArrayOutputStream output, int value) {
+        while ((value & ~0x7F) != 0) {
+            output.write((value & 0x7F) | 0x80);
+            value >>>= 7;
+        }
+        output.write(value);
+    }
+
     // Refresh after Library changes
 
     public static synchronized void rememberAndroidAutoSubscription(AndroidAutoFolderReload browserService,
@@ -787,7 +819,7 @@ public final class AndroidAutoPatch {
                 PhoneBrowseClient client = (PhoneBrowseClient) scope.client();
                 String key = continuation.isEmpty() ? browseId : "continuation:" + continuation;
                 var work = HOME_PAGES.acquire(scope.account() == null ? null : new RequestKey(key, scope),
-                        () -> AndroidAutoFutures.transform(continuation.isEmpty()
+                        () -> transformFuture(continuation.isEmpty()
                                         ? client.patch_requestBrowse(browseId, BACKGROUND_EXECUTOR)
                                         : client.patch_requestBrowseContinuation(continuation, BACKGROUND_EXECUTOR),
                                 response -> AndroidAutoHomeResponseParser.homePage(response.patch_responseBytes()),
@@ -1029,7 +1061,7 @@ public final class AndroidAutoPatch {
                     .messageField(AndroidAutoHomeResponseParser.BROWSE).stringField(2);
             String id;
             if (browseId.startsWith("FEmusic_library_privately_owned_release_detail") && !playlistId.isEmpty()) {
-                id = encodeCommand(AndroidAutoPlaybackCommands.orderedPlaylist(playlistId, true));
+                id = encodeCommand(orderedPlaylistCommand(playlistId, true));
             } else {
                 id = !row.playable() && !playlistId.isEmpty() && !playlistId.startsWith("RD")
                         ? createPlaylistMediaId(playlistId) : encodeCommand(command);
@@ -1078,12 +1110,27 @@ public final class AndroidAutoPatch {
         }
     }
 
+    // Avoid Futures.transform: YTM's bundled Guava can throw NoSuchMethodError.
+    static <T, R> CompletableFuture<R> transformFuture(ListenableFuture<T> source,
+                                                      Function<T, R> convert, Executor executor) {
+        CompletableFuture<R> result = new CompletableFuture<>();
+        result.whenComplete((value, error) -> {
+            if (result.isCancelled()) source.cancel(true);
+        });
+        source.addListener(() -> {
+            if (result.isDone()) return;
+            try { result.complete(convert.apply(source.get())); }
+            catch (Exception ex) { result.completeExceptionally(ex); }
+        }, executor);
+        return result;
+    }
+
     private static <T> Requests<RequestKey, List<MediaBrowserCompat.MediaItem>>.Lease requestItems(
             String key, Scope scope, Supplier<ListenableFuture<T>> fetch,
             Function<T, List<AndroidAutoHomeResponseParser.Item>> parse,
             Function<List<AndroidAutoHomeResponseParser.Item>, List<MediaBrowserCompat.MediaItem>> convert) {
         return REQUESTS.acquire(scope.account() == null ? null : new RequestKey(key, scope),
-                () -> AndroidAutoFutures.transform(fetch.get(),
+                () -> transformFuture(fetch.get(),
                         response -> convert.apply(parse.apply(response)), BACKGROUND_EXECUTOR));
     }
 
@@ -1202,7 +1249,7 @@ public final class AndroidAutoPatch {
         for (var searchResult : groupedResults) {
             byte[] playCommandBytes = searchResult.playCommandBytes();
             var playCommand = new AndroidAutoProtoMessage(playCommandBytes);
-            if (!AndroidAutoResponseParser.hasPlaybackAction(playCommand)) continue;
+            if (!AndroidAutoHomeResponseParser.isPlayable(playCommand)) continue;
             String playlistId = playCommand.messageField(AndroidAutoResponseParser.WATCH_PLAYLIST).stringField(1);
             // A menu's playlist action may shuffle; use ordered playback for albums and playlists.
             // Preserve YTM's "Start radio" action, which plays a generated mix.

@@ -7,6 +7,12 @@
 
 package app.morphe.extension.music.patches;
 
+import static app.morphe.extension.music.patches.AndroidAutoHomeResponseParser.artwork;
+import static app.morphe.extension.music.patches.AndroidAutoHomeResponseParser.episodePlayCommand;
+import static app.morphe.extension.music.patches.AndroidAutoHomeResponseParser.isPlayable;
+import static app.morphe.extension.music.patches.AndroidAutoHomeResponseParser.menuPlayCommand;
+import static app.morphe.extension.music.patches.AndroidAutoHomeResponseParser.textRuns;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -125,17 +131,17 @@ final class AndroidAutoResponseParser {
         for (AndroidAutoProtoMessage shelfItemMessage : shelfMessage.repeatedMessageField(2)) {
             AndroidAutoProtoMessage searchResultMessage = shelfItemMessage.messageField(161_429_595);
             AndroidAutoProtoMessage tapCommand = searchResultMessage.messageField(5);
-            boolean tapStartsPlayback = hasPlaybackAction(tapCommand);
+            boolean tapStartsPlayback = isPlayable(tapCommand);
             String title = textRuns(searchResultMessage.messageField(3));
             if (title.isEmpty() || (!tapStartsPlayback && tapCommand.messageField(BROWSE).isEmpty())) continue;
             // If tapping opens a page on the phone, use its menu's play action.
             AndroidAutoProtoMessage menuMessage = searchResultMessage.messagePath(9, 66_439_850);
             AndroidAutoProtoMessage playCommand = tapStartsPlayback ? tapCommand : menuPlayCommand(menuMessage);
             ResultCategory category = resultCategory(tapCommand);
-            if (!hasPlaybackAction(playCommand) && category == ResultCategory.EPISODES)
+            if (!isPlayable(playCommand) && category == ResultCategory.EPISODES)
                 playCommand = episodePlayCommand(menuMessage);
             boolean podcast = category == ResultCategory.PODCASTS;
-            if (!hasPlaybackAction(playCommand) && podcast) playCommand = podcastPlayCommand(tapCommand);
+            if (!isPlayable(playCommand) && podcast) playCommand = podcastPlayCommand(tapCommand);
             boolean uploadedCollection = category == ResultCategory.UPLOADED_ALBUMS
                     || category == ResultCategory.UPLOADED_ARTISTS;
             if (uploadedCollection) playCommand = playlistPlayCommand(
@@ -147,28 +153,13 @@ final class AndroidAutoResponseParser {
         }
     }
 
-    private static String textRuns(AndroidAutoProtoMessage textMessage) {
-        StringBuilder value = new StringBuilder();
-        for (AndroidAutoProtoMessage textRun : textMessage.repeatedMessageField(1)) value.append(textRun.stringField(1));
-        return value.toString();
-    }
-
-    private static String artwork(AndroidAutoProtoMessage thumbnailsMessage) {
-        String url = "";
-        for (AndroidAutoProtoMessage thumbnailMessage : thumbnailsMessage.repeatedMessageField(1)) {
-            String candidate = thumbnailMessage.stringField(1);
-            if (candidate.startsWith("https://")) url = candidate;
-        }
-        return url;
-    }
-
     private static void addSearchResult(List<SearchResult> results, AndroidAutoProtoMessage searchResultMessage,
                                         int tapCommandField, boolean isTopResult) {
         if (searchResultMessage.isEmpty()) return;
         boolean hasTopResultButtons = tapCommandField == TOP_RESULT_TAP_COMMAND_FIELD;
         String title = searchResultMessage.stringField(2);
         AndroidAutoProtoMessage tapCommand = searchResultMessage.messagePath(tapCommandField, INNERTUBE_COMMAND);
-        boolean tapStartsPlayback = hasPlaybackAction(tapCommand);
+        boolean tapStartsPlayback = isPlayable(tapCommand);
         if (title.isEmpty() || (!tapStartsPlayback && tapCommand.messageField(BROWSE).isEmpty())) return;
         String url = artwork(searchResultMessage.messagePath(1, 1));
         String subtitle = searchResultMessage.stringField(3);
@@ -183,15 +174,15 @@ final class AndroidAutoResponseParser {
             if (hasTopResultButtons) {
                 for (AndroidAutoProtoMessage buttonMessage : searchResultMessage.messageField(14).repeatedMessageField(1)) {
                     AndroidAutoProtoMessage buttonCommand = buttonMessage.messagePath(2, 6, INNERTUBE_COMMAND);
-                    if (hasPlaybackAction(buttonCommand)) { playCommand = buttonCommand; break; }
+                    if (isPlayable(buttonCommand)) { playCommand = buttonCommand; break; }
                 }
             }
-            if (!hasPlaybackAction(playCommand) && category == ResultCategory.EPISODES)
+            if (!isPlayable(playCommand) && category == ResultCategory.EPISODES)
                 playCommand = episodePlayCommand(menuMessage);
             subtitle = podcastSubtitle(menuMessage, category, subtitle);
         }
         boolean podcast = category == ResultCategory.PODCASTS;
-        if (!hasPlaybackAction(playCommand) && podcast) playCommand = podcastPlayCommand(tapCommand);
+        if (!isPlayable(playCommand) && podcast) playCommand = podcastPlayCommand(tapCommand);
         boolean uploadedCollection = category == ResultCategory.UPLOADED_ALBUMS
                 || category == ResultCategory.UPLOADED_ARTISTS;
         if (uploadedCollection) playCommand = playlistPlayCommand(
@@ -237,50 +228,13 @@ final class AndroidAutoResponseParser {
         return ResultCategory.OTHER;
     }
 
-    static boolean hasPlaybackAction(AndroidAutoProtoMessage command) {
-        AndroidAutoProtoMessage watch = command.messageField(WATCH);
-        return !watch.stringField(1).isEmpty() || !watch.stringField(2).isEmpty()
-                || !command.messageField(WATCH_PLAYLIST).stringField(1).isEmpty();
-    }
-
     private static AndroidAutoProtoMessage podcastPlayCommand(AndroidAutoProtoMessage tapCommand) {
         String browseId = tapCommand.messageField(BROWSE).stringField(2);
         return playlistPlayCommand(browseId.substring(4), false);
     }
 
     private static AndroidAutoProtoMessage playlistPlayCommand(String playlistId, boolean uploaded) {
-        return new AndroidAutoProtoMessage(AndroidAutoPlaybackCommands.orderedPlaylist(playlistId, uploaded));
-    }
-
-    /** Finds a menu play command when the result's tap opens a page instead of starting playback. */
-    private static AndroidAutoProtoMessage menuPlayCommand(AndroidAutoProtoMessage menuMessage) {
-        for (AndroidAutoProtoMessage menuEntryMessage : menuMessage.repeatedMessageField(1)) {
-            AndroidAutoProtoMessage playCommand = menuEntryMessage.messagePath(66_441_108, 3);
-            if (hasPlaybackAction(playCommand)) return playCommand;
-            for (AndroidAutoProtoMessage buttonMessage : menuEntryMessage.messagePath(ELEMENT_RENDERER, COMPONENT_RENDERER, 1,
-                    COMPONENT_DATA_MESSAGE, 5, 33_556_355).repeatedMessageField(4)) {
-                for (AndroidAutoProtoMessage actionMessage : buttonMessage.messagePath(3, 170_382_688).repeatedMessageField(1)) {
-                    playCommand = actionMessage.messageField(INNERTUBE_COMMAND);
-                    if (hasPlaybackAction(playCommand)) return playCommand;
-                }
-            }
-        }
-        return new AndroidAutoProtoMessage(new byte[0]);
-    }
-
-    private static AndroidAutoProtoMessage episodePlayCommand(AndroidAutoProtoMessage menuMessage) {
-        for (AndroidAutoProtoMessage menuEntryMessage : menuMessage.repeatedMessageField(1)) {
-            // Episode menus put the Watch command inside Play next or Add to queue.
-            // Keep its playback context, but omit the wrapper that specifies queue insertion.
-            for (int menuRenderer : new int[]{66_441_155, 77_258_115}) {
-                for (AndroidAutoProtoMessage queueItem : menuEntryMessage.messagePath(menuRenderer, 3, 163_162_354)
-                        .repeatedMessageField(1)) {
-                    AndroidAutoProtoMessage playCommand = queueItem.messageField(4);
-                    if (!playCommand.messageField(WATCH).stringField(1).isEmpty()) return playCommand;
-                }
-            }
-        }
-        return new AndroidAutoProtoMessage(new byte[0]);
+        return new AndroidAutoProtoMessage(AndroidAutoPatch.orderedPlaylistCommand(playlistId, uploaded));
     }
 
 }

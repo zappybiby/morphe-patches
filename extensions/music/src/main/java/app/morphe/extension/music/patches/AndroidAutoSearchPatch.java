@@ -10,6 +10,7 @@ package app.morphe.extension.music.patches;
 import static app.morphe.extension.music.patches.AndroidAutoPatch.BACKGROUND_EXECUTOR;
 import static app.morphe.extension.music.patches.AndroidAutoPatch.createPlayableSearchResults;
 import static app.morphe.extension.music.patches.AndroidAutoPatch.refreshHandler;
+import static app.morphe.extension.music.patches.AndroidAutoPatch.transformFuture;
 
 import android.support.v4.media.MediaBrowserCompat;
 
@@ -281,7 +282,7 @@ public final class AndroidAutoSearchPatch {
         private static CompletableFuture<List<AndroidAutoResponseParser.SearchResult>> request(
                 PhoneSearchClient client, String query, boolean uploaded) {
             try {
-                var navigation = AndroidAutoFutures.transform(
+                var navigation = transformFuture(
                         client.patch_search(query, uploaded, null, BACKGROUND_EXECUTOR),
                         PhoneSearchResponse::patch_searchResponseBytes, BACKGROUND_EXECUTOR);
                 AtomicReference<CompletableFuture<List<AndroidAutoResponseParser.SearchResult>>> tabRequest =
@@ -292,7 +293,7 @@ public final class AndroidAutoSearchPatch {
                     if (params.isEmpty()) return CompletableFuture.completedFuture(
                             AndroidAutoResponseParser.parseSearchResults(response, uploaded));
                     // The uploaded request type exposes the tab; its endpoint selects the account's uploads.
-                    var tab = AndroidAutoFutures.transform(
+                    var tab = transformFuture(
                             client.patch_search(query, true, params, BACKGROUND_EXECUTOR),
                             page -> AndroidAutoResponseParser.parseSearchResults(page.patch_searchResponseBytes(), true),
                             BACKGROUND_EXECUTOR);
