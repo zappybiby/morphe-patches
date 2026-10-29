@@ -128,8 +128,8 @@ public final class ClassicSwipeController extends BaseGestureController {
 
         final boolean consumed = applySwipeAction(from, distanceX, distanceY);
         if (consumed) {
-            // If resizing lets swipe controls consume a gesture that started outside a swipe zone,
-            // onScroll then cancels the player's touch stream. Replay DOWN if another finger joins.
+            // If the player resizes, swipe controls can take over a swipe that started outside a zone.
+            // The player then gets CANCEL, so send DOWN again if a second finger touches the screen.
             shouldReplayDownEvent = true;
         }
         return consumed;
