@@ -129,7 +129,8 @@ public final class ClassicSwipeController extends BaseGestureController {
         final boolean consumed = applySwipeAction(from, distanceX, distanceY);
         if (consumed) {
             // If the player resizes, swipe controls can take over a swipe that started outside a zone.
-            // The player then gets CANCEL, so send DOWN again if a second finger touches the screen.
+            // YouTube then stops tracking the first finger. If a second finger touches the screen,
+            // resend the first finger's DOWN event so YouTube can track both fingers.
             shouldReplayDownEvent = true;
         }
         return consumed;
