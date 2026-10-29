@@ -33,7 +33,7 @@ public final class ClassicSwipeController extends BaseGestureController {
     @Nullable
     private MotionEvent lastOnDownEvent;
 
-    private boolean lastOnDownWasConsumed;
+    private boolean shouldReplayDownEvent;
 
     /**
      * @param controller Reference to the main swipe controller.
@@ -53,10 +53,10 @@ public final class ClassicSwipeController extends BaseGestureController {
     @Override
     protected boolean shouldDropMotion(MotionEvent motionEvent) {
         // Leave gestures with more than one pointer to the player.
-        // Replay the initial DOWN only if swipe controls consumed it.
+        // Replay DOWN if swipe controls withheld it or cancelled the player's touch stream.
         if (motionEvent.getPointerCount() > 1) {
             if (lastOnDownEvent != null) {
-                if (lastOnDownWasConsumed) {
+                if (shouldReplayDownEvent) {
                     controller.dispatchDownstreamTouchEvent(lastOnDownEvent);
                 }
                 lastOnDownEvent.recycle();
@@ -87,8 +87,8 @@ public final class ClassicSwipeController extends BaseGestureController {
         lastOnDownEvent = MotionEvent.obtain(motionEvent);
 
         // must be inside swipe zone
-        lastOnDownWasConsumed = isInSwipeZone(motionEvent);
-        return lastOnDownWasConsumed;
+        shouldReplayDownEvent = isInSwipeZone(motionEvent);
+        return shouldReplayDownEvent;
     }
 
     @Override
@@ -126,6 +126,11 @@ public final class ClassicSwipeController extends BaseGestureController {
         // cancel if the swipe does not belong to any zone
         if (!shouldForceInterceptEvents()) return false;
 
-        return applySwipeAction(from, distanceX, distanceY);
+        final boolean consumed = applySwipeAction(from, distanceX, distanceY);
+        if (consumed) {
+            // onScroll cancels the player's touch stream when this swipe is consumed.
+            shouldReplayDownEvent = true;
+        }
+        return consumed;
     }
 }
