@@ -48,6 +48,8 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
      */
     private boolean didCancelDownstream;
 
+    private boolean hasDownEvent;
+
     /**
      * @param controller Reference to the main swipe controller.
      */
@@ -73,18 +75,20 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
     public boolean submitTouchEvent(MotionEvent motionEvent) {
         SwipeControlsConfigurationProvider config = controller.getConfig();
 
-        // Ignore if swipe is disabled.
-        if (!config.isSwipeControlsEnabled()) {
+        // Cancel pending callbacks when swipe controls stop handling a gesture.
+        if (!config.isSwipeControlsEnabled()
+                || (controller.isStatusBarVisible() && !controller.isInSplitScreenMode())
+                || (config.shouldIgnoreSwipesWhenLocked() && SwipeControlsHostActivity.isPlayerLocked())) {
+            cancelGesture(motionEvent);
             return false;
         }
 
-        // Ignore if status bar is visible (unless the screen is shared with another app).
-        if (controller.isStatusBarVisible() && !controller.isInSplitScreenMode()) {
-            return false;
-        }
-
-        // Ignore if the native lock screen is engaged.
-        if (config.shouldIgnoreSwipesWhenLocked() && SwipeControlsHostActivity.isPlayerLocked()) {
+        if (motionEvent.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            if (hasDownEvent) {
+                cancelGesture(motionEvent);
+            }
+            hasDownEvent = true;
+        } else if (!hasDownEvent) {
             return false;
         }
 
@@ -97,14 +101,15 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
             me.setAction(MotionEvent.ACTION_CANCEL);
         }
 
-        // Send the event to the detector if we force intercept events, the event is always consumed.
-        final boolean consumed = detector.onTouchEvent(me) || shouldForceInterceptEvents();
+        // Keep handling the gesture after a swipe actually takes over from the player.
+        final boolean consumed = detector.onTouchEvent(me) || didCancelDownstream;
 
         // Evaluate swipe zone before recycling.
         final boolean inSwipeZone = isInSwipeZone(me);
 
         // Invoke the custom onUp handler.
         if (me.getAction() == MotionEvent.ACTION_UP || me.getAction() == MotionEvent.ACTION_CANCEL) {
+            hasDownEvent = false;
             onUp(me);
         }
 
@@ -113,6 +118,16 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
 
         // Do not consume dropped events or events outside any swipe zone.
         return !dropped && consumed && inSwipeZone;
+    }
+
+    private void cancelGesture(MotionEvent motionEvent) {
+        if (!hasDownEvent) return;
+        hasDownEvent = false;
+        MotionEvent cancelEvent = MotionEvent.obtain(motionEvent);
+        cancelEvent.setAction(MotionEvent.ACTION_CANCEL);
+        detector.onTouchEvent(cancelEvent);
+        onUp(cancelEvent);
+        cancelEvent.recycle();
     }
 
     /**
@@ -160,11 +175,6 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
     protected SwipeDirection getCurrentSwipe() {
         return swipeDetector.getCurrentSwipe();
     }
-
-    /**
-     * Whether {@link #submitTouchEvent} should force-intercept all touch events.
-     */
-    protected abstract boolean shouldForceInterceptEvents();
 
     /**
      * Checks if the provided motion event is in any active swipe zone.

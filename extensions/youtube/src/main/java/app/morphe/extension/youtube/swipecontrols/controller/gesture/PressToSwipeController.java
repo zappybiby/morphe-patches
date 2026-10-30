@@ -14,7 +14,6 @@ import android.view.MotionEvent;
 
 import androidx.annotation.Nullable;
 
-import app.morphe.extension.youtube.swipecontrols.SwipeControlsConfigurationProvider.SwipeZoneAction;
 import app.morphe.extension.youtube.swipecontrols.SwipeControlsHostActivity;
 import app.morphe.extension.youtube.swipecontrols.controller.gesture.core.BaseGestureController;
 import app.morphe.extension.youtube.swipecontrols.misc.Point;
@@ -35,12 +34,6 @@ public final class PressToSwipeController extends BaseGestureController {
      */
     public PressToSwipeController(SwipeControlsHostActivity controller) {
         super(controller);
-    }
-
-    @Override
-    protected boolean shouldForceInterceptEvents() {
-        if (swipeSessionOrigin == null) return false;
-        return swipeActionAt(swipeSessionOrigin, getCurrentSwipe()) != SwipeZoneAction.OFF;
     }
 
     @Override
