@@ -33,6 +33,8 @@ public final class ClassicSwipeController extends BaseGestureController {
     @Nullable
     private MotionEvent lastOnDownEvent;
 
+    private boolean lastOnDownWasConsumed;
+
     /**
      * @param controller Reference to the main swipe controller.
      */
@@ -83,7 +85,8 @@ public final class ClassicSwipeController extends BaseGestureController {
         lastOnDownEvent = MotionEvent.obtain(motionEvent);
 
         // must be inside swipe zone
-        return isInSwipeZone(motionEvent);
+        lastOnDownWasConsumed = isInSwipeZone(motionEvent);
+        return lastOnDownWasConsumed;
     }
 
     @Override
@@ -118,8 +121,14 @@ public final class ClassicSwipeController extends BaseGestureController {
     protected boolean onSwipe(MotionEvent from, MotionEvent to, double distanceX, double distanceY) {
         // cancel if not fullscreen or multi-window
         if (!controller.getConfig().isFullscreenOrMultiWindowVideo()) return false;
-        // cancel if the swipe does not belong to any zone
-        if (!shouldForceInterceptEvents()) return false;
+        // Let the player handle directions this swipe area does not use.
+        if (!shouldForceInterceptEvents()) {
+            if (!hasCancelledDownstream() && lastOnDownEvent != null && lastOnDownWasConsumed) {
+                controller.dispatchDownstreamTouchEvent(lastOnDownEvent);
+                lastOnDownWasConsumed = false;
+            }
+            return false;
+        }
 
         return applySwipeAction(from, distanceX, distanceY);
     }

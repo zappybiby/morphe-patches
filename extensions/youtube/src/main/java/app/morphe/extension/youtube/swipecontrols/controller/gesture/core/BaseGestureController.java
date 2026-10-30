@@ -162,6 +162,13 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
     }
 
     /**
+     * Whether Morphe has cancelled the player's gesture for a swipe.
+     */
+    protected boolean hasCancelledDownstream() {
+        return didCancelDownstream;
+    }
+
+    /**
      * Whether {@link #submitTouchEvent} should force-intercept all touch events.
      */
     protected abstract boolean shouldForceInterceptEvents();
