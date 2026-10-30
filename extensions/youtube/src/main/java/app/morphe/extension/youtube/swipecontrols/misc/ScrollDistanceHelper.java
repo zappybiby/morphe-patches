@@ -52,9 +52,8 @@ public final class ScrollDistanceHelper {
 
         // invoke the callback if we scrolled far enough
         while (Math.abs(scrolledDistance) >= unitDistance) {
-            final int direction = (int) Math.signum(scrolledDistance);
             subtractUnitDistance();
-            callback.accept(direction);
+            callback.accept((int) Math.signum(scrolledDistance));
         }
     }
 

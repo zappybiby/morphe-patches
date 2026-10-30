@@ -12,8 +12,12 @@ package app.morphe.extension.youtube.swipecontrols.controller.gesture;
 
 import android.view.MotionEvent;
 
+import androidx.annotation.Nullable;
+
+import app.morphe.extension.youtube.swipecontrols.SwipeControlsConfigurationProvider.SwipeZoneAction;
 import app.morphe.extension.youtube.swipecontrols.SwipeControlsHostActivity;
 import app.morphe.extension.youtube.swipecontrols.controller.gesture.core.BaseGestureController;
+import app.morphe.extension.youtube.swipecontrols.misc.Point;
 
 /**
  * Provides the press-to-swipe (PtS) swipe controls experience.
@@ -21,15 +25,22 @@ import app.morphe.extension.youtube.swipecontrols.controller.gesture.core.BaseGe
 public final class PressToSwipeController extends BaseGestureController {
 
     /**
-     * Whether holding has activated the current swipe session.
+     * Where the current swipe session started, or null if there is no session.
      */
-    private boolean swipeSessionActive;
+    @Nullable
+    private Point swipeSessionOrigin;
 
     /**
      * @param controller Reference to the main swipe controller.
      */
     public PressToSwipeController(SwipeControlsHostActivity controller) {
         super(controller);
+    }
+
+    @Override
+    protected boolean shouldForceInterceptEvents() {
+        if (swipeSessionOrigin == null) return false;
+        return swipeActionAt(swipeSessionOrigin, getCurrentSwipe()) != SwipeZoneAction.OFF;
     }
 
     @Override
@@ -40,29 +51,29 @@ public final class PressToSwipeController extends BaseGestureController {
     @Override
     protected void onUp(MotionEvent motionEvent) {
         super.onUp(motionEvent);
-        swipeSessionActive = false;
+        swipeSessionOrigin = null;
     }
 
     @Override
     public void onLongPress(MotionEvent motionEvent) {
         // enter swipe session with feedback
-        swipeSessionActive = hasSwipeAction();
-        if (swipeSessionActive) {
+        swipeSessionOrigin = isInSwipeZone(motionEvent) ? Point.fromMotionEvent(motionEvent) : null;
+        if (swipeSessionOrigin != null) {
             controller.getOverlay().onEnterSwipeSession();
         }
 
         // send GestureDetector a ACTION_CANCEL event so it will handle further events
-        MotionEvent cancelEvent = MotionEvent.obtain(motionEvent);
-        cancelEvent.setAction(MotionEvent.ACTION_CANCEL);
-        detector.onTouchEvent(cancelEvent);
-        cancelEvent.recycle();
+        motionEvent.setAction(MotionEvent.ACTION_CANCEL);
+        detector.onTouchEvent(motionEvent);
     }
 
     @Override
     protected boolean onSwipe(MotionEvent from, MotionEvent to, double distanceX, double distanceY) {
+        // cancel if not fullscreen or multi-window
+        if (!controller.getConfig().isFullscreenOrMultiWindowVideo()) return false;
         // cancel if not in swipe session
-        if (!swipeSessionActive) return false;
+        if (swipeSessionOrigin == null) return false;
 
-        return applySwipeAction(to, distanceX, distanceY);
+        return applySwipeAction(from, distanceX, distanceY);
     }
 }

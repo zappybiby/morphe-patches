@@ -111,7 +111,7 @@ public class SwipeControlsHostActivity extends Activity {
      */
     private volatile boolean statusBarVisible;
 
-    // Whether saved brightness is waiting to be restored in fullscreen.
+    // Flag that indicates whether the brightness has been saved and restored default brightness
     private boolean isBrightnessSaved;
 
     @Override
@@ -128,9 +128,6 @@ public class SwipeControlsHostActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        if (gesture != null) {
-            gesture.dispose();
-        }
         super.onDestroy();
         PlayerType.getOnChange().removeObserver(playerTypeObserver);
     }
@@ -138,7 +135,10 @@ public class SwipeControlsHostActivity extends Activity {
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
         ensureInitialized();
-        return gesture.submitTouchEvent(ev) || dispatchDownstreamTouchEvent(ev);
+        if (gesture.submitTouchEvent(ev)) {
+            return true;
+        }
+        return super.dispatchTouchEvent(ev);
     }
 
     @Override
@@ -237,10 +237,8 @@ public class SwipeControlsHostActivity extends Activity {
         gesture = createGestureController();
 
         // listen for changes in the player type
-        isBrightnessSaved = config.shouldSaveAndRestoreBrightness();
         playerTypeObserver = this::onPlayerTypeChanged;
         PlayerType.getOnChange().addObserver(playerTypeObserver);
-        onPlayerTypeChanged(PlayerType.getCurrent());
 
         // set current instance reference
         currentHost = new WeakReference<>(this);
@@ -285,25 +283,28 @@ public class SwipeControlsHostActivity extends Activity {
      * @param type The new player type.
      */
     private void onPlayerTypeChanged(PlayerType type) {
-        // Wait until the player settles, since a slide can be cancelled.
-        if (screen == null || type == PlayerType.WATCH_WHILE_SLIDING_MAXIMIZED_FULLSCREEN) {
-            return;
-        }
-
-        if (type == PlayerType.WATCH_WHILE_FULLSCREEN
-                || (isInSplitScreenMode() && type == PlayerType.WATCH_WHILE_MAXIMIZED)) {
-            if (isBrightnessSaved) {
+        if (config.shouldSaveAndRestoreBrightness()
+                && (type == PlayerType.WATCH_WHILE_FULLSCREEN
+                || (isInSplitScreenMode() && type == PlayerType.WATCH_WHILE_MAXIMIZED))
+                && isBrightnessSaved) {
+            // If saving and restoring brightness is enabled, and the player type is fullscreen or multi-window,
+            // and brightness has already been saved, then restore the screen brightness
+            if (screen != null) {
                 screen.restore();
-                isBrightnessSaved = false;
             }
-            return;
-        }
-
-        if (config.shouldSaveAndRestoreBrightness() && !isBrightnessSaved) {
-            screen.save();
+            isBrightnessSaved = false;
+        } else if (config.shouldSaveAndRestoreBrightness() && !isBrightnessSaved) {
+            // If saving and restoring brightness is enabled, and brightness has not been saved,
+            // then save the current screen state, restore default brightness, and mark brightness as saved
+            if (screen != null) {
+                screen.save();
+                screen.restoreDefaultBrightness();
+            }
             isBrightnessSaved = true;
+        } else if (screen != null) {
+            // If saving and restoring brightness is disabled, simply keep the default brightness
+            screen.restoreDefaultBrightness();
         }
-        screen.restoreDefaultBrightness();
     }
 
     /**

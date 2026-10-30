@@ -43,16 +43,10 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
      */
     protected final GestureDetector detector;
 
-    @Nullable
-    private MotionEvent downEvent;
-
-    private boolean observing;
-
-    private boolean ownsGesture;
-
-    private SwipeZoneAction horizontalAction = SwipeZoneAction.OFF;
-
-    private SwipeZoneAction verticalAction = SwipeZoneAction.OFF;
+    /**
+     * Whether downstream events have been canceled; used in {@link #onScroll}.
+     */
+    private boolean didCancelDownstream;
 
     /**
      * @param controller Reference to the main swipe controller.
@@ -78,81 +72,56 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
     @Override
     public boolean submitTouchEvent(MotionEvent motionEvent) {
         SwipeControlsConfigurationProvider config = controller.getConfig();
-        final int action = motionEvent.getActionMasked();
-        if (action == MotionEvent.ACTION_DOWN) {
-            dispose();
-            downEvent = MotionEvent.obtain(motionEvent);
-            observing = config.isSwipeControlsEnabled();
-            if (observing) {
-                // The player can move before the swipe threshold is reached, so use where the gesture started.
-                Point origin = Point.fromMotionEvent(motionEvent);
-                horizontalAction = swipeActionAt(origin, SwipeDirection.HORIZONTAL);
-                verticalAction = swipeActionAt(origin, SwipeDirection.VERTICAL);
-            }
-        } else if (downEvent == null) {
+
+        // Ignore if swipe is disabled.
+        if (!config.isSwipeControlsEnabled()) {
             return false;
         }
 
-        final boolean dropped = shouldDropMotion(motionEvent);
-        if (dropped || !config.isSwipeControlsEnabled()
-                || (controller.isStatusBarVisible() && !controller.isInSplitScreenMode())
-                || (config.shouldIgnoreSwipesWhenLocked() && SwipeControlsHostActivity.isPlayerLocked())) {
-            stopObserving(motionEvent);
-        } else if (observing) {
-            detector.onTouchEvent(motionEvent);
+        // Ignore if status bar is visible (unless the screen is shared with another app).
+        if (controller.isStatusBarVisible() && !controller.isInSplitScreenMode()) {
+            return false;
         }
 
-        // If Morphe cancelled the player's tracking, send DOWN again before handing over both fingers.
-        if (dropped && action == MotionEvent.ACTION_POINTER_DOWN && ownsGesture) {
-            ownsGesture = false;
-            controller.dispatchDownstreamTouchEvent(downEvent);
+        // Ignore if the native lock screen is engaged.
+        if (config.shouldIgnoreSwipesWhenLocked() && SwipeControlsHostActivity.isPlayerLocked()) {
+            return false;
         }
 
-        final boolean handled = ownsGesture;
-        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-            if (observing) {
-                observing = false;
-                onUp(motionEvent);
-            }
-            releaseTouch();
-        }
-        return handled;
-    }
+        // Create a copy of the event so we can modify it without causing any issues downstream.
+        MotionEvent me = MotionEvent.obtain(motionEvent);
 
-    private void stopObserving(MotionEvent motionEvent) {
-        if (!observing) return;
-        observing = false;
-        MotionEvent cancelEvent = MotionEvent.obtain(motionEvent);
-        cancelEvent.setAction(MotionEvent.ACTION_CANCEL);
-        detector.onTouchEvent(cancelEvent);
-        onUp(cancelEvent);
-        cancelEvent.recycle();
-    }
-
-    @Override
-    public void dispose() {
-        if (downEvent != null) {
-            stopObserving(downEvent);
+        // Check if we should drop this motion.
+        final boolean dropped = shouldDropMotion(me);
+        if (dropped) {
+            me.setAction(MotionEvent.ACTION_CANCEL);
         }
-        releaseTouch();
-    }
 
-    private void releaseTouch() {
-        if (downEvent != null) {
-            downEvent.recycle();
-            downEvent = null;
+        // Send the event to the detector if we force intercept events, the event is always consumed.
+        final boolean consumed = detector.onTouchEvent(me) || shouldForceInterceptEvents();
+
+        // Evaluate swipe zone before recycling.
+        final boolean inSwipeZone = isInSwipeZone(me);
+
+        // Invoke the custom onUp handler.
+        if (me.getAction() == MotionEvent.ACTION_UP || me.getAction() == MotionEvent.ACTION_CANCEL) {
+            onUp(me);
         }
-        ownsGesture = false;
-        horizontalAction = SwipeZoneAction.OFF;
-        verticalAction = SwipeZoneAction.OFF;
+
+        // Recycle the copy.
+        me.recycle();
+
+        // Do not consume dropped events or events outside any swipe zone.
+        return !dropped && consumed && inSwipeZone;
     }
 
     /**
-     * Resets recognition when the finger lifts or the detector is stopped.
+     * Custom handler for {@link MotionEvent#ACTION_UP} events, since GestureDetector doesn't provide one.
      *
      * @param motionEvent The motion event.
      */
     protected void onUp(MotionEvent motionEvent) {
+        didCancelDownstream = false;
         swipeDetector.resetSwipe();
         scroller.resetScroller();
     }
@@ -171,7 +140,18 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
             return false;
         }
 
-        return onSwipe(from, to, distanceX, distanceY);
+        final boolean consumed = onSwipe(from, to, distanceX, distanceY);
+
+        // if the swipe was consumed, cancel downstream events once
+        if (consumed && !didCancelDownstream) {
+            didCancelDownstream = true;
+            MotionEvent cancelEvent = MotionEvent.obtain(from);
+            cancelEvent.setAction(MotionEvent.ACTION_CANCEL);
+            controller.dispatchDownstreamTouchEvent(cancelEvent);
+            cancelEvent.recycle();
+        }
+
+        return consumed;
     }
 
     /**
@@ -182,10 +162,30 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
     }
 
     /**
-     * Whether the gesture started in an enabled swipe zone.
+     * Whether Morphe has cancelled the player's gesture for a swipe.
      */
-    protected boolean hasSwipeAction() {
-        return horizontalAction != SwipeZoneAction.OFF || verticalAction != SwipeZoneAction.OFF;
+    protected boolean hasCancelledDownstream() {
+        return didCancelDownstream;
+    }
+
+    /**
+     * Whether {@link #submitTouchEvent} should force-intercept all touch events.
+     */
+    protected abstract boolean shouldForceInterceptEvents();
+
+    /**
+     * Checks if the provided motion event is in any active swipe zone.
+     *
+     * @param motionEvent The event to check.
+     * @return Whether the event is in any active swipe zone.
+     */
+    protected boolean isInSwipeZone(MotionEvent motionEvent) {
+        SwipeControlsConfigurationProvider config = controller.getConfig();
+        SwipeZonesController zones = controller.getZones();
+        Point point = Point.fromMotionEvent(motionEvent);
+        return (config.getTopZoneAction() != SwipeZoneAction.OFF && zones.getTop().contains(point))
+                || (config.getLeftZoneAction() != SwipeZoneAction.OFF && zones.getLeft().contains(point))
+                || (config.getRightZoneAction() != SwipeZoneAction.OFF && zones.getRight().contains(point));
     }
 
     /**
@@ -224,42 +224,30 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
     /**
      * Applies the action of the zone the swipe started in.
      *
-     * @param to        Current event of the swipe.
+     * @param from      Start event of the swipe.
      * @param distanceX The horizontal distance of the swipe.
      * @param distanceY The vertical distance of the swipe.
      * @return Whether the swipe was consumed.
      */
-    protected boolean applySwipeAction(MotionEvent to, double distanceX, double distanceY) {
+    protected boolean applySwipeAction(MotionEvent from, double distanceX, double distanceY) {
         SwipeDirection direction = getCurrentSwipe();
         final double distance = direction == SwipeDirection.HORIZONTAL ? -distanceX : distanceY;
-        SwipeZoneAction action = switch (direction) {
-            case HORIZONTAL -> horizontalAction;
-            case VERTICAL -> verticalAction;
-            case NONE -> SwipeZoneAction.OFF;
-        };
-        if (action == SwipeZoneAction.OFF) return false;
 
-        // Cancel the player's gesture before applying the first swipe action.
-        if (!ownsGesture) {
-            ownsGesture = true;
-            MotionEvent cancelEvent = MotionEvent.obtain(to);
-            cancelEvent.setAction(MotionEvent.ACTION_CANCEL);
-            controller.dispatchDownstreamTouchEvent(cancelEvent);
-            cancelEvent.recycle();
-        }
-
-        switch (action) {
+        switch (swipeActionAt(Point.fromMotionEvent(from), direction)) {
             case VOLUME -> scroller.scrollVolume(distance);
             case BRIGHTNESS -> scroller.scrollBrightness(distance);
             case SPEED -> scroller.scrollSpeed(distance);
+            case OFF -> {
+                return false;
+            }
         }
 
         return true;
     }
 
     /**
-     * Checks if recognition should stop for this gesture.
-     * If another finger joins a claimed gesture, it is handed back to the player.
+     * Checks if a touch event should be dropped.
+     * When an event is dropped, the gesture detector receives a {@link MotionEvent#ACTION_CANCEL} event and the event is not consumed.
      *
      * @param motionEvent The event to check.
      * @return Whether the event should be dropped.
