@@ -12,11 +12,8 @@ package app.morphe.extension.youtube.swipecontrols.controller.gesture;
 
 import android.view.MotionEvent;
 
-import androidx.annotation.Nullable;
-
 import app.morphe.extension.youtube.swipecontrols.SwipeControlsHostActivity;
 import app.morphe.extension.youtube.swipecontrols.controller.gesture.core.BaseGestureController;
-import app.morphe.extension.youtube.swipecontrols.misc.Point;
 
 /**
  * Provides the press-to-swipe (PtS) swipe controls experience.
@@ -24,10 +21,9 @@ import app.morphe.extension.youtube.swipecontrols.misc.Point;
 public final class PressToSwipeController extends BaseGestureController {
 
     /**
-     * Where the current swipe session started, or null if there is no session.
+     * Whether holding has activated the current swipe session.
      */
-    @Nullable
-    private Point swipeSessionOrigin;
+    private boolean swipeSessionActive;
 
     /**
      * @param controller Reference to the main swipe controller.
@@ -44,14 +40,14 @@ public final class PressToSwipeController extends BaseGestureController {
     @Override
     protected void onUp(MotionEvent motionEvent) {
         super.onUp(motionEvent);
-        swipeSessionOrigin = null;
+        swipeSessionActive = false;
     }
 
     @Override
     public void onLongPress(MotionEvent motionEvent) {
         // enter swipe session with feedback
-        swipeSessionOrigin = hasSwipeAction() ? Point.fromMotionEvent(motionEvent) : null;
-        if (swipeSessionOrigin != null) {
+        swipeSessionActive = hasSwipeAction();
+        if (swipeSessionActive) {
             controller.getOverlay().onEnterSwipeSession();
         }
 
@@ -65,7 +61,7 @@ public final class PressToSwipeController extends BaseGestureController {
     @Override
     protected boolean onSwipe(MotionEvent from, MotionEvent to, double distanceX, double distanceY) {
         // cancel if not in swipe session
-        if (swipeSessionOrigin == null) return false;
+        if (!swipeSessionActive) return false;
 
         return applySwipeAction(to, distanceX, distanceY);
     }

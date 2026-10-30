@@ -82,8 +82,7 @@ public abstract class BaseGestureController extends GestureDetector.SimpleOnGest
         if (action == MotionEvent.ACTION_DOWN) {
             dispose();
             downEvent = MotionEvent.obtain(motionEvent);
-            observing = config.isSwipeControlsEnabled()
-                    && (config.isFullscreenOrMultiWindowVideo() || config.isVideoSliding());
+            observing = config.isSwipeControlsEnabled();
             if (observing) {
                 // The player can move before the swipe threshold is reached, so use where the gesture started.
                 Point origin = Point.fromMotionEvent(motionEvent);

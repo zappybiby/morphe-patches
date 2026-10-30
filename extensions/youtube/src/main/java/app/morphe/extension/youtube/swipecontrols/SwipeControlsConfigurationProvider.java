@@ -114,10 +114,11 @@ public final class SwipeControlsConfigurationProvider {
 
     //region swipe enable
     /**
-     * Whether any swipe action is enabled in settings.
+     * Whether any swipe action is enabled for the current player state.
      */
     public boolean isSwipeControlsEnabled() {
-        return isVolumeControlEnabled() || isBrightnessControlEnabled() || isSpeedControlEnabled();
+        return (isVolumeControlEnabled() || isBrightnessControlEnabled() || isSpeedControlEnabled())
+                && (isFullscreenOrMultiWindowVideo() || isVideoSliding());
     }
 
     public SwipeZoneAction getLeftZoneAction() {
