@@ -50,23 +50,23 @@ public final class PressToSwipeController extends BaseGestureController {
     @Override
     public void onLongPress(MotionEvent motionEvent) {
         // enter swipe session with feedback
-        swipeSessionOrigin = isInSwipeZone(motionEvent) ? Point.fromMotionEvent(motionEvent) : null;
+        swipeSessionOrigin = hasSwipeAction() ? Point.fromMotionEvent(motionEvent) : null;
         if (swipeSessionOrigin != null) {
             controller.getOverlay().onEnterSwipeSession();
         }
 
         // send GestureDetector a ACTION_CANCEL event so it will handle further events
-        motionEvent.setAction(MotionEvent.ACTION_CANCEL);
-        detector.onTouchEvent(motionEvent);
+        MotionEvent cancelEvent = MotionEvent.obtain(motionEvent);
+        cancelEvent.setAction(MotionEvent.ACTION_CANCEL);
+        detector.onTouchEvent(cancelEvent);
+        cancelEvent.recycle();
     }
 
     @Override
     protected boolean onSwipe(MotionEvent from, MotionEvent to, double distanceX, double distanceY) {
-        // cancel if not fullscreen or multi-window
-        if (!controller.getConfig().isFullscreenOrMultiWindowVideo()) return false;
         // cancel if not in swipe session
         if (swipeSessionOrigin == null) return false;
 
-        return applySwipeAction(from, distanceX, distanceY);
+        return applySwipeAction(to, distanceX, distanceY);
     }
 }

@@ -13,7 +13,6 @@ package app.morphe.extension.youtube.swipecontrols;
 import static app.morphe.extension.shared.StringRef.str;
 
 import android.graphics.Color;
-import android.view.MotionEvent;
 
 import java.util.List;
 
@@ -24,9 +23,6 @@ import app.morphe.extension.shared.settings.StringSetting;
 import app.morphe.extension.shared.settings.preference.SeekBarPreference;
 import app.morphe.extension.youtube.settings.Settings;
 import app.morphe.extension.youtube.shared.PlayerType;
-import app.morphe.extension.youtube.swipecontrols.controller.gesture.ClassicSwipeController;
-import app.morphe.extension.youtube.swipecontrols.controller.gesture.PressToSwipeController;
-import app.morphe.extension.youtube.swipecontrols.controller.gesture.core.BaseGestureController;
 
 /**
  * Provides configuration settings for the swipe controls in the YouTube player.
@@ -118,12 +114,10 @@ public final class SwipeControlsConfigurationProvider {
 
     //region swipe enable
     /**
-     * Indicates whether swipe controls are enabled globally.
-     * Returns true if either volume or brightness controls are enabled and the video is in fullscreen or multi-window mode.
+     * Whether any swipe action is enabled in settings.
      */
     public boolean isSwipeControlsEnabled() {
-        return (isVolumeControlEnabled() || isBrightnessControlEnabled() || isSpeedControlEnabled())
-                && (isFullscreenOrMultiWindowVideo() || isVideoSliding());
+        return isVolumeControlEnabled() || isBrightnessControlEnabled() || isSpeedControlEnabled();
     }
 
     public SwipeZoneAction getLeftZoneAction() {
@@ -186,19 +180,9 @@ public final class SwipeControlsConfigurationProvider {
     }
 
     /**
-     * Checks if the video player is currently in sliding mode.
-     * <p>
-     * The swipe control patch hooks functions of MainActivity (top-level activity) to detect {@link MotionEvent}.
-     * Although the player is already in the fullscreen, a {@link MotionEvent} is detected before the {@link PlayerType} is updated,
-     * so the current {@link PlayerType} may be {@link PlayerType#WATCH_WHILE_SLIDING_MAXIMIZED_FULLSCREEN}.
-     * <p>
-     * In this case, {@link BaseGestureController#submitTouchEvent} cancels the MotionEvent,
-     * but sometimes the canceled {@link MotionEvent} triggers the tap and hold playback speed.
-     * See: https://github.com/MorpheApp/morphe-patches/issues/658.
-     * <p>
-     * To resolve this concurrency issue, pass the {@link MotionEvent} even when the player type is
-     * {@link PlayerType#WATCH_WHILE_SLIDING_MAXIMIZED_FULLSCREEN}, and finally validate the swipe gesture
-     * in {@link ClassicSwipeController} and {@link PressToSwipeController} onSwipe().
+     * Whether the player is moving between maximized and fullscreen.
+     * Touches can arrive before PlayerType updates, so allow gestures to start in this state.
+     * See https://github.com/MorpheApp/morphe-patches/issues/658.
      */
     public boolean isVideoSliding() {
         return PlayerType.getCurrent() == PlayerType.WATCH_WHILE_SLIDING_MAXIMIZED_FULLSCREEN;

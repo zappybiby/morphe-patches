@@ -32,7 +32,6 @@ import app.morphe.extension.youtube.shared.PlayerType;
 import app.morphe.extension.youtube.swipecontrols.controller.AudioVolumeController;
 import app.morphe.extension.youtube.swipecontrols.controller.ScreenBrightnessController;
 import app.morphe.extension.youtube.swipecontrols.controller.SwipeZonesController;
-import app.morphe.extension.youtube.swipecontrols.controller.TouchEventDispatcher;
 import app.morphe.extension.youtube.swipecontrols.controller.VolumeKeysController;
 import app.morphe.extension.youtube.swipecontrols.controller.gesture.ClassicSwipeController;
 import app.morphe.extension.youtube.swipecontrols.controller.gesture.PressToSwipeController;
@@ -97,8 +96,6 @@ public class SwipeControlsHostActivity extends Activity {
      */
     private GestureController gesture;
 
-    private TouchEventDispatcher touchEvents;
-
     /**
      * Main volume keys controller.
      */
@@ -131,8 +128,8 @@ public class SwipeControlsHostActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        if (touchEvents != null) {
-            touchEvents.dispose();
+        if (gesture != null) {
+            gesture.dispose();
         }
         super.onDestroy();
         PlayerType.getOnChange().removeObserver(playerTypeObserver);
@@ -141,15 +138,7 @@ public class SwipeControlsHostActivity extends Activity {
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
         ensureInitialized();
-        long inputToken = touchEvents.beginInput(ev);
-        try {
-            if (gesture.submitTouchEvent(ev)) {
-                return true;
-            }
-            return touchEvents.dispatch(ev);
-        } finally {
-            touchEvents.endInput(ev, inputToken);
-        }
+        return gesture.submitTouchEvent(ev) || dispatchDownstreamTouchEvent(ev);
     }
 
     @Override
@@ -168,10 +157,6 @@ public class SwipeControlsHostActivity extends Activity {
      * @return Whether the event was consumed.
      */
     public boolean dispatchDownstreamTouchEvent(MotionEvent event) {
-        return touchEvents.dispatch(event);
-    }
-
-    private boolean dispatchNativeTouchEvent(MotionEvent event) {
         return super.dispatchTouchEvent(event);
     }
 
@@ -229,7 +214,6 @@ public class SwipeControlsHostActivity extends Activity {
         // create controllers
         Logger.printDebug(() -> "initializing swipe controls controllers");
         config = new SwipeControlsConfigurationProvider();
-        touchEvents = new TouchEventDispatcher(this::dispatchNativeTouchEvent);
         keys = new VolumeKeysController(this);
         audio = createAudioController();
         screen = createScreenController();
