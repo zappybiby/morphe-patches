@@ -10,7 +10,7 @@ public final class DisableDoubleTapActionsPatch {
      *
      * @return If "should skip to chapter start" flag is set.
      */
-    public static boolean disableDoubleTapChapters(boolean original) {
+    public static boolean allowDoubleTapChapters(boolean original) {
         return original && !Settings.DISABLE_CHAPTER_SKIP_DOUBLE_TAP.get();
     }
 }

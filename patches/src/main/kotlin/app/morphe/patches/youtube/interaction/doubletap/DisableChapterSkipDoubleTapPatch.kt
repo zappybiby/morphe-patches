@@ -35,10 +35,12 @@ val disableDoubleTapActionsPatch = bytecodePatch(
         )
 
         if (is_21_23_or_greater) {
-            // Keep chapter skipping available when YouTube disables it with a feature flag.
-            // The hooks below still apply the user's disable setting.
-            DisableChapterSkipFeatureFlagFingerprint.let {
-                it.method.insertLiteralOverride(it.instructionMatches.first().index, false)
+            // On YouTube 21.23+, flag 45767151 makes two-finger double taps use the regular seek interval when true.
+            // Override it to false to allow chapter jumps. The Morphe setting still applies.
+            ChapterSkipDisabledFeatureFlagFingerprint.matchAll().forEach {
+                it.method.insertLiteralOverride(
+                    it.instructionMatches.first().index, false
+                )
             }
         }
 
@@ -53,7 +55,7 @@ val disableDoubleTapActionsPatch = bytecodePatch(
         doubleTapInfoGetSeekSourceFingerprint.method.addInstructions(
             0,
             """
-                invoke-static { p1 }, $EXTENSION_CLASS->disableDoubleTapChapters(Z)Z
+                invoke-static { p1 }, $EXTENSION_CLASS->allowDoubleTapChapters(Z)Z
                 move-result p1
             """
         )
@@ -61,7 +63,7 @@ val disableDoubleTapActionsPatch = bytecodePatch(
         DoubleTapInfoCtorFingerprint.method.addInstructions(
             0,
             """
-                invoke-static { p3 }, $EXTENSION_CLASS->disableDoubleTapChapters(Z)Z
+                invoke-static { p3 }, $EXTENSION_CLASS->allowDoubleTapChapters(Z)Z
                 move-result p3
             """
         )

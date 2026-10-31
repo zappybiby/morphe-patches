@@ -4,10 +4,7 @@ import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.literal
 import com.android.tools.smali.dexlib2.AccessFlags
 
-internal object DisableChapterSkipFeatureFlagFingerprint : Fingerprint(
-    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
-    returnType = "L",
-    parameters = listOf("L", "L", "Landroid/os/Handler;", "L", "L", "L", "L", "L"),
+internal object ChapterSkipDisabledFeatureFlagFingerprint : Fingerprint(
     filters = listOf(
         literal(45767151L)
     )
