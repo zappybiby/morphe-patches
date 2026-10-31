@@ -5,10 +5,12 @@ import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.patches.youtube.misc.extension.sharedExtensionPatch
+import app.morphe.patches.youtube.misc.playservice.is_21_23_or_greater
 import app.morphe.patches.youtube.misc.playservice.versionCheckPatch
 import app.morphe.patches.youtube.misc.settings.PreferenceScreen
 import app.morphe.patches.youtube.misc.settings.settingsPatch
 import app.morphe.patches.youtube.shared.Constants.COMPATIBILITY_YOUTUBE
+import app.morphe.util.insertLiteralOverride
 import com.android.tools.smali.dexlib2.AccessFlags
 
 private const val EXTENSION_CLASS =
@@ -17,7 +19,7 @@ private const val EXTENSION_CLASS =
 @Suppress("unused")
 val disableDoubleTapActionsPatch = bytecodePatch(
     name = "Disable double tap actions",
-    description = "Adds an option to disable player double tap gestures.",
+    description = "Restores double-tap chapter skipping and adds an option to disable it.",
 ) {
     dependsOn(
         sharedExtensionPatch,
@@ -31,6 +33,14 @@ val disableDoubleTapActionsPatch = bytecodePatch(
         PreferenceScreen.PLAYER.addPreferences(
             SwitchPreference("morphe_disable_chapter_skip_double_tap", summary = true),
         )
+
+        if (is_21_23_or_greater) {
+            // Keep chapter skipping available when YouTube disables it with a feature flag.
+            // The hooks below still apply the user's disable setting.
+            DisableChapterSkipFeatureFlagFingerprint.let {
+                it.method.insertLiteralOverride(it.instructionMatches.first().index, false)
+            }
+        }
 
         val doubleTapInfoGetSeekSourceFingerprint = Fingerprint(
             classFingerprint = DoubleTapInfoCtorFingerprint,
