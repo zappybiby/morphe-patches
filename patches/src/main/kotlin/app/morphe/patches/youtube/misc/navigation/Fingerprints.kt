@@ -11,10 +11,12 @@
 package app.morphe.patches.youtube.misc.navigation
 
 import app.morphe.patcher.Fingerprint
+import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
 import app.morphe.patcher.InstructionLocation.MatchAfterWithin
 import app.morphe.patcher.InstructionLocation.MatchBeforeAnywhere
 import app.morphe.patcher.checkCast
 import app.morphe.patcher.fieldAccess
+import app.morphe.patcher.literal
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.opcode
 import app.morphe.patcher.resource.ResourceType
@@ -23,6 +25,17 @@ import app.morphe.patcher.string
 import app.morphe.patches.youtube.layout.buttons.navigation.navigationBarPatch
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
+
+internal object GuideStartupPolicyFingerprint : Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
+    returnType = "V",
+    parameters = listOf(),
+    filters = listOf(
+        literal(1074004527L),
+        methodCall(parameters = listOf("I"), returnType = "I", location = MatchAfterWithin(3)),
+        opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately())
+    )
+)
 
 internal object ToolbarLayoutFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PROTECTED, AccessFlags.CONSTRUCTOR),

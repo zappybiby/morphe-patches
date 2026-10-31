@@ -32,6 +32,7 @@ import app.morphe.patches.youtube.misc.backgesture.backGesturePatch
 import app.morphe.patches.youtube.misc.extension.sharedExtensionPatch
 import app.morphe.patches.youtube.misc.playertype.playerTypeHookPatch
 import app.morphe.patches.youtube.misc.playservice.is_20_28_or_greater
+import app.morphe.patches.youtube.misc.playservice.is_20_51_or_greater
 import app.morphe.patches.youtube.misc.playservice.is_21_43_or_greater
 import app.morphe.patches.youtube.misc.playservice.versionCheckPatch
 import app.morphe.patches.youtube.shared.ActionBarSearchResultsFingerprint
@@ -215,6 +216,19 @@ val navigationBarHookPatch = bytecodePatch(description = "Hooks the active navig
     )
 
     execute {
+        if (is_20_51_or_greater) {
+            GuideStartupPolicyFingerprint.let {
+                it.method.apply {
+                    val index = it.instructionMatches.last().index
+                    val register = getInstruction<OneRegisterInstruction>(index).registerA
+
+                    // Load the guide after intent initialization instead of waiting for startup completion.
+                    // The guide also supplies resources used by feed headers.
+                    addInstruction(index + 1, "const/16 v$register, 0x1")
+                }
+            }
+        }
+
         fun MutableMethod.addHook(hook: NavigationHook, insertPredicate: Instruction.() -> Boolean) {
             val filtered = instructions.filter(insertPredicate)
             if (filtered.isEmpty()) throw PatchException("Could not find insert indexes")
