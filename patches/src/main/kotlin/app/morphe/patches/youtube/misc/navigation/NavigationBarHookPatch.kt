@@ -216,16 +216,15 @@ val navigationBarHookPatch = bytecodePatch(description = "Hooks the active navig
     )
 
     execute {
-        if (is_20_51_or_greater) {
-            GuideStartupPolicyFingerprint.let {
-                it.method.apply {
-                    val index = it.instructionMatches.last().index
-                    val register = getInstruction<OneRegisterInstruction>(index).registerA
+        val guidePolicyFlag = if (is_20_51_or_greater) 1074004527L else 268698159L
+        GuideStartupPolicyFingerprint(guidePolicyFlag).let {
+            it.method.apply {
+                val index = it.instructionMatches.last().index
+                val register = getInstruction<OneRegisterInstruction>(index).registerA
 
-                    // Load the guide after intent initialization instead of waiting for startup completion.
-                    // The guide also supplies resources used by feed headers.
-                    addInstruction(index + 1, "const/16 v$register, 0x1")
-                }
+                // Load the guide after intent initialization instead of waiting for startup completion.
+                // The guide also supplies resources used by feed headers.
+                addInstruction(index + 1, "const/16 v$register, 0x1")
             }
         }
 

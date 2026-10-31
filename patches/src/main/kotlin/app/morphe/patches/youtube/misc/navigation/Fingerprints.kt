@@ -26,12 +26,12 @@ import app.morphe.patches.youtube.layout.buttons.navigation.navigationBarPatch
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 
-internal object GuideStartupPolicyFingerprint : Fingerprint(
+internal class GuideStartupPolicyFingerprint(policyFlag: Long) : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "V",
     parameters = listOf(),
     filters = listOf(
-        literal(1074004527L),
+        literal(policyFlag),
         methodCall(parameters = listOf("I"), returnType = "I", location = MatchAfterWithin(3)),
         opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately())
     )
