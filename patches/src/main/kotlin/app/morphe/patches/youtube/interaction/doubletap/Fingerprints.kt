@@ -1,7 +1,14 @@
 package app.morphe.patches.youtube.interaction.doubletap
 
 import app.morphe.patcher.Fingerprint
+import app.morphe.patcher.literal
 import com.android.tools.smali.dexlib2.AccessFlags
+
+internal object ChapterSkipDisabledFeatureFlagFingerprint : Fingerprint(
+    filters = listOf(
+        literal(45767151L)
+    )
+)
 
 internal object SeekTypeEnumFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.STATIC, AccessFlags.CONSTRUCTOR),
