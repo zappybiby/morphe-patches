@@ -53,6 +53,16 @@ val rememberShuffleStatePatch = bytecodePatch(
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
 
     execute {
+        Fingerprint(
+            definingClass = MusicPlaybackQueueFingerprint.classDef.type,
+            name = LoadQueueFingerprint.instructionMatches.last().methodReference.name,
+            parameters = emptyList(),
+            returnType = "V"
+        ).method.addInstruction(
+            0,
+            "invoke-static {}, $EXTENSION_CLASS->onQueueCleared()V"
+        )
+
         PreferenceScreen.PLAYER.addPreferences(
             SwitchPreference("morphe_music_remember_shuffle_state")
         )
@@ -112,7 +122,7 @@ val rememberShuffleStatePatch = bytecodePatch(
                 fieldName = "shuffleClass",
                 objectClass = shuffleClass,
                 smaliInstructions = """
-                    if-eqz v0, :ignore
+                    if-eqz v0, :unavailable
                     
                     invoke-virtual { v0 }, $shuffleClass->$getStateMethodName()$enumClass
                     move-result-object v1
@@ -121,13 +131,17 @@ val rememberShuffleStatePatch = bytecodePatch(
                     move-result v1
                     
                     add-int/lit8 v1, v1, -0x1
-                    if-eqz v1, :ignore
+                    if-eqz v1, :restored
                     
                     sget-object v1, $enumClass->b:$enumClass
                     invoke-virtual { v0, v1 }, $shuffleClass->shuffleTracks($enumClass)V
                     
-                    :ignore
-                    return-void
+                    :restored
+                    const/4 v0, 0x1
+                    return v0
+                    :unavailable
+                    const/4 v0, 0x0
+                    return v0
                 """
             )
 

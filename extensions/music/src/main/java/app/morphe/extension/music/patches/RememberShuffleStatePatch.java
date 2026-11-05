@@ -15,6 +15,17 @@ import app.morphe.extension.shared.Utils;
 @SuppressWarnings("unused")
 public class RememberShuffleStatePatch {
 
+    // Queue edits can turn native shuffle off. Restore once per queue so later tracks preserve those edits.
+    private static int queueGeneration;
+    private static int restoredQueueGeneration = -1;
+
+    /**
+     * Injection point.
+     */
+    public static void onQueueCleared() {
+        Utils.runOnMainThreadNowOrLater(() -> queueGeneration++);
+    }
+
     /**
      * Injection point.
      */
@@ -32,14 +43,25 @@ public class RememberShuffleStatePatch {
             return;
         }
 
-        Utils.runOnMainThreadDelayed(RememberShuffleStatePatch::shuffleTracks, 500);
+        Utils.runOnMainThreadNowOrLater(() -> {
+            final int generation = queueGeneration;
+            if (restoredQueueGeneration == generation) return;
+            restoredQueueGeneration = generation;
+
+            Utils.runOnMainThreadDelayed(() -> {
+                if (queueGeneration == generation && !shuffleTracks()) {
+                    restoredQueueGeneration = -1;
+                }
+            }, 500);
+        });
     }
 
     /**
      * Injection point.
      */
-    public static void shuffleTracks() {
+    public static boolean shuffleTracks() {
         // Method is modified during patching.
         Log.d("Morphe: RememberShuffle", "Tracks are shuffled");
+        return false;
     }
 }
