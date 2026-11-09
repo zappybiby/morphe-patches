@@ -15,6 +15,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.MessageLite;
 
 import java.nio.charset.StandardCharsets;
@@ -182,6 +183,22 @@ public final class InAppDownloadsPatch {
             Logger.printException(() -> "replaceDownloadActionCommand failure", ex);
             return null;
         }
+    }
+
+    /** Allows a playable download's local position when its offline snapshot has no update time. */
+    public static boolean useOfflinePositionWithoutTimestamp(@Nullable MessageLite offlineState) {
+        try {
+            return Settings.DOWNLOAD_MODE.get() == DownloadMode.IN_APP && offlineState != null
+                    && isPlayableOfflineState(offlineState);
+        } catch (Exception ex) {
+            Logger.printException(() -> "useOfflinePositionWithoutTimestamp failure", ex);
+            return false;
+        }
+    }
+
+    private static boolean isPlayableOfflineState(MessageLite offlineState) throws InvalidProtocolBufferException {
+        return OfflineState.parseFrom(offlineState.toByteArray()).getAction()
+                == OfflineStateAction.OFFLINE_STATE_ACTION_OK;
     }
 
     /** Enables native progress recording when new or existing saved player responses are loaded. */

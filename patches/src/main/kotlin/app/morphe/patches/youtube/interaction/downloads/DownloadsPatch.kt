@@ -12,12 +12,14 @@ package app.morphe.patches.youtube.interaction.downloads
 
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
+import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.patch.classDefBy
 import app.morphe.patcher.patch.patch
 import app.morphe.patcher.util.cloneParameters
 import app.morphe.patcher.util.getReference
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patcher.util.registersUsed
+import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.shared.misc.fix.proto.fixProtoLibraryPatch
 import app.morphe.patches.shared.misc.fix.proto.parseByteArrayWithRegistryMethodRef
 import app.morphe.patches.shared.misc.fix.proto.protoDefaultInstanceFingerprint
@@ -35,6 +37,9 @@ import app.morphe.patches.youtube.misc.commandrouter.commandRouterHookPatch
 import app.morphe.patches.youtube.misc.playercontrols.addTopControl
 import app.morphe.patches.youtube.misc.playercontrols.initializeTopControl
 import app.morphe.patches.youtube.misc.playercontrols.legacyPlayerControlsPatch
+import app.morphe.patches.youtube.misc.playservice.is_20_51_or_greater
+import app.morphe.patches.youtube.misc.playservice.is_21_23_or_greater
+import app.morphe.patches.youtube.misc.playservice.versionCheckPatch
 import app.morphe.patches.youtube.misc.proto.elementProtoParserHookPatch
 import app.morphe.patches.youtube.misc.settings.PreferenceScreen
 import app.morphe.patches.youtube.misc.settings.settingsPatch
@@ -44,7 +49,12 @@ import app.morphe.util.ResourceGroup
 import app.morphe.util.copyResources
 import app.morphe.util.setExtensionIsPatchIncluded
 import com.android.tools.smali.dexlib2.AccessFlags
+import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
+import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction21t
+import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.ThreeRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
@@ -139,7 +149,8 @@ val downloadsPatch = patch(
         fixProtoLibraryPatch,
         elementProtoParserHookPatch,
         flyoutPatch,
-        commandRouterHookPatch
+        commandRouterHookPatch,
+        versionCheckPatch
     )
 
     compatibleWith(COMPATIBILITY_YOUTUBE)
@@ -278,6 +289,47 @@ val downloadsPatch = patch(
             val playerResponseGetter = playerResponseGetterMatch.method
             val offlineStateType = UpdateOfflineVideoPolicyFingerprint.matchAll().first().method.parameterTypes[2]
             val offlineStateField = classDefBy(playerResponseType).fields.single { it.type == offlineStateType }
+
+            // Offline snapshots can omit the update timestamp from a saved position.
+            // On 20.51.39+, the resume resolver treats the resulting zero as expired.
+            // Allow a zero timestamp for playable downloads in In App mode.
+            if (is_20_51_or_greater) {
+                val expiry = offlinePlaybackPositionExpiryFingerprint(playerResponseModelType, is_21_23_or_greater)
+                val (comparisonMatch, branchMatch, drop) = expiry.instructionMatches.takeLast(3)
+                val comparison = comparisonMatch.getInstruction<ThreeRegisterInstruction>()
+                val result = comparison.registerA
+                val cutoff = comparison.registerB
+                val timestamp = comparison.registerC
+                val branch = expiry.method.getInstruction<BuilderInstruction21t>(branchMatch.index)
+                val responseRegister = if (is_21_23_or_greater) {
+                    "p2"
+                } else {
+                    val load = expiry.method.implementation!!.instructions.take(drop.index).last { instruction ->
+                        instruction.opcode == Opcode.IGET_OBJECT &&
+                            instruction.getReference<FieldReference>()?.type == playerResponseModelType
+                    } as OneRegisterInstruction
+                    "v${load.registerA}"
+                }
+
+                expiry.method.addInstructionsWithLabels(
+                    drop.index,
+                    """
+                        const-wide/16 v$cutoff, 0x0
+                        cmp-long v$result, v$timestamp, v$cutoff
+                        if-nez v$result, :expire_position
+                        if-eqz $responseRegister, :expire_position
+                        invoke-interface/range { $responseRegister .. $responseRegister }, $playerResponseModelType->${playerResponseGetter.name}()$playerResponseType
+                        move-result-object v$result
+                        if-eqz v$result, :expire_position
+                        iget-object v$result, v$result, $offlineStateField
+                        invoke-static { v$result }, $EXTENSION_IN_APP_DOWNLOADS_CLASS->useOfflinePositionWithoutTimestamp(Lcom/google/protobuf/MessageLite;)Z
+                        move-result v$result
+                        if-nez v$result, :keep_position
+                    """,
+                    ExternalLabel("expire_position", expiry.method.getInstruction(drop.index)),
+                    ExternalLabel("keep_position", branch.target.location.instruction!!)
+                )
+            }
 
             val normalizeResponse = ImmutableMethod(
                 fromBytesMethod.definingClass,

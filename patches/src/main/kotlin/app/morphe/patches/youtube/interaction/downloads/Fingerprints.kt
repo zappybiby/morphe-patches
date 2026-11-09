@@ -104,6 +104,23 @@ internal object ResolveCommandFingerprint : Fingerprint(
     )
 )
 
+internal fun offlinePlaybackPositionExpiryFingerprint(playerResponseModel: String, directResponse: Boolean) = Fingerprint(
+    parameters = if (directResponse) listOf("L", playerResponseModel, "L") else listOf("L", "L"),
+    returnType = if (directResponse) "Ljava/lang/Long;" else "V",
+    filters = listOfNotNull(
+        if (directResponse) null else fieldAccess(opcode = Opcode.IGET_OBJECT, type = playerResponseModel),
+        methodCall(definingClass = "Lj$/time/Instant;", name = "toEpochMilli"),
+        opcode(Opcode.MOVE_RESULT_WIDE, location = MatchAfterImmediately()),
+        methodCall(returnType = "Ljava/lang/Long;", location = MatchAfterImmediately()),
+        opcode(Opcode.MOVE_RESULT_OBJECT, location = MatchAfterImmediately()),
+        methodCall(definingClass = "Ljava/lang/Long;", name = "longValue", location = MatchAfterImmediately()),
+        opcode(Opcode.MOVE_RESULT_WIDE, location = MatchAfterImmediately()),
+        opcode(Opcode.CMP_LONG, location = MatchAfterImmediately()),
+        opcode(Opcode.IF_LTZ, location = MatchAfterImmediately()),
+        opcode(if (directResponse) Opcode.MOVE_OBJECT else Opcode.CONST_4, location = MatchAfterImmediately())
+    )
+)
+
 /**
  * Response callback of the 'ypc/get_offline_upsell' endpoint.
  */
