@@ -13,11 +13,13 @@ import app.morphe.patcher.InstructionLocation.MatchAfterWithin
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.fieldAccess
+import app.morphe.patcher.literal
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.opcode
 import app.morphe.patcher.patch.mutableClassDefBy
 import app.morphe.patches.shared.misc.bridge.addBridge
 import app.morphe.patches.youtube.misc.playservice.is_21_23_or_greater
+import app.morphe.patches.youtube.video.information.ChannelInformationFingerprint
 import app.morphe.patches.youtube.video.information.PlaybackStartDescriptorToStringFingerprint
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
@@ -34,8 +36,6 @@ internal fun enableOfflineResumeOnLaunch(
     offlineState: FieldReference,
     resolverType: String?,
 ) {
-    if (!is_21_23_or_greater) return
-
     val descriptor = PlaybackStartDescriptorToStringFingerprint.classDef
     val descriptorType = descriptor.type
     val command = Fingerprint(
@@ -66,7 +66,87 @@ internal fun enableOfflineResumeOnLaunch(
         publicStatic
     )
 
-    preferFreshOfflinePositionInResolver(checkNotNull(resolverType), modelType, descriptorType, shouldResume)
+    if (is_21_23_or_greater) {
+        // The startup method receives the response and descriptor in consecutive registers.
+        descriptor.addBridge(
+            scopeName, listOf(modelType, descriptorType), "Z", 3,
+            """
+                invoke-static { p1, p0 }, $shouldResume
+                move-result v0
+                return v0
+            """,
+            publicStatic
+        )
+        enableOfflineResumeInDirector(
+            modelType, descriptorType, shouldResume, "$descriptorType->$scopeName($modelType${descriptorType})Z"
+        )
+        preferFreshOfflinePositionInResolver(checkNotNull(resolverType), modelType, descriptorType, shouldResume)
+    } else {
+        enableLegacyOfflineResume(modelType, descriptorType, shouldResume)
+    }
+}
+
+private fun enableOfflineResumeInDirector(
+    modelType: String,
+    descriptorType: String,
+    shouldResume: String,
+    shouldResumeAtStartup: String,
+) {
+    val gate = Fingerprint(
+        parameters = emptyList(),
+        returnType = "Z",
+        filters = listOf(literal(45732853))
+    ).method
+    val startup = Fingerprint(
+        classFingerprint = ChannelInformationFingerprint,
+        parameters = listOf("L", modelType, descriptorType),
+        returnType = "V",
+        filters = listOf(
+            methodCall(gate),
+            opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately())
+        )
+    )
+    val refresh = Fingerprint(
+        classFingerprint = ChannelInformationFingerprint,
+        parameters = listOf(startup.method.parameterTypes.first().toString(), descriptorType),
+        returnType = "V",
+        filters = listOf(
+            methodCall(opcode = Opcode.INVOKE_INTERFACE, parameters = emptyList(), returnType = modelType),
+            opcode(Opcode.MOVE_RESULT_OBJECT, location = MatchAfterImmediately()),
+            methodCall(gate),
+            opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately())
+        )
+    )
+
+    // On 21.23.492+, the director can bypass the offline resolver at startup and when applying
+    // a refreshed player response. Let a playable download opened from its card use either path.
+    val startupGate = startup.instructionMatches.last()
+    val startupResult = startupGate.getInstruction<OneRegisterInstruction>().registerA
+    startup.method.addInstructionsWithLabels(
+        startupGate.index + 1,
+        """
+            if-nez v$startupResult, :resume
+            invoke-static/range { p2 .. p3 }, $shouldResumeAtStartup
+            move-result v$startupResult
+            :resume
+            nop
+        """
+    )
+
+    val (_, response, _, refreshGate) = refresh.instructionMatches
+    val modelRegister = response.getInstruction<OneRegisterInstruction>().registerA
+    val refreshResult = refreshGate.getInstruction<OneRegisterInstruction>().registerA
+    refresh.method.addInstructionsWithLabels(
+        refreshGate.index + 1,
+        """
+            if-nez v$refreshResult, :resume
+            move-object/from16 v$refreshResult, p2
+            invoke-static { v$refreshResult, v$modelRegister }, $shouldResume
+            move-result v$refreshResult
+            :resume
+            nop
+        """
+    )
 }
 
 private fun preferFreshOfflinePositionInResolver(
