@@ -20,9 +20,13 @@ import app.morphe.patcher.literal
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.opcode
 import app.morphe.patcher.string
+import app.morphe.patches.youtube.misc.playservice.is_20_51_or_greater
+import app.morphe.patches.youtube.misc.playservice.is_21_23_or_greater
+import app.morphe.patches.youtube.video.information.ChannelInformationFingerprint
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 
 internal object YouTubeOfflineVideoEndpointFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
@@ -107,7 +111,11 @@ internal object ResolveCommandFingerprint : Fingerprint(
 
 internal object OfflineDownloadCardCommandFingerprint : Fingerprint(
     filters = listOf(
-        methodCall(opcode = Opcode.INVOKE_STATIC, parameters = listOf("J", "J"), returnType = "F"),
+        methodCall(
+            opcode = Opcode.INVOKE_STATIC,
+            parameters = listOf("J", "J"),
+            returnType = "F"
+        ),
         opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately()),
         string("PPSV", location = MatchAfterImmediately()),
         methodCall(
@@ -121,11 +129,19 @@ internal object OfflineDownloadCardCommandFingerprint : Fingerprint(
     )
 )
 
-internal fun offlinePlaybackPositionExpiryFingerprint(playerResponseModel: String, directResponse: Boolean) = Fingerprint(
-    parameters = if (directResponse) listOf("L", playerResponseModel, "L") else listOf("L", "L"),
-    returnType = if (directResponse) "Ljava/lang/Long;" else "V",
+internal fun offlinePlaybackPositionExpiryFingerprint(playerResponseModelType: String) = Fingerprint(
+    parameters = if (is_21_23_or_greater) listOf("L", playerResponseModelType, "L") else listOf("L", "L"),
+    returnType = if (is_21_23_or_greater) "Ljava/lang/Long;" else "V",
     filters = listOfNotNull(
-        if (directResponse) null else fieldAccess(opcode = Opcode.IGET_OBJECT, type = playerResponseModel),
+        if (is_21_23_or_greater) null else fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            type = playerResponseModelType
+        ),
+        if (is_21_23_or_greater) null else fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            definingClass = "this",
+            location = MatchAfterImmediately()
+        ),
         methodCall(definingClass = "Lj$/time/Instant;", name = "toEpochMilli"),
         opcode(Opcode.MOVE_RESULT_WIDE, location = MatchAfterImmediately()),
         methodCall(returnType = "Ljava/lang/Long;", location = MatchAfterImmediately()),
@@ -134,8 +150,206 @@ internal fun offlinePlaybackPositionExpiryFingerprint(playerResponseModel: Strin
         opcode(Opcode.MOVE_RESULT_WIDE, location = MatchAfterImmediately()),
         opcode(Opcode.CMP_LONG, location = MatchAfterImmediately()),
         opcode(Opcode.IF_LTZ, location = MatchAfterImmediately()),
-        opcode(if (directResponse) Opcode.MOVE_OBJECT else Opcode.CONST_4, location = MatchAfterImmediately())
+        opcode(
+            if (is_21_23_or_greater) Opcode.MOVE_OBJECT else Opcode.CONST_4,
+            location = MatchAfterImmediately()
+        )
     )
+)
+
+internal fun playbackStartDescriptorCommandFingerprint(descriptorType: String, commandType: String) = Fingerprint(
+    definingClass = descriptorType,
+    name = "<init>",
+    filters = listOf(
+        fieldAccess(
+            opcode = Opcode.IPUT_OBJECT,
+            definingClass = "this",
+            type = commandType
+        )
+    )
+)
+
+internal fun offlinePlaybackStartFingerprint(playerResponseModelType: String, descriptorType: String) = Fingerprint(
+    classFingerprint = ChannelInformationFingerprint,
+    parameters = listOf("L", playerResponseModelType, descriptorType),
+    returnType = "V"
+)
+
+internal fun offlinePositionLookupFingerprint(
+    startupMethod: MethodReference,
+    contextType: String,
+    playerResponseModelType: String,
+    descriptorType: String,
+    resolverType: String?
+) = Fingerprint(
+    definingClass = startupMethod.definingClass,
+    name = startupMethod.name,
+    filters = listOfNotNull(
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            definingClass = "this",
+            type = resolverType
+        ),
+        if (is_21_23_or_greater) null else fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            definingClass = contextType,
+            location = MatchAfterImmediately()
+        ),
+        if (is_21_23_or_greater) null else methodCall(
+            opcode = Opcode.INVOKE_INTERFACE,
+            parameters = emptyList(),
+            returnType = "L",
+            location = MatchAfterImmediately()
+        ),
+        if (is_21_23_or_greater) null else opcode(
+            Opcode.MOVE_RESULT_OBJECT,
+            location = MatchAfterImmediately()
+        ),
+        methodCall(
+            opcode = Opcode.INVOKE_VIRTUAL,
+            parameters = when {
+                is_21_23_or_greater -> listOf(descriptorType, playerResponseModelType, "L")
+                is_20_51_or_greater -> listOf("L", "L")
+                else -> listOf("L")
+            },
+            returnType = if (is_21_23_or_greater) "Ljava/lang/Long;" else "V",
+            location = MatchAfterWithin(6)
+        )
+    )
+)
+
+internal fun offlinePlayerResponseRefreshFingerprint(
+    directorType: String,
+    contextType: String,
+    descriptorType: String,
+    playerResponseModelType: String
+) = Fingerprint(
+    definingClass = directorType,
+    parameters = listOf(contextType, descriptorType),
+    returnType = "V",
+    filters = listOf(
+        fieldAccess(opcode = Opcode.IGET_OBJECT, definingClass = contextType),
+        methodCall(
+            opcode = Opcode.INVOKE_INTERFACE,
+            parameters = emptyList(),
+            returnType = playerResponseModelType,
+            location = MatchAfterImmediately()
+        )
+    )
+)
+
+internal fun offlinePositionCallbackFingerprint(callbackType: String) = Fingerprint(
+    definingClass = callbackType,
+    parameters = listOf("Ljava/lang/Object;", "Ljava/lang/Object;"),
+    returnType = "Ljava/lang/Object;"
+)
+
+internal fun offlinePlaybackStatePositionFingerprint(
+    startupMethod: MethodReference,
+    playbackStateGetter: MethodReference
+) = Fingerprint(
+    definingClass = startupMethod.definingClass,
+    name = startupMethod.name,
+    filters = listOf(
+        methodCall(playbackStateGetter),
+        opcode(Opcode.MOVE_RESULT_OBJECT, location = MatchAfterImmediately()),
+        fieldAccess(
+            opcode = Opcode.IGET_WIDE,
+            definingClass = playbackStateGetter.returnType,
+            type = "J",
+            location = MatchAfterImmediately()
+        )
+    )
+)
+
+internal fun offlinePlayerCreationFingerprint(
+    startupMethod: MethodReference,
+    playerResponseModelType: String
+) = Fingerprint(
+    definingClass = startupMethod.definingClass,
+    name = startupMethod.name,
+    filters = listOf(
+        methodCall(
+            parameters = listOf(playerResponseModelType, "Ljava/lang/String;", "J") +
+                    if (is_20_51_or_greater) listOf("I", "L") else emptyList(),
+            returnType = "L"
+        )
+    )
+)
+
+internal fun offlinePlaybackPositionUpdateFingerprint(
+    refreshMethod: MethodReference,
+    resolverMethod: MethodReference,
+    contextPlayerType: String
+) = Fingerprint(
+    definingClass = refreshMethod.definingClass,
+    name = refreshMethod.name,
+    filters = listOf(
+        methodCall(resolverMethod),
+        methodCall(
+            definingClass = refreshMethod.definingClass,
+            parameters = emptyList(),
+            returnType = contextPlayerType
+        ),
+        opcode(Opcode.MOVE_RESULT_OBJECT, location = MatchAfterImmediately()),
+        methodCall("Ljava/lang/Long;->longValue()J"),
+        opcode(Opcode.MOVE_RESULT_WIDE, location = MatchAfterImmediately()),
+        methodCall(
+            opcode = Opcode.INVOKE_STATIC,
+            parameters = listOf(contextPlayerType, "J"),
+            returnType = "V",
+            location = MatchAfterImmediately()
+        )
+    )
+)
+
+internal fun offlinePlayerRefreshApplyFingerprint(
+    refreshMethod: MethodReference,
+    contextPlayerType: String
+) = Fingerprint(
+    definingClass = refreshMethod.definingClass,
+    name = refreshMethod.name,
+    filters = listOf(
+        methodCall(
+            definingClass = "this",
+            parameters = listOf("Z", "I", contextPlayerType),
+            returnType = "V"
+        )
+    )
+)
+
+internal fun offlinePlaybackPositionResolverFingerprint(
+    resolverType: String,
+    playerResponseModelType: String,
+    descriptorType: String
+) = Fingerprint(
+    definingClass = resolverType,
+    parameters = listOf(descriptorType, playerResponseModelType, "L"),
+    returnType = "Ljava/lang/Long;",
+    filters = listOf(
+        methodCall(
+            definingClass = descriptorType,
+            parameters = emptyList(),
+            returnType = "Z"
+        ),
+        opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately()),
+        opcode(Opcode.IF_EQ, location = MatchAfterImmediately()),
+        methodCall(
+            definingClass = descriptorType,
+            parameters = emptyList(),
+            returnType = "J",
+            location = MatchAfterWithin(10)
+        ),
+        opcode(Opcode.MOVE_RESULT_WIDE, location = MatchAfterImmediately()),
+        methodCall("Ljava/lang/Long;->valueOf(J)Ljava/lang/Long;", location = MatchAfterImmediately())
+    ) + List(4) {
+        methodCall(
+            opcode = Opcode.INVOKE_STATIC,
+            definingClass = "this",
+            parameters = listOf(playerResponseModelType),
+            returnType = "Ljava/lang/Long;"
+        )
+    }
 )
 
 /**
@@ -210,7 +424,13 @@ internal fun playerResponseGetterFingerprint(playerResponseModelClass: String, p
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = playerResponse,
     parameters = listOf(),
-    filters = listOf(fieldAccess(opcode = Opcode.IGET_OBJECT, definingClass = "this", type = playerResponse))
+    filters = listOf(
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            definingClass = "this",
+            type = playerResponse
+        )
+    )
 )
 
 internal fun playerResponseModelConstructorFingerprint(playerResponseField: FieldReference) = Fingerprint(

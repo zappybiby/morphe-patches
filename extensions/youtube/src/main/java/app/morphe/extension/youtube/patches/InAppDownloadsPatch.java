@@ -51,6 +51,7 @@ import app.morphe.extension.youtube.innertube.Offline.OfflineFormat;
 import app.morphe.extension.youtube.innertube.Offline.OfflineFormatAvailability;
 import app.morphe.extension.youtube.innertube.Offline.OfflineFormatLabel;
 import app.morphe.extension.youtube.innertube.Offline.OfflineFormatType;
+import app.morphe.extension.youtube.innertube.Offline.OfflinePlaybackPositionConfig;
 import app.morphe.extension.youtube.innertube.Offline.OfflinePlayerConfig;
 import app.morphe.extension.youtube.innertube.Offline.OfflinePlayerResponse;
 import app.morphe.extension.youtube.innertube.Offline.OfflinePlaylistAction;
@@ -185,33 +186,51 @@ public final class InAppDownloadsPatch {
         }
     }
 
-    /** Marks the timed command so playback can look up progress when the card opens. */
+    /**
+     * Injection point.
+     * <p>
+     * Marks Downloads card commands to resume from the saved position.
+     *
+     * @return The marked command, or null to keep the original.
+     */
     @Nullable
-    public static byte[] markOfflineDownloadCardCommand(MessageLite command, @Nullable String playlistId) {
+    public static byte[] markOfflineDownloadCardCommand(@NonNull MessageLite command, @Nullable String playlistId) {
         try {
             if (Settings.DOWNLOAD_MODE.get() != DownloadMode.IN_APP || !"PPSV".equals(playlistId)) {
                 return null;
             }
+
             return OfflineCommand.parseFrom(command.toByteArray()).toBuilder()
-                    .setPreferFreshOfflinePosition(true).build().toByteArray();
+                    .setResumeOfflinePlayback(true)
+                    .build()
+                    .toByteArray();
         } catch (Exception ex) {
             Logger.printException(() -> "markOfflineDownloadCardCommand failure", ex);
             return null;
         }
     }
 
-    public static boolean preferFreshOfflinePosition(@Nullable MessageLite command, @Nullable MessageLite offlineState) {
+    /**
+     * Injection point.
+     * <p>
+     * Checks whether a marked command opens a playable download.
+     */
+    public static boolean shouldResumeOfflinePlayback(@Nullable MessageLite command, @Nullable MessageLite offlineState) {
         try {
             return Settings.DOWNLOAD_MODE.get() == DownloadMode.IN_APP && command != null && offlineState != null
-                    && OfflineCommand.parseFrom(command.toByteArray()).getPreferFreshOfflinePosition()
+                    && OfflineCommand.parseFrom(command.toByteArray()).getResumeOfflinePlayback()
                     && isPlayableOfflineState(offlineState);
         } catch (Exception ex) {
-            Logger.printException(() -> "preferFreshOfflinePosition failure", ex);
+            Logger.printException(() -> "shouldResumeOfflinePlayback failure", ex);
             return false;
         }
     }
 
-    /** Allows a playable download's local position when its offline snapshot has no update time. */
+    /**
+     * Injection point.
+     * <p>
+     * Allows a playable download's local position when its offline snapshot has no update time.
+     */
     public static boolean useOfflinePositionWithoutTimestamp(@Nullable MessageLite offlineState) {
         try {
             return Settings.DOWNLOAD_MODE.get() == DownloadMode.IN_APP && offlineState != null
@@ -227,35 +246,40 @@ public final class InAppDownloadsPatch {
                 == OfflineStateAction.OFFLINE_STATE_ACTION_OK;
     }
 
-    /** Enables native progress recording when new or existing saved player responses are loaded. */
+    /**
+     * Injection point.
+     * <p>
+     * Enables native progress recording when new or existing saved player responses are loaded.
+     *
+     * @return The updated player response, or null to keep the original.
+     */
     @Nullable
-    public static byte[] enableOfflinePlaybackPosition(@Nullable MessageLite playerResponse) {
+    public static byte[] enableOfflinePlaybackPositionTracking(@Nullable MessageLite playerResponse) {
         try {
             if (Settings.DOWNLOAD_MODE.get() != DownloadMode.IN_APP || playerResponse == null) {
                 return null;
             }
-            OfflinePlayerResponse original = OfflinePlayerResponse.parseFrom(playerResponse.toByteArray());
-            OfflinePlayerResponse response = Playback.enablePositionTracking(original);
-            return response == original ? null : response.toByteArray();
-        } catch (Exception ex) {
-            Logger.printException(() -> "enableOfflinePlaybackPosition failure", ex);
-            return null;
-        }
-    }
 
-    static final class Playback {
-        static OfflinePlayerResponse enablePositionTracking(OfflinePlayerResponse response) {
+            OfflinePlayerResponse response = OfflinePlayerResponse.parseFrom(playerResponse.toByteArray());
             if (!response.hasOfflineState()
                     || response.getOfflineState().getAction() != OfflineStateAction.OFFLINE_STATE_ACTION_OK) {
-                return response;
+                return null;
             }
-            var config = response.getPlayerConfig();
-            var position = config.getPlaybackPositionConfig();
-            if (position.getEnablePlaybackPositionTracking()) {
-                return response;
+
+            OfflinePlayerConfig playerConfig = response.getPlayerConfig();
+            OfflinePlaybackPositionConfig playbackPositionConfig = playerConfig.getPlaybackPositionConfig();
+            if (playbackPositionConfig.getEnablePlaybackPositionTracking()) {
+                return null;
             }
-            return response.toBuilder().setPlayerConfig(config.toBuilder().setPlaybackPositionConfig(
-                    position.toBuilder().setEnablePlaybackPositionTracking(true))).build();
+
+            return response.toBuilder()
+                    .setPlayerConfig(playerConfig.toBuilder().setPlaybackPositionConfig(
+                            playbackPositionConfig.toBuilder().setEnablePlaybackPositionTracking(true)))
+                    .build()
+                    .toByteArray();
+        } catch (Exception ex) {
+            Logger.printException(() -> "enableOfflinePlaybackPositionTracking failure", ex);
+            return null;
         }
     }
 
@@ -746,5 +770,15 @@ public final class InAppDownloadsPatch {
             tracklist.setCaptionTracks(i, track.toBuilder().setBaseUrl(baseUrl));
         }
         return captions.toBuilder().setPlayerCaptionsTracklistRenderer(tracklist).build();
+    }
+
+    /**
+     * The native callback interface and empty implementation are added during patching.
+     */
+    public static final class NoOpOfflinePositionCallback {
+        public static final NoOpOfflinePositionCallback INSTANCE = new NoOpOfflinePositionCallback();
+
+        private NoOpOfflinePositionCallback() {
+        }
     }
 }

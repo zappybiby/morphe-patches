@@ -52,13 +52,11 @@ import app.morphe.util.ResourceGroup
 import app.morphe.util.copyResources
 import app.morphe.util.setExtensionIsPatchIncluded
 import com.android.tools.smali.dexlib2.AccessFlags
-import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction21t
 import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ThreeRegisterInstruction
-import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
@@ -200,20 +198,20 @@ val downloadsPatch = patch(
 
         // Modern Downloads cards embed the saved position when they render. Mark their commands for a fresh
         // lookup at launch and retain the embedded position as a fallback.
-        val cardCommandType = OfflineDownloadCardCommandFingerprint.matchAll(1..1).single().let { card ->
-            val call = card.instructionMatches[3]
-            val timedCommand = call.methodReference
-            val commandType = timedCommand.returnType
-            val builder = mutableClassDefBy(timedCommand.definingClass)
-            val parameters = timedCommand.parameterTypes.map { it.toString() }
+        val cardCommandType = OfflineDownloadCardCommandFingerprint.let {
+            val commandCall = it.instructionMatches[3]
+            val commandMethodReference = commandCall.methodReference
+            val commandType = commandMethodReference.returnType
+            val commandBuilderClass = mutableClassDefBy(commandMethodReference.definingClass)
+            val parameters = commandMethodReference.parameterTypes.map { it.toString() }
             val bridgeName = "patch_createOfflineDownloadCardCommand"
-            builder.addBridge(
+            commandBuilderClass.addBridge(
                 bridgeName,
                 parameters,
                 commandType,
                 7,
                 """
-                    invoke-static { p0, p1, p2, p3 }, $timedCommand
+                    invoke-static { p0, p1, p2, p3 }, $commandMethodReference
                     move-result-object v0
                     invoke-static { v0, p1 }, $EXTENSION_IN_APP_DOWNLOADS_CLASS->markOfflineDownloadCardCommand(Lcom/google/protobuf/MessageLite;Ljava/lang/String;)[B
                     move-result-object v1
@@ -229,11 +227,11 @@ val downloadsPatch = patch(
                 """,
                 AccessFlags.PUBLIC.value or AccessFlags.STATIC.value
             )
-            val registers = call.getInstruction<FiveRegisterInstruction>()
-            val bridge = "${builder.type}->$bridgeName(${parameters.joinToString("")})$commandType"
-            card.method.replaceInstruction(
-                call.index,
-                "invoke-static { v${registers.registerC}, v${registers.registerD}, v${registers.registerE}, v${registers.registerF} }, $bridge"
+            val registers = commandCall.getInstruction<FiveRegisterInstruction>()
+            val bridgeMethodReference = "${commandBuilderClass.type}->$bridgeName(${parameters.joinToString("")})$commandType"
+            it.method.replaceInstruction(
+                commandCall.index,
+                "invoke-static { v${registers.registerC}, v${registers.registerD}, v${registers.registerE}, v${registers.registerF} }, $bridgeMethodReference"
             )
             commandType
         }
@@ -326,11 +324,11 @@ val downloadsPatch = patch(
             val fromBytesMethod = fromBytesFingerprint.method
             val playerResponseType = fromBytesFingerprint.instructionMatches.last()
                 .instruction.getReference<TypeReference>()!!.type
-            val playerResponseGetterMatch = playerResponseGetterFingerprint(
+            val playerResponseGetterFingerprint = playerResponseGetterFingerprint(
                 fromBytesMethod.definingClass,
                 playerResponseType
             )
-            val playerResponseGetter = playerResponseGetterMatch.method
+            val playerResponseGetter = playerResponseGetterFingerprint.method
             val offlineStateType = UpdateOfflineVideoPolicyFingerprint.matchAll().first().method.parameterTypes[2]
             val offlineStateField = classDefBy(playerResponseType).fields.single { it.type == offlineStateType }
 
@@ -338,47 +336,45 @@ val downloadsPatch = patch(
             // On 20.51.39+, the resume resolver treats the resulting zero as expired.
             // Allow a zero timestamp for playable downloads in In App mode.
             val resolverType = if (is_20_51_or_greater) {
-                val expiry = offlinePlaybackPositionExpiryFingerprint(playerResponseModelType, is_21_23_or_greater)
-                val (comparisonMatch, branchMatch, drop) = expiry.instructionMatches.takeLast(3)
+                val expiryFingerprint = offlinePlaybackPositionExpiryFingerprint(playerResponseModelType)
+                val (comparisonMatch, branchMatch, expiredPositionMatch) = expiryFingerprint.instructionMatches.takeLast(3)
                 val comparison = comparisonMatch.getInstruction<ThreeRegisterInstruction>()
-                val result = comparison.registerA
-                val cutoff = comparison.registerB
-                val timestamp = comparison.registerC
-                val branch = expiry.method.getInstruction<BuilderInstruction21t>(branchMatch.index)
-                val responseRegister = if (is_21_23_or_greater) {
+                val resultRegister = comparison.registerA
+                val cutoffRegister = comparison.registerB
+                val timestampRegister = comparison.registerC
+                val branch = expiryFingerprint.method.getInstruction<BuilderInstruction21t>(branchMatch.index)
+                val playerResponseModelRegister = if (is_21_23_or_greater) {
                     "p2"
                 } else {
-                    val load = expiry.method.implementation!!.instructions.take(drop.index).last { instruction ->
-                        instruction.opcode == Opcode.IGET_OBJECT &&
-                            instruction.getReference<FieldReference>()?.type == playerResponseModelType
-                    } as OneRegisterInstruction
-                    "v${load.registerA}"
+                    val playerResponseModelLoad = expiryFingerprint.instructionMatches.first()
+                    "v${playerResponseModelLoad.getInstruction<OneRegisterInstruction>().registerA}"
                 }
 
-                expiry.method.addInstructionsWithLabels(
-                    drop.index,
+                expiryFingerprint.method.addInstructionsWithLabels(
+                    expiredPositionMatch.index,
                     """
-                        const-wide/16 v$cutoff, 0x0
-                        cmp-long v$result, v$timestamp, v$cutoff
-                        if-nez v$result, :expire_position
-                        if-eqz $responseRegister, :expire_position
-                        invoke-interface/range { $responseRegister .. $responseRegister }, $playerResponseModelType->${playerResponseGetter.name}()$playerResponseType
-                        move-result-object v$result
-                        if-eqz v$result, :expire_position
-                        iget-object v$result, v$result, $offlineStateField
-                        invoke-static { v$result }, $EXTENSION_IN_APP_DOWNLOADS_CLASS->useOfflinePositionWithoutTimestamp(Lcom/google/protobuf/MessageLite;)Z
-                        move-result v$result
-                        if-nez v$result, :keep_position
+                        const-wide/16 v$cutoffRegister, 0x0
+                        cmp-long v$resultRegister, v$timestampRegister, v$cutoffRegister
+                        if-nez v$resultRegister, :expire_position
+                        if-eqz $playerResponseModelRegister, :expire_position
+                        invoke-interface/range { $playerResponseModelRegister .. $playerResponseModelRegister }, $playerResponseModelType->${playerResponseGetter.name}()$playerResponseType
+                        move-result-object v$resultRegister
+                        if-eqz v$resultRegister, :expire_position
+                        iget-object v$resultRegister, v$resultRegister, $offlineStateField
+                        invoke-static { v$resultRegister }, $EXTENSION_IN_APP_DOWNLOADS_CLASS->useOfflinePositionWithoutTimestamp(Lcom/google/protobuf/MessageLite;)Z
+                        move-result v$resultRegister
+                        if-nez v$resultRegister, :keep_position
+                        :expire_position
+                        nop
                     """,
-                    ExternalLabel("expire_position", expiry.method.getInstruction(drop.index)),
                     ExternalLabel("keep_position", branch.target.location.instruction!!)
                 )
-                expiry.method.definingClass
+                expiryFingerprint.method.definingClass
             } else {
                 null
             }
 
-            enableOfflineResumeOnLaunch(
+            enableOfflinePlaybackResume(
                 cardCommandType,
                 playerResponseModelType,
                 playerResponseGetter.name,
@@ -387,9 +383,9 @@ val downloadsPatch = patch(
                 resolverType
             )
 
-            val normalizeResponse = ImmutableMethod(
+            val enablePlaybackPositionTrackingMethod = ImmutableMethod(
                 fromBytesMethod.definingClass,
-                "patch_enableOfflinePlaybackPosition",
+                "patch_enableOfflinePlaybackPositionTracking",
                 listOf(ImmutableMethodParameter(playerResponseType, null, null)),
                 playerResponseType,
                 AccessFlags.PRIVATE.value or AccessFlags.STATIC.value,
@@ -403,7 +399,7 @@ val downloadsPatch = patch(
                         if-eqz p0, :keep_player_response
                         iget-object v0, p0, $offlineStateField
                         if-eqz v0, :keep_player_response
-                        invoke-static { p0 }, $EXTENSION_IN_APP_DOWNLOADS_CLASS->enableOfflinePlaybackPosition(Lcom/google/protobuf/MessageLite;)[B
+                        invoke-static { p0 }, $EXTENSION_IN_APP_DOWNLOADS_CLASS->enableOfflinePlaybackPositionTracking(Lcom/google/protobuf/MessageLite;)[B
                         move-result-object v0
                         if-eqz v0, :keep_player_response
                         sget-object v1, ${protoDefaultInstance(playerResponseType)}
@@ -418,18 +414,17 @@ val downloadsPatch = patch(
                     """
                 )
             }
-            fromBytesFingerprint.classDef.methods.add(normalizeResponse)
+            fromBytesFingerprint.classDef.methods.add(enablePlaybackPositionTrackingMethod)
 
             // The downloads database can save progress without updating the playback position entity used for resume.
             // Enable tracking when constructing the player model so existing and new downloads update that entity.
             playerResponseModelConstructorFingerprint(
-                playerResponseGetterMatch.instructionMatches.single().fieldReference
+                playerResponseGetterFingerprint.instructionMatches.single().fieldReference
             ).matchAll().forEach { constructor ->
-                check(constructor.method.parameterTypes.first() == playerResponseType)
                 constructor.method.addInstructions(
                     0,
                     """
-                        invoke-static/range { p1 .. p1 }, $normalizeResponse
+                        invoke-static/range { p1 .. p1 }, $enablePlaybackPositionTrackingMethod
                         move-result-object p1
                     """
                 )
