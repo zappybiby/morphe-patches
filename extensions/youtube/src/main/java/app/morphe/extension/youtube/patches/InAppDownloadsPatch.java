@@ -184,6 +184,38 @@ public final class InAppDownloadsPatch {
         }
     }
 
+    /** Enables native progress recording when new or existing saved player responses are loaded. */
+    @Nullable
+    public static byte[] enableOfflinePlaybackPosition(@Nullable MessageLite playerResponse) {
+        try {
+            if (Settings.DOWNLOAD_MODE.get() != DownloadMode.IN_APP || playerResponse == null) {
+                return null;
+            }
+            OfflinePlayerResponse original = OfflinePlayerResponse.parseFrom(playerResponse.toByteArray());
+            OfflinePlayerResponse response = Playback.enablePositionTracking(original);
+            return response == original ? null : response.toByteArray();
+        } catch (Exception ex) {
+            Logger.printException(() -> "enableOfflinePlaybackPosition failure", ex);
+            return null;
+        }
+    }
+
+    static final class Playback {
+        static OfflinePlayerResponse enablePositionTracking(OfflinePlayerResponse response) {
+            if (!response.hasOfflineState()
+                    || response.getOfflineState().getAction() != OfflineStateAction.OFFLINE_STATE_ACTION_OK) {
+                return response;
+            }
+            var config = response.getPlayerConfig();
+            var position = config.getPlaybackPositionConfig();
+            if (position.getEnablePlaybackPositionTracking()) {
+                return response;
+            }
+            return response.toBuilder().setPlayerConfig(config.toBuilder().setPlaybackPositionConfig(
+                    position.toBuilder().setEnablePlaybackPositionTracking(true))).build();
+        }
+    }
+
     /**
      * Injection point.
      * <p>

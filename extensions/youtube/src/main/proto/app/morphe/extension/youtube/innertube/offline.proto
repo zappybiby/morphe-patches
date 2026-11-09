@@ -124,7 +124,12 @@ message OfflinePlayerResponse {
 }
 
 message OfflinePlayerConfig {
+    optional OfflinePlaybackPositionConfig playbackPositionConfig = 3;
     optional OfflineExoPlayerConfig exoPlayerConfig = 57825011;
+}
+
+message OfflinePlaybackPositionConfig {
+    optional bool enablePlaybackPositionTracking = 1;
 }
 
 message OfflineExoPlayerConfig {

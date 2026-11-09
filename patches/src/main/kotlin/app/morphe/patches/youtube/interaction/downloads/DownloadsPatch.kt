@@ -271,10 +271,61 @@ val downloadsPatch = patch(
             val fromBytesMethod = fromBytesFingerprint.method
             val playerResponseType = fromBytesFingerprint.instructionMatches.last()
                 .instruction.getReference<TypeReference>()!!.type
-            val playerResponseGetter = playerResponseGetterFingerprint(
+            val playerResponseGetterMatch = playerResponseGetterFingerprint(
                 fromBytesMethod.definingClass,
                 playerResponseType
-            ).method
+            )
+            val playerResponseGetter = playerResponseGetterMatch.method
+            val offlineStateType = UpdateOfflineVideoPolicyFingerprint.matchAll().first().method.parameterTypes[2]
+            val offlineStateField = classDefBy(playerResponseType).fields.single { it.type == offlineStateType }
+
+            val normalizeResponse = ImmutableMethod(
+                fromBytesMethod.definingClass,
+                "patch_enableOfflinePlaybackPosition",
+                listOf(ImmutableMethodParameter(playerResponseType, null, null)),
+                playerResponseType,
+                AccessFlags.PRIVATE.value or AccessFlags.STATIC.value,
+                null,
+                null,
+                MutableMethodImplementation(4)
+            ).toMutable().apply {
+                addInstructionsWithLabels(
+                    0,
+                    """
+                        if-eqz p0, :keep_player_response
+                        iget-object v0, p0, $offlineStateField
+                        if-eqz v0, :keep_player_response
+                        invoke-static { p0 }, $EXTENSION_IN_APP_DOWNLOADS_CLASS->enableOfflinePlaybackPosition(Lcom/google/protobuf/MessageLite;)[B
+                        move-result-object v0
+                        if-eqz v0, :keep_player_response
+                        sget-object v1, ${protoDefaultInstance(playerResponseType)}
+                        invoke-static { }, $GET_GENERATED_REGISTRY
+                        move-result-object v2
+                        invoke-static { v1, v0, v2 }, ${parseByteArrayWithRegistryMethodRef.get()!!}
+                        move-result-object v0
+                        check-cast v0, $playerResponseType
+                        return-object v0
+                        :keep_player_response
+                        return-object p0
+                    """
+                )
+            }
+            fromBytesFingerprint.classDef.methods.add(normalizeResponse)
+
+            // The downloads database can save progress without updating the playback position entity used for resume.
+            // Enable tracking when constructing the player model so existing and new downloads update that entity.
+            playerResponseModelConstructorFingerprint(
+                playerResponseGetterMatch.instructionMatches.single().fieldReference
+            ).matchAll().forEach { constructor ->
+                check(constructor.method.parameterTypes.first() == playerResponseType)
+                constructor.method.addInstructions(
+                    0,
+                    """
+                        invoke-static/range { p1 .. p1 }, $normalizeResponse
+                        move-result-object p1
+                    """
+                )
+            }
 
             val helperMethod = ImmutableMethod(
                 it.classDef.type,

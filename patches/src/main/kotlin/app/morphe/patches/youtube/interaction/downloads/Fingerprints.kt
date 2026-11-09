@@ -21,6 +21,7 @@ import app.morphe.patcher.opcode
 import app.morphe.patcher.string
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
+import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 
 internal object YouTubeOfflineVideoEndpointFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
@@ -174,7 +175,15 @@ internal fun playerResponseGetterFingerprint(playerResponseModelClass: String, p
     definingClass = playerResponseModelClass,
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = playerResponse,
-    parameters = listOf()
+    parameters = listOf(),
+    filters = listOf(fieldAccess(opcode = Opcode.IGET_OBJECT, definingClass = "this", type = playerResponse))
+)
+
+internal fun playerResponseModelConstructorFingerprint(playerResponseField: FieldReference) = Fingerprint(
+    definingClass = playerResponseField.definingClass,
+    name = "<init>",
+    filters = listOf(fieldAccess(reference = playerResponseField, opcode = Opcode.IPUT_OBJECT)),
+    custom = { method, _ -> method.parameterTypes.firstOrNull() == playerResponseField.type }
 )
 
 /**
