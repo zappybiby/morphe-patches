@@ -13,13 +13,16 @@ package app.morphe.patches.youtube.interaction.downloads
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
+import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.patch.classDefBy
+import app.morphe.patcher.patch.mutableClassDefBy
 import app.morphe.patcher.patch.patch
 import app.morphe.patcher.util.cloneParameters
 import app.morphe.patcher.util.getReference
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patcher.util.registersUsed
 import app.morphe.patcher.util.smali.ExternalLabel
+import app.morphe.patches.shared.misc.bridge.addBridge
 import app.morphe.patches.shared.misc.fix.proto.fixProtoLibraryPatch
 import app.morphe.patches.shared.misc.fix.proto.parseByteArrayWithRegistryMethodRef
 import app.morphe.patches.shared.misc.fix.proto.protoDefaultInstanceFingerprint
@@ -52,6 +55,7 @@ import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction21t
+import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ThreeRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
@@ -194,6 +198,46 @@ val downloadsPatch = patch(
 
         // region In-app downloads.
 
+        // Modern Downloads cards embed the saved position when they render. Mark their commands for a fresh
+        // lookup at launch and retain the embedded position as a fallback.
+        val cardCommandType = OfflineDownloadCardCommandFingerprint.matchAll(1..1).single().let { card ->
+            val call = card.instructionMatches[3]
+            val timedCommand = call.methodReference
+            val commandType = timedCommand.returnType
+            val builder = mutableClassDefBy(timedCommand.definingClass)
+            val parameters = timedCommand.parameterTypes.map { it.toString() }
+            val bridgeName = "patch_createOfflineDownloadCardCommand"
+            builder.addBridge(
+                bridgeName,
+                parameters,
+                commandType,
+                7,
+                """
+                    invoke-static { p0, p1, p2, p3 }, $timedCommand
+                    move-result-object v0
+                    invoke-static { v0, p1 }, $EXTENSION_IN_APP_DOWNLOADS_CLASS->markOfflineDownloadCardCommand(Lcom/google/protobuf/MessageLite;Ljava/lang/String;)[B
+                    move-result-object v1
+                    if-eqz v1, :return_command
+                    sget-object v0, ${protoDefaultInstance(commandType)}
+                    invoke-static { }, $GET_GENERATED_REGISTRY
+                    move-result-object v2
+                    invoke-static { v0, v1, v2 }, ${parseByteArrayWithRegistryMethodRef.get()!!}
+                    move-result-object v0
+                    check-cast v0, $commandType
+                    :return_command
+                    return-object v0
+                """,
+                AccessFlags.PUBLIC.value or AccessFlags.STATIC.value
+            )
+            val registers = call.getInstruction<FiveRegisterInstruction>()
+            val bridge = "${builder.type}->$bridgeName(${parameters.joinToString("")})$commandType"
+            card.method.replaceInstruction(
+                call.index,
+                "invoke-static { v${registers.registerC}, v${registers.registerD}, v${registers.registerE}, v${registers.registerF} }, $bridge"
+            )
+            commandType
+        }
+
         // Save the video instead of asking the server for the download action, which answers with the Premium upsell.
         ResolveCommandFingerprint.method.apply {
             val commandType = parameterTypes.first().toString()
@@ -293,7 +337,7 @@ val downloadsPatch = patch(
             // Offline snapshots can omit the update timestamp from a saved position.
             // On 20.51.39+, the resume resolver treats the resulting zero as expired.
             // Allow a zero timestamp for playable downloads in In App mode.
-            if (is_20_51_or_greater) {
+            val resolverType = if (is_20_51_or_greater) {
                 val expiry = offlinePlaybackPositionExpiryFingerprint(playerResponseModelType, is_21_23_or_greater)
                 val (comparisonMatch, branchMatch, drop) = expiry.instructionMatches.takeLast(3)
                 val comparison = comparisonMatch.getInstruction<ThreeRegisterInstruction>()
@@ -329,7 +373,19 @@ val downloadsPatch = patch(
                     ExternalLabel("expire_position", expiry.method.getInstruction(drop.index)),
                     ExternalLabel("keep_position", branch.target.location.instruction!!)
                 )
+                expiry.method.definingClass
+            } else {
+                null
             }
+
+            enableOfflineResumeOnLaunch(
+                cardCommandType,
+                playerResponseModelType,
+                playerResponseGetter.name,
+                playerResponseType,
+                offlineStateField,
+                resolverType
+            )
 
             val normalizeResponse = ImmutableMethod(
                 fromBytesMethod.definingClass,

@@ -12,6 +12,7 @@ package app.morphe.patches.youtube.interaction.downloads
 
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
+import app.morphe.patcher.InstructionLocation.MatchAfterWithin
 import app.morphe.patcher.anyInstruction
 import app.morphe.patcher.checkCast
 import app.morphe.patcher.fieldAccess
@@ -101,6 +102,22 @@ internal object ResolveCommandFingerprint : Fingerprint(
             string("Unknown command not resolved"), // 20.x
             string("Unknown command not resolved %s") // 21.x
         )
+    )
+)
+
+internal object OfflineDownloadCardCommandFingerprint : Fingerprint(
+    filters = listOf(
+        methodCall(opcode = Opcode.INVOKE_STATIC, parameters = listOf("J", "J"), returnType = "F"),
+        opcode(Opcode.MOVE_RESULT, location = MatchAfterImmediately()),
+        string("PPSV", location = MatchAfterImmediately()),
+        methodCall(
+            opcode = Opcode.INVOKE_STATIC,
+            parameters = listOf("Ljava/lang/String;", "Ljava/lang/String;", "I", "F"),
+            returnType = "L",
+            location = MatchAfterWithin(2)
+        ),
+        opcode(Opcode.MOVE_RESULT_OBJECT, location = MatchAfterImmediately()),
+        opcode(Opcode.INVOKE_VIRTUAL, location = MatchAfterImmediately())
     )
 )
 

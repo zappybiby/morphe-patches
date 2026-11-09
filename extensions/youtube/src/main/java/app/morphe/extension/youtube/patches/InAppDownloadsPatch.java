@@ -185,6 +185,32 @@ public final class InAppDownloadsPatch {
         }
     }
 
+    /** Marks the timed command so playback can look up progress when the card opens. */
+    @Nullable
+    public static byte[] markOfflineDownloadCardCommand(MessageLite command, @Nullable String playlistId) {
+        try {
+            if (Settings.DOWNLOAD_MODE.get() != DownloadMode.IN_APP || !"PPSV".equals(playlistId)) {
+                return null;
+            }
+            return OfflineCommand.parseFrom(command.toByteArray()).toBuilder()
+                    .setPreferFreshOfflinePosition(true).build().toByteArray();
+        } catch (Exception ex) {
+            Logger.printException(() -> "markOfflineDownloadCardCommand failure", ex);
+            return null;
+        }
+    }
+
+    public static boolean preferFreshOfflinePosition(@Nullable MessageLite command, @Nullable MessageLite offlineState) {
+        try {
+            return Settings.DOWNLOAD_MODE.get() == DownloadMode.IN_APP && command != null && offlineState != null
+                    && OfflineCommand.parseFrom(command.toByteArray()).getPreferFreshOfflinePosition()
+                    && isPlayableOfflineState(offlineState);
+        } catch (Exception ex) {
+            Logger.printException(() -> "preferFreshOfflinePosition failure", ex);
+            return false;
+        }
+    }
+
     /** Allows a playable download's local position when its offline snapshot has no update time. */
     public static boolean useOfflinePositionWithoutTimestamp(@Nullable MessageLite offlineState) {
         try {
