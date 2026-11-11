@@ -497,57 +497,6 @@ internal fun mediaBrowserReloadFingerprint(baseServiceType: String) = Fingerprin
     )
 )
 
-/** Locates the binder lookup YTM uses to check whether a folder result still has an active connection. */
-internal fun mediaBrowserResultDeliveryFingerprint(
-    resultType: String,
-    baseServiceType: String,
-    connectionType: String,
-) = Fingerprint(
-    definingClass = resultType,
-    returnType = "V",
-    parameters = listOf("Ljava/lang/Object;"),
-    filters = listOf(
-        fieldAccess(opcode = Opcode.IGET_OBJECT, definingClass = connectionType),
-        methodCall(
-            parameters = emptyList(),
-            returnType = "Landroid/os/IBinder;",
-            location = MatchAfterImmediately(),
-        ),
-        fieldAccess(opcode = Opcode.IGET_OBJECT, definingClass = baseServiceType),
-        methodCall(
-            name = "get",
-            parameters = listOf("Ljava/lang/Object;"),
-            returnType = "Ljava/lang/Object;",
-            location = MatchAfterImmediately(),
-        ),
-        string("Calling onLoadChildren() failed for id="),
-    )
-)
-
-/** Locates the subscription map and the option comparison used when adding an Android Auto subscription. */
-internal fun mediaBrowserSubscribeFingerprint(baseServiceType: String, connectionType: String) = Fingerprint(
-    name = "run",
-    returnType = "V",
-    parameters = emptyList(),
-    filters = listOf(
-        string("addSubscription for callback that isn't registered id="),
-        fieldAccess(opcode = Opcode.IGET_OBJECT, definingClass = connectionType, type = "Ljava/util/HashMap;"),
-        fieldAccess(opcode = Opcode.IGET_OBJECT, type = "Ljava/lang/Object;"),
-        checkCast("Landroid/os/Bundle;", location = MatchAfterImmediately()),
-        methodCall(
-            opcode = Opcode.INVOKE_STATIC,
-            parameters = listOf("Landroid/os/Bundle;", "Landroid/os/Bundle;"),
-            returnType = "Z",
-            location = MatchAfterWithin(4),
-        ),
-        methodCall(
-            definingClass = baseServiceType,
-            parameters = listOf("Ljava/lang/String;", connectionType, "Landroid/os/Bundle;"),
-            returnType = "V",
-        ),
-    )
-)
-
 // Android Auto search
 
 /** Identifies the query and parameter fields in a phone search request. */

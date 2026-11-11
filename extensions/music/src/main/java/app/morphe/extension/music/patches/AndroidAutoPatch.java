@@ -121,9 +121,6 @@ public final class AndroidAutoPatch {
     /** Calls YTM's browser service to reload an Auto page, such as Albums. */
     public interface FolderReload {
         void patch_reloadFolder(String parentMediaId, Object connection, @Nullable Bundle options);
-
-        /** @return false if the connection or matching subscription is no longer active. */
-        boolean patch_reloadSubscribedFolder(String parentMediaId, Object connection, @Nullable Bundle options);
     }
 
     public interface PhoneBrowseItem {
@@ -229,23 +226,18 @@ public final class AndroidAutoPatch {
             reload(options);
         }
 
-        private void reload(@Nullable Bundle options) {
+        private boolean reload(@Nullable Bundle options) {
             FolderReload service = browserService.get();
             Object connectedBrowser = connection.get();
             // Weak references allow the browser service and connection to be released after disconnection.
-            if (service == null || connectedBrowser == null) return;
+            if (service == null || connectedBrowser == null) return false;
             try {
                 service.patch_reloadFolder(parentMediaId, connectedBrowser, options);
+                return true;
             } catch (RuntimeException ex) {
                 Logger.printException(() -> "Could not refresh Android Auto folder: " + parentMediaId, ex);
+                return false;
             }
-        }
-
-        private boolean reloadSubscribed(@Nullable Bundle options) {
-            FolderReload service = browserService.get();
-            Object connectedBrowser = connection.get();
-            return service != null && connectedBrowser != null
-                    && service.patch_reloadSubscribedFolder(parentMediaId, connectedBrowser, options);
         }
     }
 
@@ -728,19 +720,10 @@ public final class AndroidAutoPatch {
                 root.refreshInFlight = true;
                 options = root.options;
             }
-            try {
-                if (!root.folder.reloadSubscribed(options)) {
-                    synchronized (AndroidAutoPatch.class) {
-                        root.refreshInFlight = false;
-                        Object connection = root.folder.connection().get();
-                        if (rootSubscriptions.get(connection) == root) rootSubscriptions.remove(connection);
-                    }
-                }
-            } catch (RuntimeException ex) {
+            if (!root.folder.reload(options)) {
                 synchronized (AndroidAutoPatch.class) {
                     root.refreshInFlight = false;
                 }
-                Logger.printException(() -> "Could not refresh Android Auto root", ex);
             }
         }
     }
