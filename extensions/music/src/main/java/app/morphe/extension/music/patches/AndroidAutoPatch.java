@@ -43,6 +43,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
@@ -217,20 +218,35 @@ public final class AndroidAutoPatch {
         }
 
         private void reload(boolean forceRefresh) {
+            Bundle options = null;
+            if (forceRefresh) {
+                options = new Bundle();
+                options.putBoolean(FORCE_REFRESH, true);
+            }
+            reload(options);
+        }
+
+        private void reload(@Nullable Bundle options) {
             FolderReload service = browserService.get();
             Object connectedBrowser = connection.get();
             // Weak references allow the browser service and connection to be released after disconnection.
             if (service == null || connectedBrowser == null) return;
             try {
-                Bundle options = null;
-                if (forceRefresh) {
-                    options = new Bundle();
-                    options.putBoolean(FORCE_REFRESH, true);
-                }
                 service.patch_reloadFolder(parentMediaId, connectedBrowser, options);
             } catch (RuntimeException ex) {
                 Logger.printException(() -> "Could not refresh Android Auto folder: " + parentMediaId, ex);
             }
+        }
+    }
+
+    private static final class RootSubscription {
+        final FolderSubscription folder;
+        @Nullable Bundle options;
+        boolean empty;
+        long lastRefresh;
+
+        RootSubscription(FolderReload browserService, Object connection) {
+            folder = new FolderSubscription(browserService, ROOT_MEDIA_ID, connection);
         }
     }
 
@@ -317,6 +333,7 @@ public final class AndroidAutoPatch {
     static final Executor BACKGROUND_EXECUTOR = Utils::runOnBackgroundThread;
     static final Handler mainHandler = new Handler(Looper.getMainLooper());
     private static final Runnable REFRESH_LIBRARY = AndroidAutoPatch::refreshLibrary;
+    private static final Runnable REFRESH_EMPTY_ROOTS = AndroidAutoPatch::refreshEmptyRoots;
 
     // A user's playlist can also be named "Playlists"; do not use these title matches for playback.
     private static final Set<String> playlistsTitleMatchMediaIds = ConcurrentHashMap.newKeySet();
@@ -325,6 +342,10 @@ public final class AndroidAutoPatch {
     // Remember which load last updated each folder on each Android Auto connection.
     @GuardedBy("itself")
     private static final WeakHashMap<Object, Map<String, FolderDelivery>> folderDeliveries = new WeakHashMap<>();
+    @GuardedBy("AndroidAutoPatch.class")
+    private static final Map<Object, RootSubscription> rootSubscriptions = new WeakHashMap<>();
+    @GuardedBy("AndroidAutoPatch.class")
+    private static long populatedRootCount;
     // Most recently opened Library folder, podcast show, or Home shelf to refresh after Library changes.
     @Nullable
     @GuardedBy("AndroidAutoPatch.class")
@@ -357,11 +378,10 @@ public final class AndroidAutoPatch {
      */
     public static synchronized void setPhoneBrowseClient(PhoneBrowseClient client) {
         phoneBrowseClient = client;
-        libraryMediaId = null;
-        librarySubscription = null;
-        podcastsSubscription = null;
-        homeSubscription = null;
-        mainHandler.removeCallbacks(REFRESH_LIBRARY);
+        clearTabs();
+        rootSubscriptions.clear();
+        populatedRootCount = 0;
+        mainHandler.removeCallbacks(REFRESH_EMPTY_ROOTS);
         Logger.printDebug(() -> "Ready to request phone Library contents: " +
                 client.getClass().getName());
     }
@@ -654,13 +674,17 @@ public final class AndroidAutoPatch {
         output.write(value);
     }
 
-    // Refresh after Library changes
+    // Refresh browser subscriptions
 
-    /** Injection point. Remembers the folder subscriptions that Library changes can refresh. */
+    /** Injection point. Remembers subscriptions that the patch can refresh. */
     public static synchronized void rememberSubscription(FolderReload browserService,
-            @Nullable String parentMediaId, Object connection) {
+            @Nullable String parentMediaId, Object connection, @Nullable Bundle options) {
         if (parentMediaId == null) return;
-        if (parentMediaId.startsWith(LIBRARY_PREFIX)
+        if (ROOT_MEDIA_ID.equals(parentMediaId)) {
+            RootSubscription root = rootSubscriptions.computeIfAbsent(connection,
+                    key -> new RootSubscription(browserService, key));
+            root.options = options == null ? null : new Bundle(options);
+        } else if (parentMediaId.startsWith(LIBRARY_PREFIX)
                 || parentMediaId.startsWith(PODCAST_COLLECTION_PREFIX)
                 || parentMediaId.startsWith(HOME_SHELF_PREFIX)
                 || SPEED_DIAL_MEDIA_ID.equals(parentMediaId)
@@ -670,6 +694,25 @@ public final class AndroidAutoPatch {
             podcastsSubscription = new FolderSubscription(browserService, parentMediaId, connection);
         } else if (parentMediaId.equals(homeMediaId)) {
             homeSubscription = new FolderSubscription(browserService, parentMediaId, connection);
+        }
+    }
+
+    private static void refreshEmptyRoots() {
+        List<RootSubscription> subscriptions;
+        synchronized (AndroidAutoPatch.class) {
+            subscriptions = new ArrayList<>(rootSubscriptions.values());
+        }
+        for (RootSubscription root : subscriptions) {
+            Bundle options;
+            synchronized (AndroidAutoPatch.class) {
+                Object connection = root.folder.connection().get();
+                if (connection == null || rootSubscriptions.get(connection) != root
+                        || !root.empty || root.lastRefresh == populatedRootCount) continue;
+                // If the reload is also empty, wait for another populated root before retrying.
+                root.lastRefresh = populatedRootCount;
+                options = root.options;
+            }
+            root.folder.reload(options);
         }
     }
 
@@ -765,7 +808,7 @@ public final class AndroidAutoPatch {
         try {
             String parentMediaId = request.patch_getRequestedMediaId();
             if (ROOT_MEDIA_ID.equals(parentMediaId)) {
-                return initializeTabs(ytmItems);
+                return initializeTabs(request, ytmItems);
             }
             if (PODCASTS_MEDIA_ID.equals(parentMediaId)) {
                 return new ArrayList<>(cachedPodcastFolders);
@@ -806,21 +849,38 @@ public final class AndroidAutoPatch {
     @Nullable
     @GuardedBy("AndroidAutoPatch.class")
     private static List<MediaBrowserCompat.MediaItem> initializeTabs(
-            @Nullable List<MediaBrowserCompat.MediaItem> rootTabs) {
-        // Do not reuse saved requests or podcast content after the main tabs reload.
-        librarySubscription = null;
-        podcastsSubscription = null;
-        homeSubscription = null;
-        mainHandler.removeCallbacks(REFRESH_LIBRARY);
-        homeMediaId = null;
-        libraryMediaId = null;
-        cachedPodcastFolders = Collections.emptyList();
+            BrowseRequest request, @Nullable List<MediaBrowserCompat.MediaItem> rootTabs) {
+        RootSubscription root = rootSubscriptions.get(request.patch_getBrowserConnection());
+        if (rootTabs == null || rootTabs.isEmpty()) {
+            if (root != null) {
+                root.empty = true;
+                if (root.lastRefresh != populatedRootCount) mainHandler.post(REFRESH_EMPTY_ROOTS);
+            }
+            return rootTabs;
+        }
+
+        final boolean recovering = root != null && root.empty;
+        if (root != null) root.empty = false;
+        if (root != null && rootTabs.size() >= 2) {
+            populatedRootCount++;
+            // A second Auto browser can get an empty root while YTM fetches tabs for the first.
+            // Reload on the main thread after releasing the lock used for result delivery.
+            mainHandler.post(REFRESH_EMPTY_ROOTS);
+        }
 
         // Add Podcasts only when YTM supplies Home and Library without a Podcasts tab.
-        if (rootTabs == null || rootTabs.size() != 2) return rootTabs;
+        if (rootTabs.size() != 2) {
+            clearTabs();
+            return rootTabs;
+        }
 
-        homeMediaId = rootTabs.get(0).a();
-        libraryMediaId = rootTabs.get(1).a();
+        String homeId = rootTabs.get(0).a();
+        String libraryId = rootTabs.get(1).a();
+        if (!recovering || !Objects.equals(homeMediaId, homeId) || !Objects.equals(libraryMediaId, libraryId)) {
+            clearTabs();
+            homeMediaId = homeId;
+            libraryMediaId = libraryId;
+        }
         List<MediaBrowserCompat.MediaItem> updatedRootTabs = new ArrayList<>(rootTabs);
         Bundle podcastsExtras = new Bundle();
         podcastsExtras.putInt(CONTENT_STYLE_BROWSABLE_HINT, CONTENT_STYLE_LIST);
@@ -833,6 +893,17 @@ public final class AndroidAutoPatch {
         updatedRootTabs.add(1, new MediaBrowserCompat.MediaItem(
                 podcastsDescription, MediaBrowserCompat.MediaItem.FLAG_BROWSABLE));
         return updatedRootTabs;
+    }
+
+    @GuardedBy("AndroidAutoPatch.class")
+    private static void clearTabs() {
+        librarySubscription = null;
+        podcastsSubscription = null;
+        homeSubscription = null;
+        mainHandler.removeCallbacks(REFRESH_LIBRARY);
+        homeMediaId = null;
+        libraryMediaId = null;
+        cachedPodcastFolders = Collections.emptyList();
     }
 
     @GuardedBy("AndroidAutoPatch.class")

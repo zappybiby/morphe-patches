@@ -815,7 +815,7 @@ private fun addRequestConnectionGetter(reloadMethod: Method) {
     )
 }
 
-/** Retains folder subscriptions so Library changes can reload them on the current Auto connection. */
+/** Retains subscriptions so the patch can reload them on the current Auto connection. */
 private fun addFolderReload(
     baseServiceType: String,
     reloadMethod: Method,
@@ -837,11 +837,11 @@ private fun addFolderReload(
     )
     val rememberSubscriptionMethod = "$EXTENSION_CLASS->rememberSubscription(" +
             FOLDER_RELOAD +
-            "Ljava/lang/String;Ljava/lang/Object;)V"
+            "Ljava/lang/String;Ljava/lang/Object;Landroid/os/Bundle;)V"
     baseServiceClass.findMutableMethodOf(reloadMethod).addInstructions(
         0,
         """
-            invoke-static/range { p0 .. p2 }, $rememberSubscriptionMethod
+            invoke-static/range { p0 .. p3 }, $rememberSubscriptionMethod
         """
     )
 }
