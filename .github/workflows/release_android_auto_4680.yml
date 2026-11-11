@@ -1,0 +1,77 @@
+name: Release Android Auto empty-root test
+
+on:
+  push:
+    branches:
+      - test/android-auto-4680
+    paths:
+      - .github/workflows/release_android_auto_4680.yml
+      - test-builds/android-auto-4680/**
+
+permissions:
+  contents: write
+  packages: read
+
+concurrency:
+  group: android-auto-4680-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish single-patch bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Gradle
+        uses: burrunan/gradle-cache-action@v3
+
+      - name: Compile patch sources and extensions
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./gradlew :patches:buildAndroid --no-daemon
+
+      - name: Package Android Auto only
+        run: |
+          mapfile -t bundles < <(find patches/build/libs -maxdepth 1 -name '*.mpp')
+          test "${#bundles[@]}" -eq 1
+          android_jar="$(find "$ANDROID_HOME/platforms" -name android.jar | sort -V | tail -n 1)"
+          test -f "$android_jar"
+          bash test-builds/android-auto-4680/build-addon.sh \
+            . "${bundles[0]}" \
+            extensions/music/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes \
+            "$android_jar" dist/android-auto-4680-test-1.mpp
+
+      - name: Checksum download
+        working-directory: dist
+        run: sha256sum android-auto-4680-test-1.mpp > SHA256SUMS
+
+      - name: Upload test bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-auto-4680-test-1
+          path: |
+            dist/android-auto-4680-test-1.mpp
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create android-auto-4680-test-1 \
+            dist/android-auto-4680-test-1.mpp dist/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "Android Auto empty-root test 1" \
+            --notes-file test-builds/android-auto-4680/RELEASE.md \
+            --prerelease --latest=false
