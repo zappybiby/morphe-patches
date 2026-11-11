@@ -752,23 +752,21 @@ private fun hookBrowseRequest(
 
 // region Android Auto connections and folder refresh
 
-/** Reloads Android Auto folders after successful Library changes. */
+/** Reloads Android Auto folders with active subscriptions. */
 private fun patchFolderRefresh() {
-    // Android Auto requests folder updates through MediaBrowserServiceCompat.
-    // MediaBrowserService.notifyChildrenChanged does not reach that connection, so refresh through the compat service.
     val serviceSuperclass = classDefBy(MUSIC_BROWSER_SERVICE_CLASS).superclass
         ?: throw PatchException("Could not resolve MusicBrowserService's superclass")
     val baseServiceType = classDefBy(serviceSuperclass).superclass
         ?: throw PatchException("Could not resolve the browser service base class above $serviceSuperclass")
     val reloadMethod = mediaBrowserReloadFingerprint(baseServiceType).originalMethod
 
-    addRequestConnectionGetter(reloadMethod)
-    addFolderReload(baseServiceType, reloadMethod)
+    val folderResultType = addRequestConnectionGetter(reloadMethod)
+    addFolderReload(reloadMethod, folderResultType)
     hookLibraryChangeCompletion()
 }
 
 /** Identifies the Android Auto connection so refreshes target the right folder subscription. */
-private fun addRequestConnectionGetter(reloadMethod: Method) {
+private fun addRequestConnectionGetter(reloadMethod: Method): String {
     val connectionType = reloadMethod.parameterTypes[1].toString()
     // YTM passes the Android Auto connection to the object that delivers the folder's contents.
     val folderResultConstructor = reloadMethod.instructions.asSequence()
@@ -813,21 +811,25 @@ private fun addRequestConnectionGetter(reloadMethod: Method) {
             return-object v0
         """
     )
+    return folderResultClass.type
 }
 
-/** Retains subscriptions so the patch can reload them on the current Auto connection. */
+/** Exposes direct folder reload and a subscription-checked reload for root recovery. */
 private fun addFolderReload(
-    baseServiceType: String,
     reloadMethod: Method,
+    folderResultType: String,
 ) {
+    val baseServiceType = reloadMethod.definingClass
     val connectionType = reloadMethod.parameterTypes[1].toString()
+    val (callbacks, getBinder, connections, findConnection) =
+        mediaBrowserResultDeliveryFingerprint(folderResultType, baseServiceType, connectionType).instructionMatches
+    val (_, subscriptions, subscriptionOptions, _, sameOptions) =
+        mediaBrowserSubscribeFingerprint(baseServiceType, connectionType).instructionMatches
+    val optionsField = subscriptionOptions.fieldReference
     val baseServiceClass = mutableClassDefBy(baseServiceType)
     baseServiceClass.interfaces.add(FOLDER_RELOAD)
     baseServiceClass.addInterfaceMethod(
-        interfaceMethod = findInterfaceMethod(
-            FOLDER_RELOAD,
-            "patch_reloadFolder",
-        ),
+        interfaceMethod = findInterfaceMethod(FOLDER_RELOAD, "patch_reloadFolder"),
         registerCount = 4,
         instructions = """
             check-cast p2, $connectionType
@@ -835,14 +837,56 @@ private fun addFolderReload(
             return-void
         """
     )
+    baseServiceClass.addInterfaceMethod(
+        interfaceMethod = findInterfaceMethod(FOLDER_RELOAD, "patch_reloadSubscribedFolder"),
+        registerCount = 6,
+        instructions = """
+            check-cast p2, $connectionType
+            iget-object v0, p2, ${callbacks.fieldReference}
+            if-eqz v0, :not_subscribed
+            invoke-virtual { v0 }, ${getBinder.methodReference}
+            move-result-object v0
+            iget-object v1, p0, ${connections.fieldReference}
+            invoke-virtual { v1, v0 }, ${findConnection.methodReference}
+            move-result-object v0
+            if-ne v0, p2, :not_subscribed
+
+            iget-object v0, p2, ${subscriptions.fieldReference}
+            invoke-virtual { v0, p1 }, Ljava/util/HashMap;->get(Ljava/lang/Object;)Ljava/lang/Object;
+            move-result-object v0
+            check-cast v0, Ljava/util/List;
+            if-eqz v0, :not_subscribed
+            invoke-interface { v0 }, Ljava/util/List;->iterator()Ljava/util/Iterator;
+            move-result-object v0
+
+            :next_option
+            invoke-interface { v0 }, Ljava/util/Iterator;->hasNext()Z
+            move-result v1
+            if-eqz v1, :not_subscribed
+            invoke-interface { v0 }, Ljava/util/Iterator;->next()Ljava/lang/Object;
+            move-result-object v1
+            check-cast v1, ${optionsField.definingClass}
+            iget-object v1, v1, $optionsField
+            check-cast v1, Landroid/os/Bundle;
+            invoke-static { p3, v1 }, ${sameOptions.methodReference}
+            move-result v1
+            if-eqz v1, :next_option
+
+            invoke-virtual { p0, p1, p2, p3 }, $reloadMethod
+            const/4 v0, 0x1
+            return v0
+
+            :not_subscribed
+            const/4 v0, 0x0
+            return v0
+        """
+    )
     val rememberSubscriptionMethod = "$EXTENSION_CLASS->rememberSubscription(" +
             FOLDER_RELOAD +
             "Ljava/lang/String;Ljava/lang/Object;Landroid/os/Bundle;)V"
-    baseServiceClass.findMutableMethodOf(reloadMethod).addInstructions(
+    baseServiceClass.findMutableMethodOf(reloadMethod).addInstruction(
         0,
-        """
-            invoke-static/range { p0 .. p3 }, $rememberSubscriptionMethod
-        """
+        "invoke-static/range { p0 .. p3 }, $rememberSubscriptionMethod",
     )
 }
 

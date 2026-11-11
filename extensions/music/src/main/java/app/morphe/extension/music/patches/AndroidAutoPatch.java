@@ -121,6 +121,9 @@ public final class AndroidAutoPatch {
     /** Calls YTM's browser service to reload an Auto page, such as Albums. */
     public interface FolderReload {
         void patch_reloadFolder(String parentMediaId, Object connection, @Nullable Bundle options);
+
+        /** @return false if the connection or matching subscription is no longer active. */
+        boolean patch_reloadSubscribedFolder(String parentMediaId, Object connection, @Nullable Bundle options);
     }
 
     public interface PhoneBrowseItem {
@@ -237,12 +240,20 @@ public final class AndroidAutoPatch {
                 Logger.printException(() -> "Could not refresh Android Auto folder: " + parentMediaId, ex);
             }
         }
+
+        private boolean reloadSubscribed(@Nullable Bundle options) {
+            FolderReload service = browserService.get();
+            Object connectedBrowser = connection.get();
+            return service != null && connectedBrowser != null
+                    && service.patch_reloadSubscribedFolder(parentMediaId, connectedBrowser, options);
+        }
     }
 
     private static final class RootSubscription {
         final FolderSubscription folder;
         @Nullable Bundle options;
         boolean empty;
+        boolean refreshInFlight;
         long lastRefresh;
 
         RootSubscription(FolderReload browserService, Object connection) {
@@ -679,21 +690,25 @@ public final class AndroidAutoPatch {
     /** Injection point. Remembers subscriptions that the patch can refresh. */
     public static synchronized void rememberSubscription(FolderReload browserService,
             @Nullable String parentMediaId, Object connection, @Nullable Bundle options) {
-        if (parentMediaId == null) return;
-        if (ROOT_MEDIA_ID.equals(parentMediaId)) {
-            RootSubscription root = rootSubscriptions.computeIfAbsent(connection,
-                    key -> new RootSubscription(browserService, key));
-            root.options = options == null ? null : new Bundle(options);
-        } else if (parentMediaId.startsWith(LIBRARY_PREFIX)
-                || parentMediaId.startsWith(PODCAST_COLLECTION_PREFIX)
-                || parentMediaId.startsWith(HOME_SHELF_PREFIX)
-                || SPEED_DIAL_MEDIA_ID.equals(parentMediaId)
-                || playlistsTitleMatchMediaIds.contains(parentMediaId)) {
-            librarySubscription = new FolderSubscription(browserService, parentMediaId, connection);
-        } else if (PODCASTS_MEDIA_ID.equals(parentMediaId)) {
-            podcastsSubscription = new FolderSubscription(browserService, parentMediaId, connection);
-        } else if (parentMediaId.equals(homeMediaId)) {
-            homeSubscription = new FolderSubscription(browserService, parentMediaId, connection);
+        try {
+            if (parentMediaId == null) return;
+            if (ROOT_MEDIA_ID.equals(parentMediaId)) {
+                RootSubscription root = rootSubscriptions.computeIfAbsent(connection,
+                        key -> new RootSubscription(browserService, key));
+                root.options = options == null ? null : new Bundle(options);
+            } else if (parentMediaId.startsWith(LIBRARY_PREFIX)
+                    || parentMediaId.startsWith(PODCAST_COLLECTION_PREFIX)
+                    || parentMediaId.startsWith(HOME_SHELF_PREFIX)
+                    || SPEED_DIAL_MEDIA_ID.equals(parentMediaId)
+                    || playlistsTitleMatchMediaIds.contains(parentMediaId)) {
+                librarySubscription = new FolderSubscription(browserService, parentMediaId, connection);
+            } else if (PODCASTS_MEDIA_ID.equals(parentMediaId)) {
+                podcastsSubscription = new FolderSubscription(browserService, parentMediaId, connection);
+            } else if (parentMediaId.equals(homeMediaId)) {
+                homeSubscription = new FolderSubscription(browserService, parentMediaId, connection);
+            }
+        } catch (RuntimeException ex) {
+            Logger.printException(() -> "rememberSubscription failure", ex);
         }
     }
 
@@ -707,12 +722,26 @@ public final class AndroidAutoPatch {
             synchronized (AndroidAutoPatch.class) {
                 Object connection = root.folder.connection().get();
                 if (connection == null || rootSubscriptions.get(connection) != root
-                        || !root.empty || root.lastRefresh == populatedRootCount) continue;
+                        || !root.empty || root.refreshInFlight || root.lastRefresh == populatedRootCount) continue;
                 // If the reload is also empty, wait for another populated root before retrying.
                 root.lastRefresh = populatedRootCount;
+                root.refreshInFlight = true;
                 options = root.options;
             }
-            root.folder.reload(options);
+            try {
+                if (!root.folder.reloadSubscribed(options)) {
+                    synchronized (AndroidAutoPatch.class) {
+                        root.refreshInFlight = false;
+                        Object connection = root.folder.connection().get();
+                        if (rootSubscriptions.get(connection) == root) rootSubscriptions.remove(connection);
+                    }
+                }
+            } catch (RuntimeException ex) {
+                synchronized (AndroidAutoPatch.class) {
+                    root.refreshInFlight = false;
+                }
+                Logger.printException(() -> "Could not refresh Android Auto root", ex);
+            }
         }
     }
 
@@ -851,6 +880,7 @@ public final class AndroidAutoPatch {
     private static List<MediaBrowserCompat.MediaItem> initializeTabs(
             BrowseRequest request, @Nullable List<MediaBrowserCompat.MediaItem> rootTabs) {
         RootSubscription root = rootSubscriptions.get(request.patch_getBrowserConnection());
+        if (root != null) root.refreshInFlight = false;
         if (rootTabs == null || rootTabs.isEmpty()) {
             if (root != null) {
                 root.empty = true;
