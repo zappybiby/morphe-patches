@@ -1,0 +1,77 @@
+name: Android KVM boot check
+
+on:
+  push:
+    branches:
+      - diagnostics/android-kvm-boot-20261114
+    paths:
+      - .github/workflows/android-kvm-boot-check.yml
+
+permissions: {}
+
+jobs:
+  boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check SDK and KVM access
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$SDK"
+          test -x "$SDK/cmdline-tools/latest/bin/sdkmanager"
+          ls -l /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm || {
+            echo "KVM is not accessible; no permissions were changed."
+            exit 1
+          }
+          echo "SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          printf '%s\n' "$SDK/cmdline-tools/latest/bin" "$SDK/emulator" "$SDK/platform-tools" >> "$GITHUB_PATH"
+          echo "KVM access available." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Boot a clean Android emulator
+        run: |
+          set -euo pipefail
+          # Use existing SDK license acceptance only; fail if new acceptance is needed.
+          sdkmanager --sdk_root="$SDK_ROOT" "platform-tools" "emulator" "system-images;android-34;default;x86_64" </dev/null
+          test -f "$SDK_ROOT/system-images/android-34/default/x86_64/system.img"
+          emulator -accel-check
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo no | avdmanager create avd -n boot-check -k "system-images;android-34;default;x86_64" --force
+          emulator -avd boot-check -no-window -no-audio -no-boot-anim -no-snapshot -no-metrics -gpu swiftshader_indirect -accel on -cores 2 -memory 2048 >"$RUNNER_TEMP/emulator.log" 2>&1 &
+          EMULATOR_PID=$!
+          cleanup() {
+            adb -s emulator-5554 emu kill >/dev/null 2>&1 || true
+            kill "$EMULATOR_PID" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          deadline=$((SECONDS + 900))
+          booted=0
+          until (( SECONDS >= deadline )); do
+            kill -0 "$EMULATOR_PID" || { tail -100 "$RUNNER_TEMP/emulator.log"; exit 1; }
+            state=$(timeout 10 adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+            if [[ "$state" == 1 ]]; then booted=1; break; fi
+            sleep 5
+          done
+          if [[ "$booted" != 1 ]]; then
+            echo "Android did not complete boot within 15 minutes."
+            tail -100 "$RUNNER_TEMP/emulator.log"
+            exit 1
+          fi
+          timeout 30 adb -s emulator-5554 shell pm path android
+          ABI=$(adb -s emulator-5554 shell getprop ro.product.cpu.abilist | tr -d '\r')
+          API=$(adb -s emulator-5554 shell getprop ro.build.version.sdk | tr -d '\r')
+          echo "Android boot completed; PackageManager responds."
+          echo "API=$API ABI=$ABI"
+          {
+            echo "## Boot check passed"
+            echo "- Android completed boot with hardware acceleration."
+            echo "- PackageManager responded."
+            echo "- API: $API"
+            echo "- ABIs: $ABI"
+            echo "- No Android Auto APK, user account, or race test was run."
+          } >> "$GITHUB_STEP_SUMMARY"
