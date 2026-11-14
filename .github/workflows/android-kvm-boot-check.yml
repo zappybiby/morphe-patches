@@ -24,10 +24,9 @@ jobs:
           test -n "$SDK"
           test -x "$SDK/cmdline-tools/latest/bin/sdkmanager"
           ls -l /dev/kvm
-          test -r /dev/kvm && test -w /dev/kvm || {
-            echo "KVM is not accessible; no permissions were changed."
-            exit 1
-          }
+          # Approved: grant only this disposable runner user extra access.
+          sudo setfacl -m "u:$(id -u):rw" /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
           echo "SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           printf '%s\n' "$SDK/cmdline-tools/latest/bin" "$SDK/emulator" "$SDK/platform-tools" >> "$GITHUB_PATH"
           echo "KVM access available." >> "$GITHUB_STEP_SUMMARY"
