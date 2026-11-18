@@ -111,6 +111,9 @@ public final class AndroidAutoPatch {
          */
         @Nullable Object patch_getBrowserConnection();
 
+        /** Native result created for this individual load. */
+        Object patch_getBrowseResult();
+
         /**
          * Sends items through YTM and {@link AndroidAutoPatch#handleBrowseResult}.
          * YTM may remove items to keep the returned list within its byte limit.
@@ -245,7 +248,7 @@ public final class AndroidAutoPatch {
         final FolderSubscription folder;
         @Nullable Bundle options;
         boolean empty;
-        boolean refreshInFlight;
+        @Nullable WeakReference<Object> pendingResult;
         long lastRefresh;
 
         RootSubscription(FolderReload browserService, Object connection) {
@@ -347,6 +350,7 @@ public final class AndroidAutoPatch {
     private static final WeakHashMap<Object, Map<String, FolderDelivery>> folderDeliveries = new WeakHashMap<>();
     @GuardedBy("AndroidAutoPatch.class")
     private static final Map<Object, RootSubscription> rootSubscriptions = new WeakHashMap<>();
+    private static final ThreadLocal<RootSubscription> dispatchingRoot = new ThreadLocal<>();
     @GuardedBy("AndroidAutoPatch.class")
     private static long populatedRootCount;
     // Most recently opened Library folder, podcast show, or Home shelf to refresh after Library changes.
@@ -704,6 +708,17 @@ public final class AndroidAutoPatch {
         }
     }
 
+    /** Injection point. YTM constructs the result synchronously when the patch requests a reload. */
+    public static void onBrowseResultCreated(Object result) {
+        RootSubscription root = dispatchingRoot.get();
+        if (root == null) return;
+        dispatchingRoot.remove();
+        synchronized (AndroidAutoPatch.class) {
+            // The native result holds the connection. Let both go after disconnection.
+            root.pendingResult = new WeakReference<>(result);
+        }
+    }
+
     private static void refreshEmptyRoots() {
         List<RootSubscription> subscriptions;
         synchronized (AndroidAutoPatch.class) {
@@ -714,16 +729,21 @@ public final class AndroidAutoPatch {
             synchronized (AndroidAutoPatch.class) {
                 Object connection = root.folder.connection().get();
                 if (connection == null || rootSubscriptions.get(connection) != root
-                        || !root.empty || root.refreshInFlight || root.lastRefresh == populatedRootCount) continue;
+                        || !root.empty || root.lastRefresh == populatedRootCount
+                        || (root.pendingResult != null && root.pendingResult.get() != null)) continue;
                 // If the reload is also empty, wait for another populated root before retrying.
                 root.lastRefresh = populatedRootCount;
-                root.refreshInFlight = true;
                 options = root.options;
             }
-            if (!root.folder.reload(options)) {
-                synchronized (AndroidAutoPatch.class) {
-                    root.refreshInFlight = false;
+            dispatchingRoot.set(root);
+            try {
+                if (!root.folder.reload(options)) {
+                    synchronized (AndroidAutoPatch.class) {
+                        root.pendingResult = null;
+                    }
                 }
+            } finally {
+                dispatchingRoot.remove();
             }
         }
     }
@@ -863,7 +883,10 @@ public final class AndroidAutoPatch {
     private static List<MediaBrowserCompat.MediaItem> initializeTabs(
             BrowseRequest request, @Nullable List<MediaBrowserCompat.MediaItem> rootTabs) {
         RootSubscription root = rootSubscriptions.get(request.patch_getBrowserConnection());
-        if (root != null) root.refreshInFlight = false;
+        // Android Auto can have another load outstanding on the same connection.
+        if (root != null && root.pendingResult != null && root.pendingResult.get() == request.patch_getBrowseResult()) {
+            root.pendingResult = null;
+        }
         if (rootTabs == null || rootTabs.isEmpty()) {
             if (root != null) {
                 root.empty = true;

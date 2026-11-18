@@ -762,13 +762,13 @@ private fun patchFolderRefresh() {
         ?: throw PatchException("Could not resolve the browser service base class above $serviceSuperclass")
     val reloadMethod = mediaBrowserReloadFingerprint(baseServiceType).originalMethod
 
-    addRequestConnectionGetter(reloadMethod)
+    patchRequestResults(reloadMethod)
     addFolderReload(baseServiceType, reloadMethod)
     hookLibraryChangeCompletion()
 }
 
-/** Identifies the Android Auto connection so refreshes target the right folder subscription. */
-private fun addRequestConnectionGetter(reloadMethod: Method) {
+/** Exposes each native result and its connection so a root retry can recognize its own reply. */
+private fun patchRequestResults(reloadMethod: Method) {
     val connectionType = reloadMethod.parameterTypes[1].toString()
     // YTM passes the Android Auto connection to the object that delivers the folder's contents.
     val folderResultConstructor = reloadMethod.instructions.asSequence()
@@ -780,6 +780,12 @@ private fun addRequestConnectionGetter(reloadMethod: Method) {
     val folderResultClass = mutableClassDefBy(folderResultConstructor.definingClass)
     val resultConnectionField = folderResultClass.fields.single { field ->
         field.type == connectionType
+    }
+    folderResultClass.methods.single { it == folderResultConstructor }.apply {
+        addInstruction(
+            implementation!!.instructions.indexOfLast { it.opcode == Opcode.RETURN_VOID },
+            "invoke-static/range { p0 .. p0 }, $EXTENSION_CLASS->onBrowseResultCreated(Ljava/lang/Object;)V"
+        )
     }
 
     val requestType =
@@ -794,6 +800,14 @@ private fun addRequestConnectionGetter(reloadMethod: Method) {
 
     folderResultClass.accessFlags = folderResultClass.accessFlags.toPublicAccessFlags()
     resultConnectionField.accessFlags = resultConnectionField.accessFlags.toPublicAccessFlags()
+    requestClass.addInterfaceMethod(
+        interfaceMethod = findInterfaceMethod(BROWSE_REQUEST, "patch_getBrowseResult"),
+        registerCount = 1,
+        instructions = """
+            iget-object p0, p0, $requestResultField
+            return-object p0
+        """
+    )
     requestClass.addInterfaceMethod(
         interfaceMethod = findInterfaceMethod(
             BROWSE_REQUEST,
