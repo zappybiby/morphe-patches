@@ -1,5 +1,8 @@
 package app.morphe.patches.music.misc.gms
 
+import app.morphe.patcher.extensions.InstructionExtensions.removeInstruction
+import app.morphe.patcher.patch.mutableClassDefBy
+import app.morphe.patcher.util.returnEarly
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.misc.fileprovider.fileProviderPatch
 import app.morphe.patches.music.misc.gms.Constants.MORPHE_MUSIC_PACKAGE_NAME
@@ -28,6 +31,15 @@ val gmsCoreSupportPatch = gmsCoreSupportPatch(
         sendQueueMovesToReceiver()
         skipQueueRestorationWhileCasting()
         searchDeviceFilesWithMediaProvider()
+
+        // Hide YouTube Music's stock Settings button by omitting its PendingIntent from the media browser root extras.
+        // Android Auto's MediaSettingsStub.startCarApp() rejects the sideloaded settings template,
+        // so tapping the stock button crashes every supported version of YouTube Music.
+        AndroidAutoSettingsIntentFingerprint.let {
+            it.method.removeInstruction(it.instructionMatches.last().index)
+        }
+        mutableClassDefBy("Lapp/morphe/extension/music/patches/AndroidAutoSettingsTab;")
+            .methods.single { it.name == "replacesStockSettings" }.returnEarly(true)
     },
 ) {
     dependsOn(

@@ -17,12 +17,16 @@ import static app.morphe.extension.music.patches.AndroidAutoBrowseResponseParser
 import static app.morphe.extension.music.patches.AndroidAutoBrowseResponseParser.isPlayable;
 import static app.morphe.extension.music.patches.AndroidAutoBrowseResponseParser.isUploadedCollection;
 import static app.morphe.extension.music.patches.AndroidAutoBrowseResponseParser.libraryItems;
+import static app.morphe.extension.music.patches.AndroidAutoSettingsTab.SETTINGS_MEDIA_ID;
 import static app.morphe.extension.music.patches.ProtoMessage.WIRE_LENGTH_DELIMITED;
 
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
+import android.os.Message;
 import android.os.Parcel;
 import android.support.v4.media.MediaBrowserCompat;
 import android.support.v4.media.MediaDescriptionCompat;
@@ -121,6 +125,13 @@ public final class AndroidAutoPatch {
     /** Calls YTM's browser service to reload an Auto page, such as Albums. */
     public interface FolderReload {
         void patch_reloadFolder(String parentMediaId, Object connection, @Nullable Bundle options);
+    }
+
+    public interface SettingsBrowserConnection {
+        @Nullable IBinder patch_getSettingsBrowserBinder();
+        @Nullable String patch_getSettingsBrowserPackage();
+        int patch_getSettingsBrowserUid();
+        boolean patch_isSettingsBrowserConnected();
     }
 
     public interface PhoneBrowseItem {
@@ -242,6 +253,11 @@ public final class AndroidAutoPatch {
     private static final String ROOT_MEDIA_ID = "com.google.android.projection.gearhead";
     private static final String UPGRADE_PROMPT_MEDIA_ID = "promotion_version_1";
     private static final String PODCASTS_MEDIA_ID = "morphe:aa:podcasts";
+    private static final String TURN_ON_ACTION = "morphe:aa:settings:on";
+    private static final String TURN_OFF_ACTION = "morphe:aa:settings:off";
+    // AndroidX MediaConstants from the custom browse action contract.
+    private static final String ACTION_LIMIT = "androidx.media.utils.MediaBrowserCompat.extras.CUSTOM_BROWSER_ACTION_LIMIT";
+    private static final String ACTION_EXTRAS = "androidx.media.utils.extras.";
     private static final String SPEED_DIAL_MEDIA_ID = "morphe:aa:speed-dial";
 
     private static final String HOME_SHELF_PREFIX = "morphe-aa-home://section/";
@@ -324,7 +340,16 @@ public final class AndroidAutoPatch {
     static final Executor BACKGROUND_EXECUTOR = Utils::runOnBackgroundThread;
     static final Handler mainHandler = new Handler(Looper.getMainLooper());
     private static final Runnable REFRESH_LIBRARY = AndroidAutoPatch::refreshLibrary;
-
+    @GuardedBy("AndroidAutoPatch.class")
+    private static final WeakHashMap<Object, FolderSubscription> rootSubscriptions = new WeakHashMap<>();
+    @GuardedBy("AndroidAutoPatch.class")
+    private static final WeakHashMap<Object, FolderSubscription> settingsSubscriptions = new WeakHashMap<>();
+    @GuardedBy("AndroidAutoPatch.class")
+    private static final WeakHashMap<IBinder, Integer> settingsActionClients = new WeakHashMap<>();
+    @GuardedBy("AndroidAutoPatch.class")
+    private static final WeakHashMap<Object, AndroidAutoSettingsNavigation> settingsNavigation = new WeakHashMap<>();
+    // This Android Auto build opens the Confirm row only when the user selects it.
+    private static final int ANDROID_AUTO_VERSION_WITH_BROWSE_CONFIRMATION = 180664263;
     // A user's playlist can also be named "Playlists"; do not use these title matches for playback.
     private static final Set<String> playlistsTitleMatchMediaIds = ConcurrentHashMap.newKeySet();
     // Give each browse load a number to distinguish earlier requests from later requests.
@@ -364,6 +389,10 @@ public final class AndroidAutoPatch {
      */
     public static synchronized void setPhoneBrowseClient(PhoneBrowseClient client) {
         phoneBrowseClient = client;
+        rootSubscriptions.clear();
+        settingsSubscriptions.clear();
+        settingsActionClients.clear();
+        settingsNavigation.clear();
         libraryMediaId = null;
         librarySubscription = null;
         podcastsSubscription = null;
@@ -389,9 +418,13 @@ public final class AndroidAutoPatch {
      */
     public static boolean handleBrowseRequest(BrowseRequest request) {
         try {
+            String requestedMediaId = request.patch_getRequestedMediaId();
+            if (isSettingsMediaId(requestedMediaId)) {
+                mainHandler.post(() -> deliverSettingsPage(request, requestedMediaId));
+                return true;
+            }
             PhoneBrowseClient browseClient = phoneBrowseClient;
             if (browseClient == null) return false;
-            String requestedMediaId = request.patch_getRequestedMediaId();
             if (requestedMediaId == null) return false;
             if (requestedMediaId.equals(SPEED_DIAL_MEDIA_ID)) {
                 new HomeLoad(request, HomeLoad.Mode.SPEED_DIAL, "", Collections.emptyList()).start();
@@ -668,7 +701,11 @@ public final class AndroidAutoPatch {
     public static synchronized void rememberSubscription(FolderReload browserService,
             @Nullable String parentMediaId, Object connection) {
         if (parentMediaId == null) return;
-        if (parentMediaId.startsWith(LIBRARY_PREFIX)
+        if (ROOT_MEDIA_ID.equals(parentMediaId)) {
+            rootSubscriptions.put(connection, new FolderSubscription(browserService, parentMediaId, connection));
+        } else if (SETTINGS_MEDIA_ID.equals(parentMediaId)) {
+            settingsSubscriptions.put(connection, new FolderSubscription(browserService, parentMediaId, connection));
+        } else if (parentMediaId.startsWith(LIBRARY_PREFIX)
                 || parentMediaId.startsWith(PODCAST_COLLECTION_PREFIX)
                 || parentMediaId.startsWith(HOME_SHELF_PREFIX)
                 || SPEED_DIAL_MEDIA_ID.equals(parentMediaId)
@@ -729,6 +766,7 @@ public final class AndroidAutoPatch {
     public static boolean isCustomMediaId(@Nullable String mediaId) {
         if (mediaId == null) return false;
         return mediaId.equals(PODCASTS_MEDIA_ID)
+                || isSettingsMediaId(mediaId)
                 || mediaId.equals(SPEED_DIAL_MEDIA_ID)
                 || mediaId.startsWith(LIBRARY_PREFIX)
                 || mediaId.startsWith(HOME_SHELF_PREFIX)
@@ -824,12 +862,25 @@ public final class AndroidAutoPatch {
         libraryMediaId = null;
         cachedPodcastFolders = Collections.emptyList();
 
-        // Add Podcasts only when YTM supplies Home and Library without a Podcasts tab.
-        if (rootTabs == null || rootTabs.size() != 2) return rootTabs;
-
-        homeMediaId = rootTabs.get(0).a();
-        libraryMediaId = rootTabs.get(1).a();
+        if (rootTabs == null || rootTabs.isEmpty()) return rootTabs;
         List<MediaBrowserCompat.MediaItem> updatedRootTabs = new ArrayList<>(rootTabs);
+        // Keep the existing Podcasts injection for YTM's two-tab layout.
+        if (rootTabs.size() == 2) {
+            homeMediaId = rootTabs.get(0).a();
+            libraryMediaId = rootTabs.get(1).a();
+            updatedRootTabs.add(1, podcastsTab());
+        }
+        if (!AndroidAutoSettingsTab.replacesStockSettings()
+                || updatedRootTabs.stream().anyMatch(item -> SETTINGS_MEDIA_ID.equals(item.a()))
+                || rootTabs.stream().noneMatch(item -> item.b() && !isCustomMediaId(item.a())
+                        && !UPGRADE_PROMPT_MEDIA_ID.equals(item.a()))) return updatedRootTabs;
+        // Add the Morphe Settings tab as a browsable folder. Android Auto requests its rows just as it does for Library.
+        // Keep Settings visible when Android Auto groups tabs after the first three under More.
+        updatedRootTabs.add(updatedRootTabs.size() < 4 ? updatedRootTabs.size() : 2, AndroidAutoSettingsTab.settingsTab());
+        return updatedRootTabs;
+    }
+
+    private static MediaBrowserCompat.MediaItem podcastsTab() {
         Bundle podcastsExtras = new Bundle();
         podcastsExtras.putInt(CONTENT_STYLE_BROWSABLE_HINT, CONTENT_STYLE_LIST);
         podcastsExtras.putInt(CONTENT_STYLE_PLAYABLE_HINT, CONTENT_STYLE_LIST);
@@ -838,9 +889,185 @@ public final class AndroidAutoPatch {
                 PODCASTS_MEDIA_ID,
                 ResourceUtils.getString(PODCASTS_TITLE_RESOURCE_NAME),
                 null, null, null, Uri.parse(LibraryFolder.PODCASTS.artworkUri()), podcastsExtras, null);
-        updatedRootTabs.add(1, new MediaBrowserCompat.MediaItem(
-                podcastsDescription, MediaBrowserCompat.MediaItem.FLAG_BROWSABLE));
-        return updatedRootTabs;
+        return new MediaBrowserCompat.MediaItem(podcastsDescription, MediaBrowserCompat.MediaItem.FLAG_BROWSABLE);
+    }
+
+    private static boolean requestsSettingsActions(@Nullable Bundle hints) {
+        return hints != null && hints.getInt(ACTION_LIMIT, 0) > 0;
+    }
+
+    /** Record the hint on the same Messenger connection used for subsequent media browser requests. */
+    public static synchronized void observeSettingsBrowserMessage(Message message) {
+        if (message.replyTo == null) return;
+        switch (message.what) {
+            case 1, 6 -> { // MediaBrowserProtocol CONNECT and REGISTER_CALLBACK_MESSENGER
+                IBinder binder = message.replyTo.getBinder();
+                settingsActionClients.remove(binder);
+                try {
+                    Bundle data = message.getData();
+                    int uid = data.getInt("data_calling_uid", -1);
+                    if (uid >= 0 && requestsSettingsActions(data.getBundle("data_root_hints"))) {
+                        settingsActionClients.put(binder, uid);
+                    }
+                } catch (RuntimeException ex) {
+                    Logger.printException(() -> "Could not read Android Auto browse action support", ex);
+                }
+            }
+            case 2, 7 -> settingsActionClients.remove(message.replyTo.getBinder());
+        }
+    }
+
+    private static boolean isAndroidAutoBrowser(@Nullable Object connection) {
+        if (!AndroidAutoSettingsTab.replacesStockSettings() || !(connection instanceof SettingsBrowserConnection browser)
+                || !ROOT_MEDIA_ID.equals(browser.patch_getSettingsBrowserPackage())
+                || !browser.patch_isSettingsBrowserConnected()) return false;
+        String[] packages = Utils.getContext().getPackageManager().getPackagesForUid(browser.patch_getSettingsBrowserUid());
+        if (packages != null) {
+            for (String name : packages) if (ROOT_MEDIA_ID.equals(name)) return true;
+        }
+        return false;
+    }
+
+    private static boolean supportsSettingsActions(@Nullable Object connection) {
+        if (!isAndroidAutoBrowser(connection)) return false;
+        SettingsBrowserConnection browser = (SettingsBrowserConnection) connection;
+        synchronized (AndroidAutoPatch.class) {
+            Integer uid = settingsActionClients.get(browser.patch_getSettingsBrowserBinder());
+            return uid != null && uid == browser.patch_getSettingsBrowserUid();
+        }
+    }
+
+    @Nullable
+    private static synchronized AndroidAutoSettingsTab.Source settingsSource(Object connection) {
+        FolderSubscription subscription = settingsSubscriptions.get(connection);
+        if (subscription == null) subscription = rootSubscriptions.get(connection);
+        if (subscription == null || !(subscription.browserService.get() instanceof AndroidAutoSettingsTab.Source source)) return null;
+        return source;
+    }
+
+    private static boolean isSettingsMediaId(@Nullable String mediaId) {
+        return SETTINGS_MEDIA_ID.equals(mediaId) || (mediaId != null && mediaId.startsWith(SETTINGS_MEDIA_ID + ":"));
+    }
+
+    private static boolean supportsSettingsNavigation() {
+        try {
+            return Utils.getContext().getPackageManager().getPackageInfo(ROOT_MEDIA_ID, 0).versionCode
+                    == ANDROID_AUTO_VERSION_WITH_BROWSE_CONFIRMATION;
+        } catch (PackageManager.NameNotFoundException ex) {
+            return false;
+        }
+    }
+
+    @Nullable
+    private static synchronized AndroidAutoSettingsNavigation settingsNavigation(Object connection, boolean openTab) {
+        if (openTab) return settingsNavigation.computeIfAbsent(connection, ignored -> new AndroidAutoSettingsNavigation());
+        return settingsNavigation.get(connection);
+    }
+
+    private static List<MediaBrowserCompat.MediaItem> settingsItems(Object connection,
+            AndroidAutoSettingsTab.NativeSettings settings) {
+        boolean actions = supportsSettingsActions(connection);
+        return AndroidAutoSettingsTab.items(settings, !actions && supportsSettingsNavigation(),
+                actions ? (key, value) -> value ? TURN_ON_ACTION : TURN_OFF_ACTION : null);
+    }
+
+    private static void deliverSettingsPage(BrowseRequest request, String id) {
+        List<MediaBrowserCompat.MediaItem> items = Collections.emptyList();
+        try {
+            Object connection = request.patch_getBrowserConnection();
+            AndroidAutoSettingsTab.Source source = isAndroidAutoBrowser(connection) ? settingsSource(connection) : null;
+            if (source != null) {
+                AndroidAutoSettingsTab.NativeSettings settings = source.patch_getNativeSettings();
+                boolean root = SETTINGS_MEDIA_ID.equals(id);
+                if (root) {
+                    items = settingsItems(connection, settings);
+                }
+                if (settings != null && !supportsSettingsActions(connection) && supportsSettingsNavigation()) {
+                    AndroidAutoSettingsNavigation navigation = settingsNavigation(connection, root);
+                    if (!root && navigation != null) {
+                        items = navigation.open(settings, id, () -> mainHandler.post(AndroidAutoPatch::refreshSettings));
+                    }
+                }
+            }
+        } catch (RuntimeException ex) {
+            Logger.printException(() -> "Could not open Android Auto settings", ex);
+        }
+        request.patch_deliverBrowseItems(items);
+    }
+
+    /** Advertise actions only to a connected Android Auto client that requested them. */
+    public static void addSettingsBrowseActions(@Nullable String clientPackage,
+                                                 @Nullable Bundle rootHints, @Nullable Bundle rootExtras) {
+        if (rootExtras == null) return;
+        boolean supported = AndroidAutoSettingsTab.replacesStockSettings() && ROOT_MEDIA_ID.equals(clientPackage) && requestsSettingsActions(rootHints);
+        String key = ACTION_EXTRAS + "CUSTOM_BROWSER_ACTION_ROOT_LIST";
+        ArrayList<Bundle> nativeActions = rootExtras.getParcelableArrayList(key);
+        if (!supported && nativeActions == null) return;
+        ArrayList<Bundle> actions = nativeActions == null ? new ArrayList<>() : new ArrayList<>(nativeActions);
+        boolean hadSettingsActions = actions.removeIf(action -> action != null && isSettingsAction(action.getString(
+                ACTION_EXTRAS + "KEY_CUSTOM_BROWSER_ACTION_ID")));
+        if (!supported) {
+            if (hadSettingsActions) {
+                if (actions.isEmpty()) rootExtras.remove(key);
+                else rootExtras.putParcelableArrayList(key, actions);
+            }
+            return;
+        }
+        for (String id : new String[] { TURN_ON_ACTION, TURN_OFF_ACTION }) {
+            Bundle action = new Bundle();
+            action.putString(ACTION_EXTRAS + "KEY_CUSTOM_BROWSER_ACTION_ID", id);
+            action.putString(ACTION_EXTRAS + "KEY_CUSTOM_BROWSER_ACTION_LABEL", ResourceUtils.getString(
+                    TURN_ON_ACTION.equals(id) ? "morphe_music_android_auto_turn_on"
+                            : "morphe_music_android_auto_turn_off"));
+            action.putString(ACTION_EXTRAS + "KEY_CUSTOM_BROWSER_ACTION_ICON_URI",
+                    "android.resource://" + Utils.getContext().getPackageName() + "/drawable/morphe_settings_screen_04_general");
+            actions.add(action);
+        }
+        rootExtras.putParcelableArrayList(key, actions);
+    }
+
+    /** AndroidX asks for the status item again after a browse action succeeds. */
+    @Nullable
+    public static MediaBrowserCompat.MediaItem getSettingsBrowseItem(@Nullable Object connection, @Nullable String mediaId) {
+        if (AndroidAutoSettingsTab.itemKey(mediaId) == null || !isAndroidAutoBrowser(connection)) return null;
+        AndroidAutoSettingsTab.Source source = settingsSource(connection);
+        if (source == null) return null;
+        for (MediaBrowserCompat.MediaItem item : settingsItems(connection, source.patch_getNativeSettings())) {
+            if (mediaId.equals(item.a())) return item;
+        }
+        return null;
+    }
+
+    private static boolean isSettingsAction(@Nullable Object action) {
+        return TURN_ON_ACTION.equals(action) || TURN_OFF_ACTION.equals(action);
+    }
+
+    /** Apply the On or Off action and tell Android Auto which row to refresh. */
+    @Nullable
+    public static Bundle handleSettingsBrowseAction(@Nullable Object connection, @Nullable Object action, @Nullable Bundle input) {
+        if (!isSettingsAction(action) || input == null || !supportsSettingsActions(connection)) return null;
+        String mediaId = input.getString(ACTION_EXTRAS + "KEY_CUSTOM_BROWSER_ACTION_MEDIA_ITEM_ID");
+        String key = AndroidAutoSettingsTab.itemKey(mediaId);
+        AndroidAutoSettingsTab.Source source = settingsSource(connection);
+        if (key == null || source == null) return null;
+        try {
+            if (!AndroidAutoSettingsTab.apply(source.patch_getNativeSettings(), key, TURN_ON_ACTION.equals(action))) return null;
+        } catch (RuntimeException ex) {
+            Logger.printException(() -> "Could not apply Android Auto setting", ex);
+            return null;
+        }
+        mainHandler.post(AndroidAutoPatch::refreshSettings);
+        Bundle result = new Bundle();
+        result.putString(ACTION_EXTRAS + "KEY_CUSTOM_BROWSER_ACTION_RESULT_REFRESH_ITEM", mediaId);
+        return result;
+    }
+
+    private static void refreshSettings() {
+        List<FolderSubscription> subscriptions;
+        synchronized (AndroidAutoPatch.class) {
+            subscriptions = new ArrayList<>(settingsSubscriptions.values());
+        }
+        for (FolderSubscription subscription : subscriptions) subscription.reload(false);
     }
 
     @GuardedBy("AndroidAutoPatch.class")
