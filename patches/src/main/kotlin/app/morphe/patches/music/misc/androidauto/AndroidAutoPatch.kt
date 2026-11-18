@@ -30,8 +30,10 @@ import app.morphe.patches.music.interaction.jam.implementsType
 import app.morphe.patches.music.interaction.jam.resolveProto
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.misc.playservice.is_9_20_or_greater
+import app.morphe.patches.music.misc.settings.PreferenceScreen
 import app.morphe.patches.music.misc.settings.settingsPatch
 import app.morphe.patches.music.shared.Constants.COMPATIBILITY_YOUTUBE_MUSIC
+import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.util.cloneMutable
 import app.morphe.util.findMutableMethodOf
 import app.morphe.util.toPublicAccessFlags
@@ -107,6 +109,11 @@ val androidAutoPatch = patch(
         patchPlaylistMediaIdBuilder(encodeCommandMediaIdMethod)
         patchCommandEncoder(encodeCommandMediaIdMethod)
         patchSearch()
+        patchSettingsBrowseActions()
+
+        PreferenceScreen.GENERAL.addPreferences(
+            SwitchPreference("morphe_music_android_auto_show_podcasts", summary = true)
+        )
     }
 }
 

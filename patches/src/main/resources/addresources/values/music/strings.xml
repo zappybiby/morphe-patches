@@ -16,6 +16,14 @@ Second \"item\" text"</string>
 -->
 <resources>
     <!-- misc.androidauto.androidAutoPatch -->
+    <string name="morphe_music_android_auto_settings_title">Morphe settings</string>
+    <string name="morphe_music_android_auto_show_podcasts_title">Show Podcasts tab</string>
+    <string name="morphe_music_android_auto_show_podcasts_summary">Show the Podcasts tab in Android Auto</string>
+    <string name="morphe_music_android_auto_podcasts_on">On</string>
+    <string name="morphe_music_android_auto_podcasts_off">Off</string>
+    <string name="morphe_music_android_auto_settings_phone_hint">Change in Morphe settings → General on your phone</string>
+    <string name="morphe_music_android_auto_show_podcasts_action">Show Podcasts</string>
+    <string name="morphe_music_android_auto_hide_podcasts_action">Hide Podcasts</string>
     <string name="morphe_music_android_auto_last_played">Last played</string>
     <string name="morphe_music_android_auto_subscriptions">Subscriptions</string>
     <string name="morphe_music_android_auto_videos">Videos</string>

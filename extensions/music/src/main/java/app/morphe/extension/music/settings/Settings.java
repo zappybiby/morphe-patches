@@ -55,6 +55,7 @@ public class Settings extends SharedYouTubeSettings {
     public static final BooleanSetting HIDE_YOUR_DOWNLOADS_SHELF = new BooleanSetting("morphe_music_hide_your_downloads_shelf", FALSE, true);
 
     // General
+    public static final BooleanSetting ANDROID_AUTO_SHOW_PODCASTS = new BooleanSetting("morphe_music_android_auto_show_podcasts", TRUE);
     public static final BooleanSetting PAUSE_WHEN_MUTED = new BooleanSetting("morphe_music_pause_when_muted", FALSE, true);
 
     // General (Layout)
