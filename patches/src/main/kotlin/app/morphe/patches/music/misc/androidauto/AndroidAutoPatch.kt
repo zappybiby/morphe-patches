@@ -107,6 +107,9 @@ val androidAutoPatch = patch(
         patchPlaylistMediaIdBuilder(encodeCommandMediaIdMethod)
         patchCommandEncoder(encodeCommandMediaIdMethod)
         patchSearch()
+        patchSettingsConnection()
+        patchNativeCarSettings()
+        patchSettingsBrowseActions()
     }
 }
 
