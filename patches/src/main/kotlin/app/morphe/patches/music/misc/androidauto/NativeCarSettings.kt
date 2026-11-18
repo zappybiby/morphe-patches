@@ -1,212 +1,148 @@
 package app.morphe.patches.music.misc.androidauto
 
 import app.morphe.patcher.Fingerprint
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.instructions
+import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.fieldAccess
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.patch.classDefBy
 import app.morphe.patcher.patch.mutableClassDefBy
-import app.morphe.patcher.resource.ResourceType
-import app.morphe.patcher.resource.resourceId
 import app.morphe.patcher.util.addPatchInterface
 import app.morphe.patcher.util.getReference
-import app.morphe.patcher.util.proxy.mutableTypes.MutableClass
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patcher.util.registersUsed
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.Method
-import com.android.tools.smali.dexlib2.iface.instruction.Instruction
-import com.android.tools.smali.dexlib2.iface.instruction.OffsetInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.WideLiteralInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodImplementation
-import com.android.tools.smali.dexlib2.immutable.instruction.ImmutableInstruction11x
-import com.android.tools.smali.dexlib2.immutable.instruction.ImmutableInstruction22x
-import com.android.tools.smali.dexlib2.immutable.instruction.ImmutableInstruction35c
-import com.android.tools.smali.dexlib2.immutable.reference.ImmutableMethodReference
+import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
+import com.android.tools.smali.dexlib2.immutable.instruction.ImmutableInstruction10x
 
 private const val MEDIA_SERVICE = "Lcom/google/android/apps/youtube/music/mediabrowser/MusicBrowserService;"
 private const val SETTINGS_SERVICE =
     "Lcom/google/android/apps/youtube/music/mediabrowser/androidautoprojected/AndroidAutoCarAppServices;"
-private const val TAB_TYPE = "Lapp/morphe/extension/music/patches/AndroidAutoSettingsTab"
-private const val NATIVE = "${TAB_TYPE}\$NativeSettings;"
-private const val SOURCE = "${TAB_TYPE}\$Source;"
+private const val TAB = "Lapp/morphe/extension/music/patches/AndroidAutoSettingsTab"
+private const val ROWS = "${TAB}\$Rows;"
+private const val SWITCH = "${TAB}\$Switch;"
 private const val CONTEXT = "Landroid/content/Context;"
-private const val TOGGLE = "Landroidx/car/app/model/Toggle;"
-private const val TEMPLATE = "Landroidx/car/app/model/ListTemplate;"
+private const val MODEL = "Landroidx/car/app/model/"
 
 internal fun patchNativeCarSettings() {
     val injection = classDefBy(classDefBy(SETTINGS_SERVICE).superclass!!).methods.single { it.name == "onCreate" }
-    val controllerField = injection.instructions.mapNotNull { it.getReference<FieldReference>() }
-        .single { it.definingClass == SETTINGS_SERVICE }
-    val controller = mutableClassDefBy(controllerField.type)
-    exposeNativeSettingsSource(injection, controllerField)
-
-    val screen = Fingerprint(filters = listOf(
-        fieldAccess(opcode = Opcode.IGET_OBJECT, definingClass = SETTINGS_SERVICE, name = controllerField.name),
-        methodCall(name = "<init>", parameters = listOf("L", controller.type))
-    )).instructionMatches.last().methodReference.definingClass
-    val render = Fingerprint(definingClass = screen, parameters = emptyList(), filters = listOf(
-        methodCall(definingClass = TOGGLE, name = "<init>"),
-        methodCall(definingClass = TEMPLATE, name = "<init>")
-    )).originalMethod
-    bindNativeRows(controller, render)
-}
-
-/** Get YTM's current settings controller from the media service using the same provider as the stock car screen. */
-private fun exposeNativeSettingsSource(injection: Method, controller: FieldReference) {
     val code = injection.instructions.toList()
-    val assign = code.indexOfLast { it.opcode == Opcode.IPUT_OBJECT && it.getReference<FieldReference>() == controller }
+    val field = code.mapNotNull { it.getReference<FieldReference>() }.single { it.definingClass == SETTINGS_SERVICE }
+    val screen = Fingerprint(filters = listOf(
+        fieldAccess(opcode = Opcode.IGET_OBJECT, definingClass = SETTINGS_SERVICE, name = field.name),
+        methodCall(name = "<init>", parameters = listOf("L", field.type))
+    )).instructionMatches.last().methodReference
+    val render = Fingerprint(definingClass = screen.definingClass, parameters = emptyList(), filters = listOf(
+        methodCall(definingClass = "${MODEL}Toggle;", name = "<init>"),
+        methodCall(definingClass = "${MODEL}ListTemplate;", name = "<init>")
+    )).originalMethod
+    val rows = copyStockRows(render, field.type, screen.parameterTypes.first().toString())
+
+    // The media service resolves the current controller through the same provider as YTM's stock Settings screen.
+    val assign = code.indexOfLast { it.getReference<FieldReference>() == field }
     val provider = code.take(assign).last { it.opcode == Opcode.INVOKE_INTERFACE }.getReference<MethodReference>()!!
-    val graph = code.subList(0, assign).takeLastWhile {
-        it.getReference<TypeReference>()?.type != SETTINGS_SERVICE
-    }.filter { it.opcode == Opcode.IGET_OBJECT }.map { it.getReference<FieldReference>()!! }
-    val mediaBase = mutableClassDefBy(classDefBy(MEDIA_SERVICE).superclass!!)
-    val component = mediaBase.methods.single { it.name == "generatedComponent" && it.parameterTypes.isEmpty() }
-    check(mediaBase.methods.single { it.name == "onCreate" }.instructions.any {
+    val graph = code.take(assign).takeLastWhile { it.getReference<TypeReference>()?.type != SETTINGS_SERVICE }
+        .filter { it.opcode == Opcode.IGET_OBJECT }.map { it.getReference<FieldReference>()!! }
+    val media = mutableClassDefBy(classDefBy(MEDIA_SERVICE).superclass!!)
+    val component = media.methods.single { it.name == "generatedComponent" && it.parameterTypes.isEmpty() }
+    check(media.methods.single { it.name == "onCreate" }.instructions.any {
         it.opcode == Opcode.CHECK_CAST && it.getReference<TypeReference>()?.type == graph.first().definingClass
-    }) { "The media and settings services must use the same service component" }
-    val readProvider = graph.joinToString("\n") { "iget-object v0, v0, $it" }
-    mediaBase.addPatchInterface(SOURCE, "patch_getNativeSettings", """
+    })
+    media.addPatchInterface("${TAB}\$Source;", "patch_loadSettings", """
         invoke-virtual { p0 }, $component
         move-result-object v0
         check-cast v0, ${graph.first().definingClass}
-        $readProvider
+        ${graph.joinToString("\n") { "iget-object v0, v0, $it" }}
         invoke-interface { v0 }, $provider
         move-result-object v0
-        check-cast v0, ${controller.type}
-        return-object v0
-    """)
-}
-
-private fun bindNativeRows(controller: MutableClass, render: Method) {
-    val code = render.instructions.toList()
-    val controllerLoad = code.indexOfFirst { it.opcode == Opcode.IGET_OBJECT &&
-            it.getReference<FieldReference>()?.type == controller.type }
-    val controllerRegister = code[controllerLoad].registersUsed.first()
-    val contextRegister = code.take(controllerLoad).first {
-        it.getReference<MethodReference>()?.name == "getString"
-    }.registersUsed.first()
-    val storageEnd = code.indexOfFirst {
-        val ref = it.getReference<MethodReference>()
-        ref?.definingClass == "Ljava/lang/StringBuilder;" && ref.name == "toString"
-    } + 2
-    val registers = render.implementation!!.registerCount
-
-    // Keep YTM's storage units, localized formatting and storage-provider calls verbatim.
-    controller.addNativeRead("patch_getStorageSummary", registers, controllerRegister, contextRegister,
-        code.subList(controllerLoad + 1, storageEnd))
-    val permission = code.mapNotNull { it.getReference<MethodReference>() }.single {
-        it.parameterTypes == listOf(CONTEXT) && it.returnType == "Z"
-    }
-    controller.addPatchInterface(NATIVE, "patch_showDeviceFilesAvailable", """
-        invoke-static { p1 }, $permission
-        move-result v0
-        return v0
-    """)
-
-    val toggleIndexes = code.indices.filter { index ->
-        val ref = code[index].getReference<MethodReference>()
-        ref?.definingClass == TOGGLE && ref.name == "<init>"
-    }
-    val toggles = listOf(
-        "ShowDeviceFiles" to "pref_show_device_files",
-        "WifiOnly" to "pref_offline_mixtape_only_wifi",
-        "SmartDownloads" to "auto_offline_title"
-    )
-    check(toggleIndexes.size == toggles.size) { "Unexpected number of native car settings toggles" }
-    // Bind listeners by the actual row labels. A reordered native screen must never change a different setting.
-    toggles.forEachIndexed { index, (_, label) ->
-        val titleId = resourceId(ResourceType.STRING, label)
-        val next = toggleIndexes.getOrNull(index + 1) ?: code.size
-        check(code.subList(toggleIndexes[index], next).any { (it as? WideLiteralInstruction)?.wideLiteral == titleId }) {
-            "Could not locate the native car settings row for $label"
-        }
-    }
-    val callbacks = toggleIndexes.map { end ->
-        code.subList(0, end).indexOfLast {
-            val ref = it.getReference<MethodReference>()
-            ref?.name == "<init>" && ref.parameterTypes.firstOrNull() == controller.type
-        }
-    }
-    // YTM 9.15 shows Smart downloads unconditionally. Later versions use the current account's entitlement.
-    val gateStart = toggleIndexes[1] + 1
-    val gates = (gateStart until callbacks[2]).filter { code[it].opcode == Opcode.IF_EQZ }
-    check(gates.size <= 1) { "Unexpected Smart downloads availability check" }
-    val gate = gates.singleOrNull()
-    if (gate == null) {
-        controller.addPatchInterface(NATIVE, "patch_smartDownloadsAvailable", "const/4 v0, 1\nreturn v0")
-    } else {
-        val start = controller.readStart(code, gate)
-        controller.addNativeRead("patch_smartDownloadsAvailable", registers, controllerRegister, null,
-            code.subList(start, gate))
-    }
-
-    toggles.forEachIndexed { index, (name, _) ->
-        val end = code.subList(callbacks[index], toggleIndexes[index]).indexOfLast {
-            it.opcode == Opcode.IPUT_BOOLEAN
-        } + callbacks[index]
-        check(end >= callbacks[index])
-        val start = controller.readStart(code, end)
-        controller.addNativeRead("patch_${name.replaceFirstChar { it.lowercase() }}", registers,
-            controllerRegister, null, code.subList(start, end))
-        bindNativeListener(controller, "patch_set$name", code, callbacks[index])
-    }
-}
-
-private fun MutableClass.readStart(code: List<Instruction>, end: Int) = (0 until end).last {
-    code[it].opcode == Opcode.IGET_OBJECT && code[it].getReference<FieldReference>()?.definingClass == type
-}
-
-/** Install only the linear stock computation. The native screen's CarContext is used solely for resources. */
-private fun MutableClass.addNativeRead(name: String, locals: Int, controllerReg: Int,
-                                       contextReg: Int?, stock: List<Instruction>) {
-    val declaration = classDefBy(NATIVE).methods.single { it.name == name }
-    check(stock.none { it is OffsetInstruction } &&
-            stock.last().opcode in setOf(Opcode.MOVE_RESULT, Opcode.MOVE_RESULT_OBJECT))
-    val body = buildList<Instruction> {
-        add(ImmutableInstruction22x(Opcode.MOVE_OBJECT_FROM16, controllerReg, locals))
-        if (contextReg != null) add(ImmutableInstruction22x(Opcode.MOVE_OBJECT_FROM16, contextReg, locals + 1))
-        stock.forEach { instruction ->
-            val ref = instruction.getReference<MethodReference>()
-            if (contextReg != null && ref?.name == "getResources" && ref.parameterTypes.isEmpty()) {
-                add(ImmutableInstruction35c(Opcode.INVOKE_VIRTUAL, 1, contextReg, 0, 0, 0, 0,
-                    ImmutableMethodReference(CONTEXT, ref.name, ref.parameterTypes, ref.returnType)))
-            } else add(instruction)
-        }
-        val returnOpcode = if (declaration.returnType == "Z") Opcode.RETURN else Opcode.RETURN_OBJECT
-        add(ImmutableInstruction11x(returnOpcode, stock.last().registersUsed.single()))
-    }
-    val implementation = ImmutableMethodImplementation(locals + 1 + declaration.parameters.size, body, emptyList(), null)
-    methods.add(ImmutableMethod(type, name, declaration.parameters, declaration.returnType,
-        AccessFlags.PUBLIC.value or AccessFlags.FINAL.value, emptySet(), emptySet(), implementation).toMutable())
-}
-
-/** Call the stock switch listener so YTM saves the value and runs its usual change notifications. */
-private fun bindNativeListener(controller: MutableClass, name: String, code: List<Instruction>, index: Int) {
-    val constructor = code[index].getReference<MethodReference>()!!
-    val callback = classDefBy(constructor.definingClass).virtualMethods.single {
-        it.parameterTypes == listOf("Z") && it.returnType == "V"
-    }
-    val initialize = when (constructor.parameterTypes.size) {
-        1 -> "invoke-direct { v0, p0 }, $constructor"
-        2 -> {
-            // R8 combines the three listeners into one class with a discriminator on newer builds.
-            val register = code[index].registersUsed.last()
-            val literal = code.take(index).last { it.opcode.setsRegister() && it.registersUsed.firstOrNull() == register }
-            val value = (literal as WideLiteralInstruction).wideLiteral
-            "const v1, $value\ninvoke-direct { v0, p0, v1 }, $constructor"
-        }
-        else -> error("Unexpected native car settings listener constructor: $constructor")
-    }
-    controller.addPatchInterface(NATIVE, name, """
-        new-instance v0, ${constructor.definingClass}
-        $initialize
-        invoke-virtual { v0, p1 }, $callback
+        check-cast v0, ${field.type}
+        invoke-static { v0, p0, p1 }, $rows
         return-void
     """)
+}
+
+/** Run YTM's stock row builder with the media service's Context and forward each row with its original switch listener. */
+private fun copyStockRows(render: Method, controller: String, carContext: String): Method {
+    val code = render.instructions.toList()
+    val builder = code.first().getReference<TypeReference>()!!.type
+    val adds = code.indices.filter { i ->
+        code[i].getReference<MethodReference>()?.let {
+            it.definingClass == builder && it.parameterTypes.size == 1 && it.returnType == "V"
+        } == true
+    }
+    check(adds.size == 4) { "Unexpected stock car settings rows" }
+    val end = adds.last() + 1
+    val args = render.implementation!!.registerCount
+    val listener = args + 5
+    val body = ImmutableMethodImplementation(args + 6 + 3,
+        code.take(end) + ImmutableInstruction10x(Opcode.RETURN_VOID), emptyList(), null)
+    val copy = ImmutableMethod(render.definingClass, "patch_render", listOf(controller, CONTEXT, ROWS).map {
+        ImmutableMethodParameter(it, null, null)
+    }, "V", AccessFlags.PUBLIC.value or AccessFlags.STATIC.value, null, null, body).toMutable()
+
+    for (i in end - 1 downTo 0) {
+        val insn = code[i]
+        val field = insn.getReference<FieldReference>()
+        val call = insn.getReference<MethodReference>()
+        val regs = insn.registersUsed
+        when {
+            i in adds -> {
+                // Use the same resource ID as this row's title, even when earlier rows are hidden.
+                val start = (adds.lastOrNull { it < i } ?: -1) + 1
+                val title = (start until i).first { index ->
+                    code[index].getReference<MethodReference>()?.let { it.definingClass == carContext && it.name == "getString" } == true
+                }
+                val id = (code[title - 1] as WideLiteralInstruction).wideLiteral
+                val row = regs.last()
+                val hasToggle = (start until i).any { index ->
+                    code[index].getReference<MethodReference>()?.definingClass == "${MODEL}Toggle;"
+                }
+                val readChecked = if (hasToggle) """
+                    invoke-virtual { v$row }, ${MODEL}Row;->getToggle()${MODEL}Toggle;
+                    move-result-object v$row
+                    invoke-virtual { v$row }, ${MODEL}Toggle;->isChecked()Z
+                    move-result v${args + 4}
+                """ else "const/16 v${args + 4}, 0"
+                copy.addInstructions(i + 1, """
+                    const v${args + 1}, $id
+                    invoke-virtual { v$row }, ${MODEL}Row;->getTitle()${MODEL}CarText;
+                    move-result-object v${args + 2}
+                    invoke-virtual/range { v${args + 2} .. v${args + 2} }, Ljava/lang/Object;->toString()Ljava/lang/String;
+                    move-result-object v${args + 2}
+                    invoke-virtual { v$row }, ${MODEL}Row;->getTexts()Ljava/util/List;
+                    move-result-object v${args + 3}
+                    $readChecked
+                    invoke-interface/range { v$args .. v$listener }, ${ROWS}->add(ILjava/lang/String;Ljava/util/List;Z$SWITCH)V
+                    const/16 v$listener, 0
+                """)
+            }
+            field?.type == controller || field?.type == carContext -> copy.replaceInstruction(i,
+                "move-object/from16 v${regs.first()}, ${if (field.type == controller) "p0" else "p1"}")
+            call?.definingClass == carContext -> {
+                check(call.name == "getString" || call.name == "getResources")
+                copy.replaceInstruction(i, "invoke-virtual { ${regs.joinToString { "v$it" }} }, " +
+                        call.toString().replaceBefore("->", CONTEXT))
+            }
+            call?.name == "<init>" && call.parameterTypes.firstOrNull() == controller -> {
+                val callback = mutableClassDefBy(call.definingClass)
+                if (SWITCH !in callback.interfaces) {
+                    val change = callback.methods.single { it.parameterTypes == listOf("Z") && it.returnType == "V" }
+                    callback.addPatchInterface(SWITCH, "patch_set", "invoke-virtual { p0, p1 }, $change\nreturn-void")
+                }
+                copy.addInstructions(i + 1, "move-object/16 v$listener, v${regs.first()}")
+            }
+        }
+    }
+    copy.addInstructions(0, "move-object/from16 v$args, p2\nconst/16 v$listener, 0")
+    mutableClassDefBy(render.definingClass).methods.add(copy)
+    return copy
 }

@@ -18,8 +18,6 @@ Second \"item\" text"</string>
     <!-- misc.androidauto.androidAutoPatch -->
     <string name="morphe_music_android_auto_setting_on">On</string>
     <string name="morphe_music_android_auto_setting_off">Off</string>
-    <string name="morphe_music_android_auto_turn_off">Turn off</string>
-    <string name="morphe_music_android_auto_turn_on">Turn on</string>
     <string name="morphe_music_android_auto_confirm_on">Confirm turning on “%1$s”</string>
     <string name="morphe_music_android_auto_confirm_off">Confirm turning off “%1$s”</string>
     <string name="morphe_music_android_auto_expired">Selection expired</string>

@@ -56,16 +56,10 @@ internal fun patchSettingsConnection() {
 
     connection.addPatchInterface(SETTINGS_CONNECTION, "patch_getSettingsBrowserPackage", packageName)
     connection.addPatchInterface(SETTINGS_CONNECTION, "patch_getSettingsBrowserUid", uid)
-    val binderGetter = connection.addPatchInterface(SETTINGS_CONNECTION, "patch_getSettingsBrowserBinder", """
+    connection.addPatchInterface(SETTINGS_CONNECTION, "patch_isSettingsBrowserConnected", """
         iget-object v0, p0, $callbacks
         if-eqz v0, :disconnected
         invoke-virtual { v0 }, $asBinder
-        move-result-object v0
-        :disconnected
-        return-object v0
-    """)
-    connection.addPatchInterface(SETTINGS_CONNECTION, "patch_isSettingsBrowserConnected", """
-        invoke-virtual { p0 }, $binderGetter
         move-result-object v0
         if-eqz v0, :disconnected
         iget-object v1, p0, $service

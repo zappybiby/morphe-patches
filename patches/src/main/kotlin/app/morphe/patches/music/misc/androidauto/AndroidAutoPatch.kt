@@ -109,7 +109,6 @@ val androidAutoPatch = patch(
         patchSearch()
         patchSettingsConnection()
         patchNativeCarSettings()
-        patchSettingsBrowseActions()
     }
 }
 
