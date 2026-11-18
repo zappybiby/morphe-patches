@@ -77,7 +77,7 @@ public final class AndroidAutoSettingsTab {
         return settings.get(key);
     }
 
-    List<MediaItem> items(boolean editable) {
+    List<MediaItem> items() {
         List<MediaItem> rows = new ArrayList<>(settings.size());
         for (Setting setting : settings.values()) {
             String subtitle = setting.summary;
@@ -85,7 +85,7 @@ public final class AndroidAutoSettingsTab {
                 String state = stateLabel(setting.checked);
                 subtitle = subtitle.isEmpty() ? state : state + " · " + subtitle;
             }
-            rows.add(row(ROW_PREFIX + setting.key, setting.title, subtitle, editable && setting.listener != null));
+            rows.add(row(ROW_PREFIX + setting.key, setting.title, subtitle, setting.listener != null));
         }
         return rows;
     }

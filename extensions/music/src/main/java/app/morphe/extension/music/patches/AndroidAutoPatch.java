@@ -20,7 +20,6 @@ import static app.morphe.extension.music.patches.AndroidAutoBrowseResponseParser
 import static app.morphe.extension.music.patches.AndroidAutoSettingsTab.SETTINGS_MEDIA_ID;
 import static app.morphe.extension.music.patches.ProtoMessage.WIRE_LENGTH_DELIMITED;
 
-import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -336,8 +335,6 @@ public final class AndroidAutoPatch {
     private record SettingsPage(FolderSubscription folder, AndroidAutoSettingsNavigation navigation) {}
     @GuardedBy("AndroidAutoPatch.class")
     private static final WeakHashMap<Object, SettingsPage> settingsPages = new WeakHashMap<>();
-    // This Android Auto build opens the Confirm row only when the user selects it.
-    private static final int ANDROID_AUTO_VERSION_WITH_BROWSE_CONFIRMATION = 180664263;
     // A user's playlist can also be named "Playlists"; do not use these title matches for playback.
     private static final Set<String> playlistsTitleMatchMediaIds = ConcurrentHashMap.newKeySet();
     // Give each browse load a number to distinguish earlier requests from later requests.
@@ -891,15 +888,6 @@ public final class AndroidAutoPatch {
         return SETTINGS_MEDIA_ID.equals(mediaId) || (mediaId != null && mediaId.startsWith(SETTINGS_MEDIA_ID + ":"));
     }
 
-    private static boolean supportsSettingsNavigation() {
-        try {
-            return Utils.getContext().getPackageManager().getPackageInfo(ROOT_MEDIA_ID, 0).versionCode
-                    == ANDROID_AUTO_VERSION_WITH_BROWSE_CONFIRMATION;
-        } catch (PackageManager.NameNotFoundException ex) {
-            return false;
-        }
-    }
-
     private static void deliverSettingsPage(BrowseRequest request, String id) {
         List<MediaBrowserCompat.MediaItem> items = Collections.emptyList();
         try {
@@ -910,10 +898,9 @@ public final class AndroidAutoPatch {
             }
             if (page != null && isAndroidAutoBrowser(connection)
                     && page.folder.browserService.get() instanceof AndroidAutoSettingsTab.Source source) {
-                boolean editable = supportsSettingsNavigation();
                 if (SETTINGS_MEDIA_ID.equals(id)) {
-                    items = AndroidAutoSettingsTab.load(source).items(editable);
-                } else if (editable) {
+                    items = AndroidAutoSettingsTab.load(source).items();
+                } else {
                     items = page.navigation.open(source, id, () -> mainHandler.post(AndroidAutoPatch::refreshSettings));
                 }
             }
