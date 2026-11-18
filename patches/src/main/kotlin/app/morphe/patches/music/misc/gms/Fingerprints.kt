@@ -19,6 +19,19 @@ import com.android.tools.smali.dexlib2.Opcode
 /** Server flag that replaces the queue move sent to the cast receiver with a server side edit. */
 internal const val MDX_QUEUE_MOVE_SERVER_EDIT_FLAG = 45418016L
 
+internal object AndroidAutoSettingsIntentFingerprint : Fingerprint(
+    filters = listOf(
+        string("androidx.media.BrowserRoot.Extras.APPLICATION_PREFERENCES_USING_CAR_APP_LIBRARY_INTENT"),
+        methodCall(
+            definingClass = "Landroid/os/Bundle;",
+            name = "putParcelable",
+            parameters = listOf("Ljava/lang/String;", "Landroid/os/Parcelable;"),
+            returnType = "V",
+            location = MatchAfterImmediately()
+        )
+    )
+)
+
 private val queryIntentServicesFilter
     get() = methodCall(
         definingClass = "Landroid/content/pm/PackageManager;",
