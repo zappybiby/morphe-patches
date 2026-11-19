@@ -115,6 +115,8 @@ private fun hookDownloadRead() = with(DownloadReadFingerprint) {
     mutableClassDefBy(length.definingClass).addPatchInterface(DOWNLOAD_REQUEST, "patch_getLength", length)
 
     val request = instructionMatches[1].getInstruction<FiveRegisterInstruction>().registerD
+    // Music checks for cancellation before each read. If the user removes the download
+    // during that read, a length error would leave the partial audio on disk.
     val cancelled = instructionMatches[2]
     val downloader = cancelled.getInstruction<TwoRegisterInstruction>().registerB
     val eof = instructionMatches[4]
@@ -124,9 +126,7 @@ private fun hookDownloadRead() = with(DownloadReadFingerprint) {
     val (transfer, indexOffset) = method.addFreeRegisters(3)
     val eofIndex = eof.index + indexOffset
 
-    // The EOF jump target is outside the try block that closes the data source on error. Music checks
-    // cancellation before the blocking read. Throwing on a cancelled read skips the code
-    // after the loop that deletes cached spans when requested.
+    // A length error at the loop exit would skip Music's call to close the stream.
     transfer.addInstructionsWithLabels(eofIndex, """
         if-gez v$readResult, :count_bytes
         iget-boolean v$readResult, v$downloader, ${cancelled.fieldReference}
