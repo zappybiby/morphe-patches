@@ -14,13 +14,17 @@ import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.patch.PatchException
+import app.morphe.patcher.patch.mutableClassDefBy
 import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.addFreeRegisters
+import app.morphe.patcher.util.addPatchInterface
 import app.morphe.patcher.util.cloneParameters
 import app.morphe.patcher.util.findFreeRegister
 import app.morphe.patcher.util.getReference
 import app.morphe.patcher.util.numberOfParameterRegistersLogical
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patcher.util.registersUsed
+import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.misc.litho.filter.lithoFilterPatch
 import app.morphe.patches.music.misc.settings.PreferenceScreen
@@ -56,6 +60,7 @@ import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
@@ -63,6 +68,8 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 
 private const val EXTENSION_CLASS =
     "Lapp/morphe/extension/music/patches/DownloadsPatch;"
+private const val DOWNLOAD_REQUEST =
+    "Lapp/morphe/extension/music/patches/DownloadsPatch\$DownloadRequest;"
 private const val EXTENSION_SPOOF_CLASS =
     "Lapp/morphe/extension/shared/spoof/SpoofVideoStreamsPatch;"
 private const val SONG_MENU_FILTER =
@@ -103,6 +110,34 @@ private val downloadsResourcePatch = patch {
     }
 }
 
+private fun hookDownloadRead() = with(DownloadReadFingerprint) {
+    val length = instructionMatches.first().fieldReference
+    mutableClassDefBy(length.definingClass).addPatchInterface(DOWNLOAD_REQUEST, "patch_getLength", length)
+
+    val request = instructionMatches[1].getInstruction<FiveRegisterInstruction>().registerD
+    val cancelled = instructionMatches[2]
+    val downloader = cancelled.getInstruction<TwoRegisterInstruction>().registerB
+    val eof = instructionMatches[4]
+    val readResult = eof.getInstruction<OneRegisterInstruction>().registerA
+    val bytesRead = instructionMatches.last().getInstruction<OneRegisterInstruction>().registerA
+    val firstArgument = method.implementation!!.registerCount
+    val (transfer, indexOffset) = method.addFreeRegisters(3)
+    val eofIndex = eof.index + indexOffset
+
+    // A read can finish after cancellation. Keep that exit on the normal cleanup path.
+    // Check EOF inside the read's try block so a short download also closes the stream.
+    transfer.addInstructionsWithLabels(eofIndex, """
+        if-gez v$readResult, :count_bytes
+        iget-boolean v$readResult, v$downloader, ${cancelled.fieldReference}
+        if-nez v$readResult, :eof
+        move-object/16 v$firstArgument, v$request
+        move-wide/16 v${firstArgument + 1}, v$bytesRead
+        invoke-static/range { v$firstArgument .. v${firstArgument + 2} }, $EXTENSION_CLASS->checkDownloadLength(${DOWNLOAD_REQUEST}J)V
+        :eof
+        const/16 v$readResult, -0x1
+    """, ExternalLabel("count_bytes", transfer.getInstruction(eofIndex + 1)))
+}
+
 val downloadsPatch = patch(
     name = "Downloads",
     description = "Adds support to download songs, albums, and playlists using the in-app " +
@@ -123,7 +158,7 @@ val downloadsPatch = patch(
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
 
     execute {
-        checkDownloadLength(EXTENSION_CLASS)
+        hookDownloadRead()
 
         // Captures the localized download button label from Litho text creation.
         hookSpannableStringResult(EXTENSION_CLASS)

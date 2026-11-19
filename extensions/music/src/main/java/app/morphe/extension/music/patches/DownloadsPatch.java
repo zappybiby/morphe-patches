@@ -74,13 +74,6 @@ public final class DownloadsPatch extends BaseInAppDownloadsPatch {
             "(VL)?(LM|PL(?:[A-Za-z0-9_-]{11}|[A-Za-z0-9_-]{16,})"
                     + "|OLAK5uy_[A-Za-z0-9_-]{11,}|RD[A-Za-z0-9_-]{10,})|MPRE[A-Za-z0-9_-]{8,}");
 
-    public static void checkDownloadLength(long bytesRead, long expected) throws EOFException {
-        if (bytesRead >= expected || !isInAppDownloadMode()) return; // Also allows an unknown length (-1).
-        String message = "Incomplete download: " + bytesRead + " of " + expected + " bytes";
-        Utils.showToastLong(message);
-        throw new EOFException(message);
-    }
-
     private static volatile long lastFlyoutDownloadTime;
     private static volatile long lastPlaylistDownloadTime;
     private static volatile long lastMainPlayerDownloadTime;
@@ -98,6 +91,23 @@ public final class DownloadsPatch extends BaseInAppDownloadsPatch {
      */
     private static final ByteArrayFilterGroup MENU_COMMAND =
             new ByteArrayFilterGroup(null, "panel_header.", "tile_button_carousel.");
+
+    public interface DownloadRequest {
+        long patch_getLength();
+    }
+
+    /**
+     * Music credits the entire requested range when the download returns. An early end of stream
+     * can leave the song marked downloaded with only part of its audio in the cache.
+     */
+    public static void checkDownloadLength(DownloadRequest request, long bytesRead) throws EOFException {
+        long expected = request.patch_getLength();
+        if (bytesRead < expected && isInAppDownloadMode()) {
+            String message = "Incomplete download: " + bytesRead + " of " + expected + " bytes";
+            Utils.showToastLong(message);
+            throw new EOFException(message);
+        }
+    }
 
     /**
      * Injection point.

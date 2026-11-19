@@ -22,6 +22,25 @@ import app.morphe.patches.music.layout.hide.flyoutmenu.MenuItemFingerprint
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 
+internal object DownloadReadFingerprint : Fingerprint(
+    returnType = "V",
+    parameters = listOf("L", "J", "J", "L", "Ljava/lang/String;", "L", "L"),
+    filters = listOf(
+        // A cached stream can open with fewer bytes than the current range requests.
+        fieldAccess(opcode = Opcode.IGET_WIDE, type = "J"),
+        methodCall(opcode = Opcode.INVOKE_INTERFACE, parameters = listOf("L"), returnType = "J"),
+        fieldAccess(opcode = Opcode.IGET_BOOLEAN, definingClass = "this", type = "Z"),
+        methodCall(
+            opcode = Opcode.INVOKE_INTERFACE,
+            parameters = listOf("[B", "I", "I"),
+            returnType = "I",
+            location = MatchAfterWithin(4)
+        ),
+        opcode(Opcode.IF_LTZ, location = MatchAfterWithin(2)),
+        opcode(Opcode.ADD_LONG, location = MatchAfterWithin(3)) // Bytes read from this range.
+    )
+)
+
 internal object MusicOfflineVideoEndpointFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "V",
