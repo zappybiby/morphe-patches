@@ -123,6 +123,8 @@ val downloadsPatch = patch(
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
 
     execute {
+        checkDownloadLength(EXTENSION_CLASS)
+
         // Captures the localized download button label from Litho text creation.
         hookSpannableStringResult(EXTENSION_CLASS)
 

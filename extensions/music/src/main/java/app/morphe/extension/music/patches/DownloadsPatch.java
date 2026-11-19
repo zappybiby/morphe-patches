@@ -18,6 +18,7 @@ import androidx.annotation.Nullable;
 
 import com.google.protobuf.MessageLite;
 
+import java.io.EOFException;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -72,6 +73,13 @@ public final class DownloadsPatch extends BaseInAppDownloadsPatch {
     public static final Pattern PLAYLIST_ID = Pattern.compile(
             "(VL)?(LM|PL(?:[A-Za-z0-9_-]{11}|[A-Za-z0-9_-]{16,})"
                     + "|OLAK5uy_[A-Za-z0-9_-]{11,}|RD[A-Za-z0-9_-]{10,})|MPRE[A-Za-z0-9_-]{8,}");
+
+    public static void checkDownloadLength(long bytesRead, long expected) throws EOFException {
+        if (bytesRead >= expected || !isInAppDownloadMode()) return; // Also allows an unknown length (-1).
+        String message = "Incomplete download: " + bytesRead + " of " + expected + " bytes";
+        Utils.showToastLong(message);
+        throw new EOFException(message);
+    }
 
     private static volatile long lastFlyoutDownloadTime;
     private static volatile long lastPlaylistDownloadTime;
