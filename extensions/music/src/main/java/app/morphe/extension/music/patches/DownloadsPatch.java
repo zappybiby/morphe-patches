@@ -18,7 +18,6 @@ import androidx.annotation.Nullable;
 
 import com.google.protobuf.MessageLite;
 
-import java.io.EOFException;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -92,23 +91,8 @@ public final class DownloadsPatch extends BaseInAppDownloadsPatch {
     private static final ByteArrayFilterGroup MENU_COMMAND =
             new ByteArrayFilterGroup(null, "panel_header.", "tile_button_carousel.");
 
-    public interface DownloadRequest {
-        long patch_getLength();
-    }
-
-    /**
-     * Morphe checks only the first UMP part of a plain stream for a SABR error. When the response
-     * contains only NEXT_REQUEST_POLICY followed by SABR_ERROR, Music's first audio read returns EOF.
-     * The transfer task then adds the format's declared length to its completed byte count and
-     * reports success for a stream that supplied no audio.
-     */
-    public static void checkDownloadLength(DownloadRequest request, long bytesRead) throws EOFException {
-        long expected = request.patch_getLength();
-        if (bytesRead < expected && isInAppDownloadMode()) {
-            String message = "Incomplete download: " + bytesRead + " of " + expected + " bytes";
-            Utils.showToastLong(message);
-            throw new EOFException(message);
-        }
+    public static boolean isShortDownload(long requested, long bytesRead) {
+        return bytesRead < requested && isInAppDownloadMode();
     }
 
     /**

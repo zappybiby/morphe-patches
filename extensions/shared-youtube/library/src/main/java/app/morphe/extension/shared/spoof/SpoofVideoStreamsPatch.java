@@ -104,26 +104,15 @@ public class SpoofVideoStreamsPatch {
     private static final ThreadLocal<Boolean> streamRangeLimitedOnThread = ThreadLocal.withInitial(() -> false);
 
     /**
-     * UMP part type of SABR error. The server can send it instead of the media of a plain stream range.
-     */
-    private static final byte UMP_PART_SABR_ERROR = 44;
-
-    /**
      * Response of the last plain stream request built on the thread. A request is built and read on the same thread.
      */
     private static final class StreamResponse {
-        /**
-         * If the response is a UMP response of a plain stream, and its first part is not read yet.
-         */
-        boolean checkFirstPart;
+        @Nullable
+        SabrResponseReader reader;
         /**
          * Position of the buffer when the current read of the response started.
          */
         int readStart;
-        /**
-         * If the response starts with a SABR error.
-         */
-        boolean sabrError;
     }
 
     private static final ThreadLocal<StreamResponse> streamResponseOnThread = ThreadLocal.withInitial(StreamResponse::new);
@@ -729,7 +718,6 @@ public class SpoofVideoStreamsPatch {
      * Only ranges opened by {@link #onPriorityDataSourceOpen()} are shortened. Playback takes the pause
      * of a transfer as an error of the stream.
      * Ranges without an end are left as they are, because the app reads those until the stream ends.
-     * The first part of the response is checked by {@link #onStreamResponseRead(ByteBuffer)}.
      *
      * @param url Url of the request.
      * @return The url to request.
@@ -742,14 +730,15 @@ public class SpoofVideoStreamsPatch {
             priorityDataSourceOpenOnThread.set(false);
             streamRangeLimitedOnThread.set(false);
             StreamResponse response = Objects.requireNonNull(streamResponseOnThread.get());
-            response.checkFirstPart = false;
-            response.sabrError = false;
+            response.reader = null;
             if (url == null || !isPlainStreamRequest(url)) {
                 return url;
             }
 
             Uri uri = Uri.parse(url);
-            response.checkFirstPart = "1".equals(uri.getQueryParameter("ump"));
+            if ("1".equals(uri.getQueryParameter("ump"))) {
+                response.reader = new SabrResponseReader();
+            }
             if (!priorityDataSource) {
                 return url;
             }
@@ -815,7 +804,7 @@ public class SpoofVideoStreamsPatch {
      */
     public static void onStreamResponseReadStart(ByteBuffer buffer) {
         StreamResponse response = Objects.requireNonNull(streamResponseOnThread.get());
-        if (response.checkFirstPart) {
+        if (response.reader != null) {
             response.readStart = buffer.position();
         }
     }
@@ -823,20 +812,26 @@ public class SpoofVideoStreamsPatch {
     /**
      * Injection point.
      * Called after the response of a network request is read into the buffer.
-     * The server can answer a plain stream range with only a SABR error and no media, for seconds
-     * or minutes. The app ignores the error, finds no media, and requests the same range again right
-     * away, over and over, which freezes playback.
+     * A media host can send a request policy before reporting a SABR error. Music treats that
+     * response as the end of the song unless the data source reports the error to the player.
      */
     public static void onStreamResponseRead(ByteBuffer buffer) {
         StreamResponse response = Objects.requireNonNull(streamResponseOnThread.get());
-        if (!response.checkFirstPart || buffer.position() <= response.readStart) {
+        SabrResponseReader reader = response.reader;
+        if (reader == null || buffer.position() <= response.readStart) {
             return;
         }
 
-        response.checkFirstPart = false;
-        // A part type below 128 is a single byte.
-        if (buffer.get(response.readStart) == UMP_PART_SABR_ERROR) {
-            response.sabrError = true;
+        ByteBuffer chunk = buffer.duplicate();
+        chunk.limit(buffer.position());
+        chunk.position(response.readStart);
+        try {
+            reader.read(chunk);
+        } catch (IllegalStateException ex) {
+            if (!reader.sawSabrError()) {
+                response.reader = null;
+            }
+            Logger.printInfo(() -> "Could not read media response", ex);
         }
     }
 
@@ -849,11 +844,11 @@ public class SpoofVideoStreamsPatch {
      */
     public static boolean isStreamSabrErrorResponse() {
         StreamResponse response = Objects.requireNonNull(streamResponseOnThread.get());
-        if (!response.sabrError) {
+        if (response.reader == null || !response.reader.sawSabrError()) {
             return false;
         }
 
-        response.sabrError = false;
+        response.reader = null;
         Logger.printDebug(() -> "Stream response is a SABR error, failing it so the range is requested from a fallback host");
         return true;
     }

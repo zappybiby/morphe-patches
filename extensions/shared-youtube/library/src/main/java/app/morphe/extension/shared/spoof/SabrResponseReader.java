@@ -44,6 +44,7 @@ public final class SabrResponseReader {
     }
 
     private static final int PART_MEDIA = 21;
+    private static final int PART_SABR_ERROR = 44;
     private static final int PART_STREAM_PROTECTION_STATUS = 58;
     private static final int MAX_COPIED_PART_SIZE = 1024;
 
@@ -73,6 +74,7 @@ public final class SabrResponseReader {
     private byte[] copiedPart;
     private int copiedPartLength;
     private volatile boolean sawMedia;
+    private boolean sawSabrError;
 
     public SabrResponseReader() {
         this(null);
@@ -115,6 +117,10 @@ public final class SabrResponseReader {
         return sawMedia;
     }
 
+    public boolean sawSabrError() {
+        return sawSabrError;
+    }
+
     private boolean isListenedPart(long type) {
         for (int listenedType : listenedPartTypes) {
             if (listenedType == type) {
@@ -137,6 +143,9 @@ public final class SabrResponseReader {
                 final int typeStart = headerLength == 0 ? buffer.position() : -1;
                 if ((partType = readInteger(buffer)) < 0) {
                     break;
+                }
+                if (partType == PART_SABR_ERROR) {
+                    sawSabrError = true;
                 }
                 // The type is changed in place only if it is one byte, so the part keeps its size.
                 partTypeStart = typeStart >= 0 && buffer.position() - typeStart == 1 ? typeStart : -1;

@@ -26,8 +26,6 @@ internal object DownloadReadFingerprint : Fingerprint(
     returnType = "V",
     parameters = listOf("L", "J", "J", "L", "Ljava/lang/String;", "L", "L"),
     filters = listOf(
-        // On early EOF while writing a cache entry, Music saves the current byte offset as "exo_len".
-        // A retry stops there without fetching the rest. DataSpec.length still holds the requested range length.
         fieldAccess(opcode = Opcode.IGET_WIDE, type = "J"),
         methodCall(opcode = Opcode.INVOKE_INTERFACE, parameters = listOf("L"), returnType = "J"),
         fieldAccess(opcode = Opcode.IGET_BOOLEAN, definingClass = "this", type = "Z"),
@@ -38,7 +36,30 @@ internal object DownloadReadFingerprint : Fingerprint(
             location = MatchAfterWithin(4)
         ),
         opcode(Opcode.IF_LTZ, location = MatchAfterWithin(2)),
-        opcode(Opcode.ADD_LONG, location = MatchAfterWithin(3))
+        opcode(Opcode.ADD_LONG, location = MatchAfterWithin(3)),
+        fieldAccess(opcode = Opcode.IGET_OBJECT, type = "Ljava/lang/String;"),
+        fieldAccess(opcode = Opcode.IGET_OBJECT, definingClass = "this", location = MatchAfterWithin(3)),
+        methodCall(
+            parameters = listOf("Ljava/lang/String;"),
+            returnType = "Ljava/util/NavigableSet;",
+            location = MatchAfterImmediately()
+        )
+    )
+)
+
+internal fun downloadCacheMetadataFingerprint(cacheType: String) = Fingerprint(
+    returnType = "V",
+    parameters = listOf("Z"),
+    filters = listOf(
+        string("exo_redir"),
+        fieldAccess(opcode = Opcode.IGET_OBJECT),
+        methodCall(smali = "Ljava/util/List;->add(Ljava/lang/Object;)Z"),
+        methodCall(
+            opcode = Opcode.INVOKE_INTERFACE,
+            definingClass = cacheType,
+            parameters = listOf("Ljava/lang/String;", "L"),
+            returnType = "V"
+        )
     )
 )
 
