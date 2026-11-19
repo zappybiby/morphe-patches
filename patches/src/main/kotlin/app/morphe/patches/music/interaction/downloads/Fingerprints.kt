@@ -22,6 +22,15 @@ import app.morphe.patches.music.layout.hide.flyoutmenu.MenuItemFingerprint
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 
+internal object DownloadEncryptionKeyFingerprint : Fingerprint(
+    parameters = listOf("Landroid/content/SharedPreferences;"),
+    returnType = "Ljava/security/Key;",
+    filters = listOf(
+        string("downloads_encryption_key"),
+        methodCall(smali = "Landroid/content/SharedPreferences\$Editor;->apply()V")
+    )
+)
+
 internal object MusicOfflineVideoEndpointFingerprint : Fingerprint(
     accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.FINAL),
     returnType = "V",

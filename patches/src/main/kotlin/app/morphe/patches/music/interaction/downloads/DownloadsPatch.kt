@@ -13,6 +13,7 @@ package app.morphe.patches.music.interaction.downloads
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
+import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.patch.PatchException
 import app.morphe.patcher.patch.patch
 import app.morphe.patcher.util.cloneParameters
@@ -123,6 +124,17 @@ val downloadsPatch = patch(
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
 
     execute {
+        DownloadEncryptionKeyFingerprint.let {
+            val (key, apply) = it.instructionMatches
+            val keyRegister = key.instruction.registersUsed.first()
+            val editorRegister = apply.instruction.registersUsed.first()
+            it.method.replaceInstruction(
+                apply.index,
+                "invoke-static { p1, v$keyRegister, v$editorRegister }, " +
+                    "$EXTENSION_CLASS->saveDownloadKey(Landroid/content/SharedPreferences;Ljava/lang/String;Landroid/content/SharedPreferences\$Editor;)V"
+            )
+        }
+
         // Captures the localized download button label from Litho text creation.
         hookSpannableStringResult(EXTENSION_CLASS)
 

@@ -9,6 +9,7 @@
 package app.morphe.extension.music.patches;
 
 import android.app.Activity;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.util.Base64;
 import android.view.View;
@@ -44,6 +45,19 @@ import app.morphe.extension.shared.settings.preference.ExternalDownloaderPrefere
 
 @SuppressWarnings("unused")
 public final class DownloadsPatch extends BaseInAppDownloadsPatch {
+
+    /** Keep the first key if the cache reader and writer initialize it concurrently. */
+    public static void saveDownloadKey(SharedPreferences prefs, String key, SharedPreferences.Editor editor) {
+        if (!isInAppDownloadMode()) {
+            editor.apply();
+            return;
+        }
+        synchronized (prefs) {
+            if (!prefs.contains(key)) {
+                editor.apply();
+            }
+        }
+    }
 
     private static final String ELEMENTS_SENDER_VIEW =
             "com.google.android.libraries.youtube.rendering.elements.sender_view";
