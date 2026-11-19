@@ -103,18 +103,13 @@ public class SpoofVideoStreamsPatch {
      */
     private static final ThreadLocal<Boolean> streamRangeLimitedOnThread = ThreadLocal.withInitial(() -> false);
 
-    /**
-     * Response of the last plain stream request built on the thread. A request is built and read on the same thread.
-     */
     private static final class StreamResponse {
         @Nullable
         SabrResponseReader reader;
-        /**
-         * Position of the buffer when the current read of the response started.
-         */
         int readStart;
     }
 
+    // The data source builds the request and reads its response on the same thread.
     private static final ThreadLocal<StreamResponse> streamResponseOnThread = ThreadLocal.withInitial(StreamResponse::new);
 
     /**
@@ -698,34 +693,18 @@ public class SpoofVideoStreamsPatch {
         }
     }
 
-    /**
-     * Injection point.
-     * <p>
-     * Called when a priority data source opens the data source it wraps, which builds its request on the same thread.
-     * Only saved videos are transferred through a priority data source.
-     */
+    // Only downloads open requests through the priority data source.
     public static void onPriorityDataSourceOpen() {
         priorityDataSourceOpenOnThread.set(true);
     }
 
     /**
-     * Injection point.
-     * <p>
-     * Called for every network request the app makes, when the request is built.
-     * Saving a video requests the rest of a stream with a single range, but the server sends a large range
-     * at about playback speed. The range is shortened, and {@link #isLimitedStreamRangeFinished(long)}
-     * makes the app request the following range after this one ends.
-     * Only ranges opened by {@link #onPriorityDataSourceOpen()} are shortened. Playback takes the pause
-     * of a transfer as an error of the stream.
-     * Ranges without an end are left as they are, because the app reads those until the stream ends.
-     *
-     * @param url Url of the request.
-     * @return The url to request.
+     * The server throttles large ranges to playback speed. The downloader resumes after each
+     * capped range. Playback treats the same interruption as a stream error.
      */
     @Nullable
     public static String limitPlainStreamRange(@Nullable String url) {
         try {
-            // A request is built and read on the same thread.
             final boolean priorityDataSource = Boolean.TRUE.equals(priorityDataSourceOpenOnThread.get());
             priorityDataSourceOpenOnThread.set(false);
             streamRangeLimitedOnThread.set(false);
@@ -777,17 +756,7 @@ public class SpoofVideoStreamsPatch {
         }
     }
 
-    /**
-     * Injection point.
-     * <p>
-     * Called when the response of a network request is read.
-     * A response of a shortened range ends before the requested range does, and the app takes that
-     * as the end of the stream. If this is true, the app pauses the transfer instead, and continues it
-     * from the last byte it got.
-     *
-     * @param remainingBytes Bytes of the response that are not read yet.
-     * @return If the response of a shortened range has ended, and the rest of the range must be requested.
-     */
+    // Music treats EOF on a capped range as the end of the file. A priority pause resumes at the next byte.
     public static boolean isLimitedStreamRangeFinished(long remainingBytes) {
         if (remainingBytes != 0 || !Boolean.TRUE.equals(streamRangeLimitedOnThread.get())) {
             return false;
@@ -798,10 +767,6 @@ public class SpoofVideoStreamsPatch {
         return true;
     }
 
-    /**
-     * Injection point.
-     * Called before the response of a network request is read into the buffer.
-     */
     public static void onStreamResponseReadStart(ByteBuffer buffer) {
         StreamResponse response = Objects.requireNonNull(streamResponseOnThread.get());
         if (response.reader != null) {
@@ -809,12 +774,6 @@ public class SpoofVideoStreamsPatch {
         }
     }
 
-    /**
-     * Injection point.
-     * Called after the response of a network request is read into the buffer.
-     * A media host can send a request policy before reporting a SABR error. Music treats that
-     * response as the end of the song unless the data source reports the error to the player.
-     */
     public static void onStreamResponseRead(ByteBuffer buffer) {
         StreamResponse response = Objects.requireNonNull(streamResponseOnThread.get());
         SabrResponseReader reader = response.reader;
@@ -822,11 +781,9 @@ public class SpoofVideoStreamsPatch {
             return;
         }
 
-        ByteBuffer chunk = buffer.duplicate();
-        chunk.limit(buffer.position());
-        chunk.position(response.readStart);
         try {
-            reader.read(chunk);
+            // Checking only the first response byte misses SABR_ERROR after NEXT_REQUEST_POLICY.
+            reader.read(buffer, response.readStart, buffer.position());
         } catch (IllegalStateException ex) {
             if (!reader.sawSabrError()) {
                 response.reader = null;
@@ -835,13 +792,6 @@ public class SpoofVideoStreamsPatch {
         }
     }
 
-    /**
-     * Injection point.
-     * Called when the response of a network request is read.
-     *
-     * @return If the response is a SABR error, and must fail like a response with a server error status.
-     *         The app then requests the range again from a fallback host.
-     */
     public static boolean isStreamSabrErrorResponse() {
         StreamResponse response = Objects.requireNonNull(streamResponseOnThread.get());
         if (response.reader == null || !response.reader.sawSabrError()) {

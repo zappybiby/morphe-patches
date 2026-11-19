@@ -387,10 +387,7 @@ internal fun spoofVideoStreamsPatch(
 
         // endregion
 
-        // region Request plain streams of other clients as GET requests with a short range.
-        // Streams of other clients are plain urls, which the server rejects or sends slowly if they are
-        // requested like the streams of the app, with a POST body. Saving a video also requests a large
-        // range, which the server sends at about playback speed.
+        // region Plain stream requests.
 
         CronetUrlRequestBuildFingerprint.let {
             val fields = it.classDef.fields
@@ -400,7 +397,6 @@ internal fun spoofVideoStreamsPatch(
             val uploadField = fields.first { field -> field.type == "Lorg/chromium/net/UploadDataProvider;" }
             val httpMethodField = CronetUrlRequestSetHttpMethodFingerprint.instructionMatches.first().fieldReference
 
-            // Insert before the hook at the start of the method, which moves the index of the call.
             val createRequest = it.instructionMatches.last()
             val urlRegister = createRequest.instruction.registersUsed[1]
             it.method.addInstructions(
@@ -411,6 +407,7 @@ internal fun spoofVideoStreamsPatch(
                 """
             )
 
+            // Plain stream URLs from a spoofed client expect a GET without the app's POST body.
             it.method.addInstructionsWithLabels(
                 0,
                 """
@@ -429,9 +426,6 @@ internal fun spoofVideoStreamsPatch(
             )
         }
 
-        // Only the ranges of saved videos are shortened. A saved video is transferred through a priority
-        // data source, which continues from the last byte it got after the transfer is paused. Playback
-        // takes the pause as an error of the stream.
         PriorityDataSourceOpenFingerprint.let {
             it.method.addInstruction(
                 it.instructionMatches.last().index,
@@ -439,15 +433,6 @@ internal fun spoofVideoStreamsPatch(
             )
         }
 
-        // A response with a shortened range ends before the requested range does. The app takes that
-        // as the end of the stream, and a saved video would end there. Instead, the transfer is paused
-        // like for a task of a higher priority, and the saved video continues from the last byte it got.
-        // The response ends when its remaining byte count is zero, or when it is finished.
-        //
-        // The server can also answer a range with only a SABR error and no media. The app finds no media
-        // and requests the same range again right away, over and over, until the server sends it, which
-        // freezes playback for seconds or minutes. Instead, the response fails like a response with a
-        // server error status, and the app requests the range from a fallback host.
         CronetDataSourceReadFingerprint.let {
             val remainingBytesField = it.instructionMatches.last().fieldReference
             val pauseExceptionType = PriorityTooLowExceptionFingerprint.method.definingClass
@@ -455,6 +440,7 @@ internal fun spoofVideoStreamsPatch(
             val dataSpecType = it.instructionMatches[1].methodReference.parameterTypes[1]
             val dataSpecField = it.classDef.fields.first { field -> field.type == dataSpecType }
 
+            // Reporting a SABR error as HTTP 503 lets the host selector record which media host failed.
             val helperMethod = ImmutableMethod(
                 it.classDef.type,
                 "patch_checkStreamResponse",
@@ -495,12 +481,9 @@ internal fun spoofVideoStreamsPatch(
             }
             it.classDef.methods.add(helperMethod)
 
-            // The response is read into a byte array or a buffer, with the index of the match that reads
-            // the next part of the response. The buffer read is found with the byte array read, so it is
-            // matched first, before the byte array read is changed.
+            // The buffer overload's fingerprint depends on the original byte-array overload.
             listOf(CronetDataSourceReadBufferFingerprint to 0, it to 1).forEach { (read, readMatchIndex) ->
-                // Insert after the remaining byte count is cleared, before the hooks of the read
-                // and the hook at the start of the method.
+                // A finished response can return EOF here without another read.
                 read.method.addInstruction(
                     read.instructionMatches.last().index + 1,
                     "invoke-static/range { p0 .. p0 }, $helperMethod"

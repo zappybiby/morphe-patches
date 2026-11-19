@@ -18,6 +18,8 @@ import androidx.annotation.Nullable;
 
 import com.google.protobuf.MessageLite;
 
+import java.io.EOFException;
+import java.net.HttpURLConnection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -91,8 +93,36 @@ public final class DownloadsPatch extends BaseInAppDownloadsPatch {
     private static final ByteArrayFilterGroup MENU_COMMAND =
             new ByteArrayFilterGroup(null, "panel_header.", "tile_button_carousel.");
 
-    public static boolean isShortDownload(long requested, long bytesRead) {
-        return bytesRead < requested && isInAppDownloadMode();
+    public interface DownloadTransfer {
+        boolean patch_isCancelled();
+        void patch_clearContentLength(String key);
+    }
+
+    public interface DownloadRequest {
+        long patch_getLength();
+        String patch_getCacheKey();
+    }
+
+    public interface HttpError {
+        int patch_getResponseCode();
+    }
+
+    public static boolean shouldRetryDownload(DownloadTransfer transfer, DownloadRequest request,
+                                              long bytesRead, @Nullable Throwable failure, boolean retried) throws Throwable {
+        // Reopening the same source after a 503 lets Music select its fallback host.
+        final boolean unavailable = failure instanceof HttpError error
+                && error.patch_getResponseCode() == HttpURLConnection.HTTP_UNAVAILABLE;
+        if ((failure == null || unavailable) && bytesRead < request.patch_getLength() && isInAppDownloadMode()) {
+            if (transfer.patch_isCancelled()) return false;
+            if (failure == null) {
+                // Music records the short read as the file length. A retry at that offset would immediately hit EOF.
+                transfer.patch_clearContentLength(request.patch_getCacheKey());
+            }
+            if (!retried) return true;
+            if (failure == null) throw new EOFException();
+        }
+        if (failure != null) throw failure;
+        return false;
     }
 
     /**

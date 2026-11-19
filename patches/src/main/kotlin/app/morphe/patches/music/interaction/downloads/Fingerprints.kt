@@ -19,17 +19,22 @@ import app.morphe.patcher.resource.ResourceType
 import app.morphe.patcher.resourceLiteral
 import app.morphe.patcher.string
 import app.morphe.patches.music.layout.hide.flyoutmenu.MenuItemFingerprint
+import app.morphe.patches.shared.misc.spoof.PriorityDataSourceOpenFingerprint
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
+
+private val dataSourceOpen
+    get() = PriorityDataSourceOpenFingerprint.instructionMatches.last().methodReference
 
 internal object DownloadReadFingerprint : Fingerprint(
     returnType = "V",
     parameters = listOf("L", "J", "J", "L", "Ljava/lang/String;", "L", "L"),
     filters = listOf(
-        fieldAccess(opcode = Opcode.IGET_WIDE, type = "J"),
-        methodCall(opcode = Opcode.INVOKE_INTERFACE, parameters = listOf("L"), returnType = "J"),
+        fieldAccess(opcode = Opcode.IGET_WIDE, definingClass = { dataSourceOpen.parameterTypes.single() }, type = "J"),
+        methodCall(reference = { dataSourceOpen }),
         fieldAccess(opcode = Opcode.IGET_BOOLEAN, definingClass = "this", type = "Z"),
         methodCall(
+            definingClass = { dataSourceOpen.definingClass },
             opcode = Opcode.INVOKE_INTERFACE,
             parameters = listOf("[B", "I", "I"),
             returnType = "I",
@@ -37,7 +42,11 @@ internal object DownloadReadFingerprint : Fingerprint(
         ),
         opcode(Opcode.IF_LTZ, location = MatchAfterWithin(2)),
         opcode(Opcode.ADD_LONG, location = MatchAfterWithin(3)),
-        fieldAccess(opcode = Opcode.IGET_OBJECT, type = "Ljava/lang/String;"),
+        fieldAccess(
+            opcode = Opcode.IGET_OBJECT,
+            definingClass = { dataSourceOpen.parameterTypes.single() },
+            type = "Ljava/lang/String;"
+        ),
         fieldAccess(opcode = Opcode.IGET_OBJECT, definingClass = "this", location = MatchAfterWithin(3)),
         methodCall(
             parameters = listOf("Ljava/lang/String;"),
@@ -54,6 +63,7 @@ internal fun downloadCacheMetadataFingerprint(cacheType: String) = Fingerprint(
         string("exo_redir"),
         fieldAccess(opcode = Opcode.IGET_OBJECT),
         methodCall(smali = "Ljava/util/List;->add(Ljava/lang/Object;)Z"),
+        // Both cache implementations use exo_redir. Match the write to the cache the offline worker reads.
         methodCall(
             opcode = Opcode.INVOKE_INTERFACE,
             definingClass = cacheType,

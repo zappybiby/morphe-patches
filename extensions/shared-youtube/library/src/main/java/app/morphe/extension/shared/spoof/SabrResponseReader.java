@@ -133,9 +133,14 @@ public final class SabrResponseReader {
     /**
      * @return The status of the last status part completed in this chunk, or -1 if none was.
      */
-    public synchronized int read(ByteBuffer chunk) {
-        // A duplicate, so the position native code reads from is not changed.
+    public int read(ByteBuffer chunk) {
+        return read(chunk, chunk.position(), chunk.limit());
+    }
+
+    synchronized int read(ByteBuffer chunk, int start, int end) {
         ByteBuffer buffer = chunk.duplicate();
+        buffer.limit(end);
+        buffer.position(start);
         int status = -1;
         partTypeStart = -1;
         while (buffer.hasRemaining()) {
@@ -144,6 +149,7 @@ public final class SabrResponseReader {
                 if ((partType = readInteger(buffer)) < 0) {
                     break;
                 }
+                // A response ending at the SABR_ERROR type byte never reaches a payload listener.
                 if (partType == PART_SABR_ERROR) {
                     sawSabrError = true;
                 }
