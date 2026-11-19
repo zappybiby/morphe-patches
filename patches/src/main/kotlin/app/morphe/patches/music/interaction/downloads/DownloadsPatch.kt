@@ -10,6 +10,7 @@
 
 package app.morphe.patches.music.interaction.downloads
 
+import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
@@ -21,9 +22,9 @@ import app.morphe.patcher.util.cloneParameters
 import app.morphe.patcher.util.findFreeRegister
 import app.morphe.patcher.util.getReference
 import app.morphe.patcher.util.numberOfParameterRegistersLogical
-import app.morphe.patcher.util.proxy.mutableTypes.MutableField.Companion.toMutable
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patcher.util.registersUsed
+import app.morphe.patcher.util.smali.ExternalLabel
 import app.morphe.patches.music.misc.extension.sharedExtensionPatch
 import app.morphe.patches.music.misc.litho.filter.lithoFilterPatch
 import app.morphe.patches.music.misc.settings.PreferenceScreen
@@ -46,7 +47,6 @@ import app.morphe.patches.shared.misc.settings.preference.PreferenceScreenPrefer
 import app.morphe.patches.shared.misc.settings.preference.SwitchPreference
 import app.morphe.patches.shared.misc.settings.preference.TextPreference
 import app.morphe.patches.shared.misc.spoof.InvalidResponseCodeExceptionFingerprint
-import app.morphe.patches.shared.misc.spoof.PriorityDataSourceOpenFingerprint
 import app.morphe.patches.shared.misc.spoof.PriorityTooLowExceptionFingerprint
 import app.morphe.patches.shared.misc.textcomponent.hookSpannableStringResult
 import app.morphe.patches.shared.misc.textcomponent.textComponentPatch
@@ -56,17 +56,16 @@ import app.morphe.patches.youtube.interaction.downloads.playerResponseGetterFing
 import app.morphe.patches.youtube.interaction.downloads.playerResponseModelFromBytesFingerprint
 import app.morphe.util.addInstructionsAtControlFlowLabel
 import app.morphe.util.findInstructionIndicesReversedOrThrow
-import app.morphe.util.indexOfFirstInstructionOrThrow
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
+import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction21t
 import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
-import com.android.tools.smali.dexlib2.immutable.ImmutableField
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 
@@ -113,118 +112,111 @@ private val downloadsResourcePatch = patch {
 }
 
 private fun hookDownloadRead() = with(DownloadReadFingerprint) {
-    val length = instructionMatches.first().fieldReference
+    val (length, open, cancelled, read, eof) = instructionMatches
     val key = instructionMatches[6].fieldReference
     val cache = instructionMatches[7].fieldReference
     val metadata = downloadCacheMetadataFingerprint(cache.type).instructionMatches
     val removedKeys = metadata[1].fieldReference
-    val applyMetadata = metadata.last().methodReference
     val mutation = removedKeys.definingClass
-    val pause = PriorityTooLowExceptionFingerprint.method
     val httpError = InvalidResponseCodeExceptionFingerprint.classDef
     val status = httpError.instanceFields.single { it.type == "I" }
-    val prioritySource = PriorityDataSourceOpenFingerprint.classDef
-    // Music creates one priority data source per transfer and reuses it when resuming a range.
-    val retried = ImmutableField(
-        prioritySource.type, "patch_retriedDownload", "Z", AccessFlags.PUBLIC.value, null, null, null,
-    ).toMutable()
-    prioritySource.fields.add(retried)
 
-    val cancelled = instructionMatches[2]
-    val read = instructionMatches[3]
-    val readMethod = read.methodReference
-    val readDownload = ImmutableMethod(
-        classDef.type, "patch_readDownload",
-        listOf(prioritySource.type, "[B", "I", "I", length.definingClass, "J")
-            .map { ImmutableMethodParameter(it, null, null) },
-        "I", AccessFlags.PRIVATE.value, null, null, MutableMethodImplementation(14),
+    val prepareRetry = ImmutableMethod(
+        classDef.type, "patch_prepareDownloadRetry",
+        listOf(length.fieldReference.definingClass, "J", "Ljava/lang/Throwable;", "Z").map { ImmutableMethodParameter(it, null, null) },
+        "Z", AccessFlags.PRIVATE.value, null, null, MutableMethodImplementation(10),
     ).toMutable().apply {
-        // A 503 records a failure against the current host. Reopening the same source lets
-        // Music select its fallback host. Other HTTP errors retain their own recovery paths.
         addInstructionsWithLabels(0, """
-            invoke-interface { p1, p2, p3, p4 }, $readMethod
-            move-result v0
-            if-ltz v0, :eof
-            return v0
-
-            :eof
-            const/4 v0, 0x0
-            goto :check_length
-
-            :http_error
-            move-exception v0
-            iget v1, v0, $status
-            const/16 v2, 503
-            if-ne v1, v2, :throw_error
-
+            if-eqz p4, :check_length
+            instance-of v0, p4, ${httpError.type}
+            if-eqz v0, :throw_error
+            check-cast p4, ${httpError.type}
+            iget v0, p4, $status
+            const/16 v1, 503
+            if-ne v0, v1, :throw_error
             :check_length
-            iget-wide v1, p5, $length
-            invoke-static { v1, v2, p6, p7 }, $EXTENSION_CLASS->isShortDownload(JJ)Z
-            move-result v1
-            if-eqz v1, :original_result
-            iget-boolean v1, p0, ${cancelled.fieldReference}
-            if-nez v1, :end
-            if-nez v0, :resume
+            iget-wide v0, p1, ${length.fieldReference}
+            invoke-static { v0, v1, p2, p3 }, $EXTENSION_CLASS->isShortDownload(JJ)Z
+            move-result v0
+            if-eqz v0, :original_result
+            iget-boolean v0, p0, ${cancelled.fieldReference}
+            if-nez v0, :end
+            if-nez p4, :retry
 
-            # A short EOF records the current offset as the total length. Clearing just
-            # that metadata leaves the cached audio available for the next range request.
+            # The cache records a short EOF as the total length. Removing that length
+            # lets the next request continue from the last saved byte.
+            new-instance v0, $mutation
+            invoke-direct { v0 }, $mutation-><init>()V
+            iget-object v1, v0, $removedKeys
+            check-cast v1, Ljava/util/List;
+            const-string v2, "exo_len"
+            invoke-interface { v1, v2 }, Ljava/util/List;->add(Ljava/lang/Object;)Z
             iget-object v1, p0, $cache
-            iget-object v2, p5, $key
-            new-instance v3, $mutation
-            invoke-direct { v3 }, $mutation-><init>()V
-            iget-object v4, v3, $removedKeys
-            check-cast v4, Ljava/util/List;
-            const-string v5, "exo_len"
-            invoke-interface { v4, v5 }, Ljava/util/List;->add(Ljava/lang/Object;)Z
-            invoke-interface { v1, v2, v3 }, $applyMetadata
+            iget-object v2, p1, $key
+            invoke-interface { v1, v2, v0 }, ${metadata.last().methodReference}
 
-            :resume
-            iget-boolean v1, p1, $retried
-            if-nez v1, :exhausted
-            const/4 v1, 0x1
-            iput-boolean v1, p1, $retried
-            new-instance v0, ${pause.definingClass}
-            const/4 v1, 0x0
-            invoke-direct { v0, v1, v1 }, $pause
-            throw v0
-
-            :exhausted
-            if-nez v0, :throw_error
-            new-instance v0, Ljava/io/EOFException;
-            invoke-direct { v0 }, Ljava/io/EOFException;-><init>()V
+            :retry
+            if-eqz p5, :resume
+            if-nez p4, :throw_error
+            new-instance p4, Ljava/io/EOFException;
+            invoke-direct { p4 }, Ljava/io/EOFException;-><init>()V
             :throw_error
-            throw v0
-
+            throw p4
             :original_result
-            if-nez v0, :throw_error
+            if-nez p4, :throw_error
             :end
-            const/4 v0, -0x1
+            const/4 v0, 0x0
+            return v0
+            :resume
+            const/4 v0, 0x1
             return v0
         """)
-        val handler = indexOfFirstInstructionOrThrow { opcode == Opcode.MOVE_EXCEPTION }
-        implementation!!.apply {
-            addCatch(httpError.type, newLabelForIndex(0), newLabelForIndex(1), newLabelForIndex(handler))
-        }
     }
-    classDef.methods.add(readDownload)
+    classDef.methods.add(prepareRetry)
 
-    val downloader = cancelled.getInstruction<TwoRegisterInstruction>().registerB
-    val request = instructionMatches[1].getInstruction<FiveRegisterInstruction>().registerD
-    val bytesRead = instructionMatches[5].getInstruction<OneRegisterInstruction>().registerA
-    val call = read.getInstruction<FiveRegisterInstruction>()
     val first = method.implementation!!.registerCount
-    val (transfer, offset) = method.addFreeRegisters(8)
-    val index = read.index + offset
-    transfer.replaceInstruction(index, "invoke-direct/range { v$first .. v${first + 7} }, $readDownload")
-    transfer.addInstructionsAtControlFlowLabel(index, """
+    val error = first + 4
+    val retried = first + 5
+    val (transfer, offset) = method.addFreeRegisters(6)
+    val impl = transfer.implementation!!
+    val readIndex = read.index + offset
+    val readHandlers = impl.tryBlocks.filter { readIndex in it.start.location.index until it.end.location.index }
+    val pause = PriorityTooLowExceptionFingerprint.classDef.type
+    val resume = readHandlers.single { it.exceptionHandler.exceptionType == pause }.exceptionHandler.handler
+    val cleanup = readHandlers.single { it.exceptionHandler.exceptionType == null }.exceptionHandler.handler
+    val closeSource = impl.newLabelForIndex(cleanup.location.index)
+    val branchIndex = eof.index + offset
+    val branch = transfer.getInstruction<BuilderInstruction21t>(branchIndex)
+    val result = branch.registerA
+    val bytesRead = instructionMatches[5].instruction.registersUsed.first()
+    val request = open.getInstruction<FiveRegisterInstruction>().registerD
+    val downloader = cancelled.getInstruction<TwoRegisterInstruction>().registerB
+    val handler = impl.instructions.size
+
+    // The host selector records a 503 before the error reaches the downloader. Resuming
+    // the same source lets Music switch hosts without discarding the saved audio.
+    transfer.addInstructionsWithLabels(handler, """
+        move-exception v$error
+        goto :recover
+        :short_read
+        const/16 v$error, 0
+        :recover
         move-object/16 v$first, v$downloader
-        move-object/16 v${first + 1}, v${call.registerC}
-        move-object/16 v${first + 2}, v${call.registerD}
-        move/16 v${first + 3}, v${call.registerE}
-        move/16 v${first + 4}, v${call.registerF}
-        move-object/16 v${first + 5}, v$request
-        move-wide/16 v${first + 6}, v$bytesRead
-    """)
+        move-object/16 v${first + 1}, v$request
+        move-wide/16 v${first + 2}, v$bytesRead
+        invoke-direct/range { v$first .. v$retried }, $prepareRetry
+        move-result v$result
+        if-eqz v$result, :end
+        const/16 v$retried, 1
+        goto/16 :resume
+        :end
+        goto/16 :eof
+    """, ExternalLabel("resume", resume.location.instruction!!), ExternalLabel("eof", branch.target.location.instruction!!))
+    transfer.replaceInstruction(branchIndex, BuilderInstruction21t(Opcode.IF_LTZ, result, impl.newLabelForIndex(handler + 2)))
+    // Music closes the cache source in its catch-all when a read fails permanently.
+    cleanup.location = impl.instructions[handler].location
+    impl.addCatch(impl.newLabelForIndex(handler), impl.newLabelForIndex(impl.instructions.size), closeSource)
+    transfer.addInstruction(offset, "const/16 v$retried, 0")
 }
 
 val downloadsPatch = patch(
