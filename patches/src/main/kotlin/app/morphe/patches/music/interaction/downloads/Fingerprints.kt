@@ -26,7 +26,8 @@ internal object DownloadReadFingerprint : Fingerprint(
     returnType = "V",
     parameters = listOf("L", "J", "J", "L", "Ljava/lang/String;", "L", "L"),
     filters = listOf(
-        // A cached stream can open with fewer bytes than the current range requests.
+        // On early EOF while writing a cache entry, Music saves the current byte offset as "exo_len".
+        // A retry stops there without fetching the rest. DataSpec.length still holds the requested range length.
         fieldAccess(opcode = Opcode.IGET_WIDE, type = "J"),
         methodCall(opcode = Opcode.INVOKE_INTERFACE, parameters = listOf("L"), returnType = "J"),
         fieldAccess(opcode = Opcode.IGET_BOOLEAN, definingClass = "this", type = "Z"),
@@ -37,7 +38,7 @@ internal object DownloadReadFingerprint : Fingerprint(
             location = MatchAfterWithin(4)
         ),
         opcode(Opcode.IF_LTZ, location = MatchAfterWithin(2)),
-        opcode(Opcode.ADD_LONG, location = MatchAfterWithin(3)) // Bytes read from this range.
+        opcode(Opcode.ADD_LONG, location = MatchAfterWithin(3))
     )
 )
 

@@ -124,8 +124,9 @@ private fun hookDownloadRead() = with(DownloadReadFingerprint) {
     val (transfer, indexOffset) = method.addFreeRegisters(3)
     val eofIndex = eof.index + indexOffset
 
-    // A read can finish after cancellation. Keep that exit on the normal cleanup path.
-    // Check EOF inside the read's try block so a short download also closes the stream.
+    // The EOF jump target is outside the try block that closes the data source on error. Music checks
+    // cancellation before the blocking read. Throwing on a cancelled read skips the code
+    // after the loop that deletes cached spans when requested.
     transfer.addInstructionsWithLabels(eofIndex, """
         if-gez v$readResult, :count_bytes
         iget-boolean v$readResult, v$downloader, ${cancelled.fieldReference}

@@ -97,8 +97,10 @@ public final class DownloadsPatch extends BaseInAppDownloadsPatch {
     }
 
     /**
-     * Music credits the entire requested range when the download returns. An early end of stream
-     * can leave the song marked downloaded with only part of its audio in the cache.
+     * Morphe checks only the first UMP part of a plain stream for a SABR error. When the response
+     * contains only NEXT_REQUEST_POLICY followed by SABR_ERROR, Music's first audio read returns EOF.
+     * The transfer task then adds the format's declared length to its completed byte count and
+     * reports success for a stream that supplied no audio.
      */
     public static void checkDownloadLength(DownloadRequest request, long bytesRead) throws EOFException {
         long expected = request.patch_getLength();
