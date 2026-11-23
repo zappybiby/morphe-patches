@@ -137,7 +137,13 @@ public final class QueueSaveActions {
         return result.build();
     }
 
+    /**
+     * Expand the playlist edit to include the whole queue, even when an Elements command wraps it.
+     */
     static NavigationEndpoint bindCommand(NavigationEndpoint command, List<String> ids) {
+        if (!command.hasPlaylistEditEndpoint() && command.hasElementsCommand()) {
+            command = command.getElementsCommand().getInnertubeCommand();
+        }
         if (command.hasPlaylistEditEndpoint()) {
             var edit = command.getPlaylistEditEndpoint();
             var additions = new ArrayList<PlaylistEditAction>();
