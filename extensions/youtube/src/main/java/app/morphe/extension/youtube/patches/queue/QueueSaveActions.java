@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import app.morphe.extension.shared.Logger;
+import app.morphe.extension.shared.Utils;
 import app.morphe.extension.shared.innertube.queue.PlaylistQueueRenderer.AddToPlaylistEndpoint;
 import app.morphe.extension.shared.innertube.queue.PlaylistQueueRenderer.CreatePlaylistDialogEndpoint;
 import app.morphe.extension.shared.innertube.queue.PlaylistQueueRenderer.NavigationEndpoint;
@@ -30,6 +31,12 @@ public final class QueueSaveActions {
     public interface Picker {
         List<String> patch_getQueueSaveVideoIds();
         MessageLite patch_parseQueueSaveResponse(byte[] bytes);
+    }
+
+    private static final class QueueVideoMismatchException extends IllegalStateException {
+        QueueVideoMismatchException() {
+            super("The playlist edit contains different videos than the queue");
+        }
     }
 
     private QueueSaveActions() {
@@ -61,7 +68,15 @@ public final class QueueSaveActions {
             return picker.patch_parseQueueSaveResponse(bindResponse(
                     QueueSaveResponse.parseFrom(response.toByteArray()), ids).toByteArray());
         } catch (Exception ex) {
-            Logger.printException(() -> "onPickerResponse failure", ex);
+            // Keep the exception details in the log so the cause fits in the toast.
+            Logger.printInfo(() -> "Failed to prepare the queue save picker", ex);
+            if (ex instanceof QueueVideoMismatchException) {
+                Logger.printException(() -> "Queue videos don't match");
+            } else if (ex instanceof InvalidProtocolBufferException) {
+                Logger.printException(() -> "Unreadable playlist data");
+            } else {
+                Logger.printException(() -> "Couldn't open playlists");
+            }
 
             // An empty native response follows the original close/error path. Never
             // silently fall back to saving one video after a failed batch binding.
@@ -71,6 +86,8 @@ public final class QueueSaveActions {
 
     static QueueSaveResponse bindResponse(QueueSaveResponse response, List<String> ids) {
         var result = response.toBuilder();
+        int originalPlaylistCount = 0;
+        int remainingPlaylistCount = 0;
         for (int index = 0; index < response.getContentsCount(); index++) {
             var item = response.getContents(index);
             if (!item.hasAddToPlaylistRenderer()) {
@@ -78,7 +95,8 @@ public final class QueueSaveActions {
             }
             var renderer = item.getAddToPlaylistRenderer();
             var updated = renderer.toBuilder();
-            for (int row = 0; row < renderer.getPlaylistsCount(); row++) {
+            // Start at the bottom so removing a playlist doesn't move the ones we still need to check.
+            for (int row = renderer.getPlaylistsCount() - 1; row >= 0; row--) {
                 var destination = renderer.getPlaylists(row);
                 if (!destination.hasPlaylistAddToOptionRenderer()) {
                     continue;
@@ -96,7 +114,23 @@ public final class QueueSaveActions {
                     title = text.toString();
                 }
 
-                var add = bindCommand(option.getAddEndpoint(), ids).toBuilder()
+                var command = bindCommand(option.getAddEndpoint(), ids);
+                if (command == null) {
+                    String reason = title.isEmpty() ? "Morphe didn't recognize a playlist's save action."
+                            : "Morphe didn't recognize the save action for \"" + title + "\".";
+                    // The picker request contains only the first video. Keep YouTube's action for a single video.
+                    // For a longer queue, hide only this playlist to avoid a partial save.
+                    if (ids.size() > 1) {
+                        updated.removePlaylists(row);
+                        Logger.printInfo(() -> reason + " Hid this playlist to avoid saving only the first of "
+                                + ids.size() + " queued videos.");
+                    } else {
+                        Logger.printInfo(() -> reason + " Kept YouTube's action for the single queued video.");
+                    }
+                    continue;
+                }
+
+                var add = command.toBuilder()
                         .clearQueueSaveVideoIds().addAllQueueSaveVideoIds(ids).setQueueSavePlaylistTitle(title);
                 var updatedOption = option.toBuilder().setAddEndpoint(add);
                 if (ids.size() > 1) {
@@ -131,15 +165,22 @@ public final class QueueSaveActions {
                         .setButton(content.getButton().toBuilder().setButtonRenderer(updatedButton))));
             }
 
+            originalPlaylistCount += renderer.getPlaylistsCount();
+            remainingPlaylistCount += updated.getPlaylistsCount();
             result.setContents(index, item.toBuilder().setAddToPlaylistRenderer(updated));
         }
 
+        if (originalPlaylistCount > 0 && remainingPlaylistCount == 0) {
+            Utils.showToastShort(str("morphe_native_playlist_queue_no_save_destinations"));
+        }
         return result.build();
     }
 
     /**
      * Expand the playlist edit to include the whole queue, even when an Elements command wraps it.
+     * Return null for an unrecognized action so the rest of the picker can still open.
      */
+    @Nullable
     static NavigationEndpoint bindCommand(NavigationEndpoint command, List<String> ids) {
         if (!command.hasPlaylistEditEndpoint() && command.hasElementsCommand()) {
             command = command.getElementsCommand().getInnertubeCommand();
@@ -175,10 +216,10 @@ public final class QueueSaveActions {
             if (addedIds.equals(ids)) {
                 return command;
             }
-            throw new IllegalStateException("Native queue save did not supply the complete add selection");
+            throw new QueueVideoMismatchException();
         }
 
-        throw new IllegalStateException("Unrecognized native queue save destination command");
+        return null;
     }
 
     /** The native edit callback owns its selection; no process-wide pending save. */

@@ -16,10 +16,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 class QueueSaveBoundaryTest {
-    // This error callback logs through Android's Logger. Keep only that boundary isolated;
-    // happy-path mutations and wire formats are direct extension tests.
     @Test
-    fun `unsupported destination follows native error path instead of saving a partial queue`() {
+    fun `unsupported destination cannot save a partial queue`() {
         val root = generateSequence(File("").absoluteFile) { it.parentFile }
             .first { File(it, "extensions/youtube/src/main/proto").isDirectory }
         val output = createTempDirectory("playlist-queue-save").toFile()
@@ -30,12 +28,26 @@ class QueueSaveBoundaryTest {
             writeText("""
                 package app.morphe.extension.shared;
                 public class Logger {
+                    public static void printInfo(java.util.function.Supplier<String> message) {
+                        System.out.println(message.get());
+                    }
+                    public static void printInfo(java.util.function.Supplier<String> message, Exception error) {}
+                    public static void printException(java.util.function.Supplier<String> message) {}
                     public static void printException(java.util.function.Supplier<String> message, Throwable error) {}
                 }
             """.trimIndent())
         }
         val nullable = File(output, "Nullable.java").apply {
             writeText("package androidx.annotation; public @interface Nullable {}")
+        }
+        val utils = File(output, "Utils.java").apply {
+            writeText("""
+                package app.morphe.extension.shared;
+                public class Utils {
+                    public static final java.util.List<String> toasts = new java.util.ArrayList<>();
+                    public static void showToastShort(String message) { toasts.add(message); }
+                }
+            """.trimIndent())
         }
         val strings = File(output, "StringRef.java").apply {
             writeText("""
@@ -59,6 +71,7 @@ class QueueSaveBoundaryTest {
             writeText("""
                 package app.morphe.extension.youtube.patches.queue;
                 import java.util.*;
+                import app.morphe.extension.shared.Utils;
                 import app.morphe.extension.shared.innertube.queue.PlaylistQueueRenderer.*;
                 public class SaveFixture {
                     static class Picker implements QueueSaveActions.Picker {
@@ -78,8 +91,12 @@ class QueueSaveBoundaryTest {
                                 QueueSavePickerRenderer.newBuilder().addPlaylists(destination))).build();
                         var result = (QueueSaveResponse) QueueSaveActions.onPickerResponse(
                             new Picker(List.of("abcdefghijk", "lmnopqrstuv")), unsupported);
-                        if (result.getContentsCount() != 0) {
-                            throw new AssertionError("Failed batch binding must follow the empty native error path");
+                        if (result.getContentsCount() != 1 ||
+                                result.getContents(0).getAddToPlaylistRenderer().getPlaylistsCount() != 0) {
+                            throw new AssertionError("Only the unsupported playlist should be removed");
+                        }
+                        if (!Utils.toasts.equals(List.of("morphe_native_playlist_queue_no_save_destinations"))) {
+                            throw new AssertionError("Hiding the last playlist should show one toast");
                         }
                     }
                 }
@@ -90,7 +107,7 @@ class QueueSaveBoundaryTest {
                 "--release", "17", "-classpath", protobuf.path, "-d", output.path,
                 File(root, "extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/queue/QueueSaveActions.java").path,
                 File(generated, "IconOuterClass.java").path,
-                File(generated, "queue/PlaylistQueueRenderer.java").path, logger.path, nullable.path, strings.path, duration.path,
+                File(generated, "queue/PlaylistQueueRenderer.java").path, logger.path, nullable.path, utils.path, strings.path, duration.path,
                 File(root, "extensions/youtube/src/main/java/app/morphe/extension/youtube/patches/queue/QueueSaveFeedback.java").path, fixture.path))
             URLClassLoader(arrayOf(output.toURI().toURL()), GeneratedMessageLite::class.java.classLoader).use { loader ->
                 loader.loadClass("app.morphe.extension.youtube.patches.queue.SaveFixture")

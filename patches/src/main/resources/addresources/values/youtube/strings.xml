@@ -1034,6 +1034,7 @@ Info: May not work on live streams"</string>
     <string name="morphe_native_queue_fetch_on_scroll_summary">Loads more playlist videos when scrolling near the end of the queue</string>
     <string name="morphe_native_playlist_queue_saved">Playlist saved</string>
     <string name="morphe_native_playlist_queue_saved_to">Saved to %s</string>
+    <string name="morphe_native_playlist_queue_no_save_destinations">Can\'t save to existing playlists</string>
     <string name="morphe_native_playlist_queue_clear">Clear queue</string>
     <string name="morphe_native_playlist_queue_cleared">Queue cleared</string>
     <string name="morphe_native_playlist_queue_title">Queue</string>
