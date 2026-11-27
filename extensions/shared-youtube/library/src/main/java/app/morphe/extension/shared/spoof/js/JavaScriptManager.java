@@ -218,13 +218,9 @@ public final class JavaScriptManager {
     private static PlayerDataExtractor getPlayerDataExtractor() {
         synchronized (EXTRACTOR_LOCK) {
             if (cachedPlayerDataExtractor == null) {
-                String playerJs = getPlayerJs();
+                String playerJs = getPlayerJs(true);
                 if (isNotEmpty(playerJs)) {
                     cachedPlayerDataExtractor = new PlayerDataExtractor(playerJs, Objects.requireNonNull(cachedPlayerJsHash));
-                } else if (Utils.isNetworkConnected()) {
-                    Logger.printException(() -> "playerJs not found");
-                } else {
-                    Logger.printInfo(() -> "playerJs not found (network disconnected)");
                 }
             }
 
@@ -236,17 +232,13 @@ public final class JavaScriptManager {
     private static PlayerProgram getPlayerProgram() {
         synchronized (EXTRACTOR_LOCK) {
             if (cachedPlayerProgram == null) {
-                String playerJs = getPlayerJs();
+                String playerJs = getPlayerJs(true);
                 if (isNotEmpty(playerJs)) {
                     try {
                         cachedPlayerProgram = PlayerProgram.compile(playerJs, getFaradayPlayerHints());
                     } catch (Exception ex) {
                         Logger.printException(() -> "Failed to compile playerJs", ex);
                     }
-                } else if (Utils.isNetworkConnected()) {
-                    Logger.printException(() -> "playerJs not found");
-                } else {
-                    Logger.printInfo(() -> "playerJs not found (network disconnected)");
                 }
             }
 
@@ -332,14 +324,14 @@ public final class JavaScriptManager {
     }
 
     @Nullable
-    private static String getPlayerJs() {
+    private static String getPlayerJs(boolean reportDownloadFailure) {
         synchronized (PLAYER_JS_LOCK) {
-            return getPlayerJsLocked();
+            return getPlayerJsLocked(reportDownloadFailure);
         }
     }
 
     @Nullable
-    private static String getPlayerJsLocked() {
+    private static String getPlayerJsLocked(boolean reportDownloadFailure) {
         if (cachedPlayerJs == null) {
             String playerJsUrl = getPlayerJsUrl();
             if (isNotEmpty(playerJsUrl)) {
@@ -367,9 +359,15 @@ public final class JavaScriptManager {
                     saveToFile(cacheFile, playerJs);
                     Logger.printDebug(() -> "Saved Player js cache: " + cacheFileName);
                     deleteOtherPlayerJsFiles(cacheFile);
+                } else if (reportDownloadFailure) {
+                    if (Utils.isNetworkConnected()) {
+                        Logger.printException(() -> "playerJs not found");
+                    } else {
+                        Logger.printInfo(() -> "playerJs not found (network disconnected)");
+                    }
                 }
             } else {
-                Logger.printException(() -> "playerJsUrl not found");
+                Logger.printInfo(() -> "playerJsUrl not found");
             }
         }
 
@@ -403,7 +401,7 @@ public final class JavaScriptManager {
 
                         PLAYER_JS_SAVED_MILLISECONDS.save(currentTime);
                     } else {
-                        Logger.printException(() -> "iframeContent not found");
+                        Logger.printInfo(() -> "iframeContent not found");
                     }
                 }
             }
@@ -422,7 +420,7 @@ public final class JavaScriptManager {
     public static Integer getSignatureTimestamp() {
         if (cachedSignatureTimestamp == null) {
             try {
-                String playerJs = getPlayerJs();
+                String playerJs = getPlayerJs(false);
                 if (isNotEmpty(playerJs)) {
                     Matcher matcher = SIGNATURE_TIMESTAMP_PATTERN.matcher(playerJs);
                     if (matcher.find()) {
